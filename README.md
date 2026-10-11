@@ -23,12 +23,11 @@ A [RomM](https://romm.app) companion client for jailbroken PS5 consoles (etaHEN 
   - Check in the Settings, scroll the settings list, see if you find the X. This **hint** won't be here forever.
 
 ## Supported Emulators and Games
+- RommPS has built-in profiles for all known emulators on the PS5, and will set the correct default game, save/save state, and bios directories for them. Since there is a huge influx of new emulators popping up, I will be doing my very best to keep up with them and add profiles accordingly.
+- You can also manually set the directories for each emulator/platform via the PS5 app or or the Web UI.
 
-Technically, RomM Sync on both PS4 and PS5 will support **any** emulator as long as you map the game, save, and save state folders correctly during emulator setup. Most should just work, but some emulators/consoles may have weird formats, or Romm may not fully support all features. 
-
-As a general rule, Game library syncing will pretty much work with anything. Saves/States are the more complex side of things.
-
-### PS5 ###
+### Note
+- RommPS relies on your emulator **NOT** being sandboxed. Some emulators require a separate payload that must be launched to be able to access outside of the sandbox, so make sure you've followed their instructions to properly install. Sandboxed emulators will not be able to read games or save files.
 
 | Emulator | Systems | Game Downloads | Saves | Comments |
 | --- | --- | --- | --- | --- |
@@ -63,6 +62,9 @@ If you are interested in downloading PS4 and PS5 games from your RomM server, Ro
 - RomM 5.2.0 or newer (5.3.0 if you want to do shared memory card syncing instead of per-game)
 - RetroArch installed
 - Whichever other emulators you want
+
+## Web UI
+- RommPS exposes a separate Web UI at http://your-ps5-ip:8780 which allows you to access most of the features present in the web app, but can make things like sync profiled editing, and adding multiple downloads of games easier from your computer instead.
 
 ## Install
 
