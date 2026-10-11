@@ -1563,11 +1563,15 @@ static void *worker(void *arg) {
             LOGE("sync failed: %s", r.error);
             if (notify) plat_notify("RomM Sync: sync failed: %s", r.error);
         } else {
-            LOGI("sync done: %d up, %d down, %d conflicts, %d failed, %d states", r.uploaded,
-                 r.downloaded, r.conflicts, r.failed, r.states_up);
-            if (notify && (r.uploaded || r.downloaded || r.conflicts || r.failed))
-                plat_notify("RomM Sync: %d uploaded, %d downloaded%s", r.uploaded, r.downloaded,
+            /* Issue #10 - Added notification and log file for memory card operations. */
+            LOGI("sync done: %d up, %d down, %d conflicts, %d failed, %d states, %d cards", r.uploaded,
+                 r.downloaded, r.conflicts, r.failed, r.states_up, r.cards);
+            if (notify && (r.uploaded || r.downloaded || r.conflicts || r.failed || r.cards)) {
+                char cards[48] = "";
+                if (r.cards) snprintf(cards, sizeof cards, ", %d memory card%s backed up", r.cards, r.cards == 1 ? "" : "s");
+                plat_notify("RomM Sync: %d uploaded, %d downloaded%s%s", r.uploaded, r.downloaded, cards,
                             r.conflicts ? ", conflicts to resolve" : "");
+                }
         }
     }
     return NULL;
