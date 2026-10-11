@@ -125,10 +125,12 @@ The setup walks you through five steps:
 ## PS2 Memory Cards
 
 LRPS2 keeps every game on one shared memory card by default. RomM stores saves per game, so pick one of these during setup:
-
 - **One card per game.** Works with any RomM version. In RetroArch, open the LRPS2 core options and turn off _Shared Memory Cards_. After that, each game's card syncs like any other save. Saves already on the shared card stay there.
 - **Back up the shared card.** Needs RomM 5.3.0 or newer. The whole card is uploaded when it changes, and you can restore it from Settings in the web UI. It isn't merged with other devices.
 
+PS5SX2 used 2 shared memory cards in slots 1 and 2. While it does support per-game memory cards, they need to be specified in a per-game ini file. In 1.2.0, I plan on adding the ability to directly modify those .ini files in PS5SX2 to write the proper per-game memory card path, effectively making RommPS handle per-game memory cards for it gracefully. Until then, I suggest using whichever emulator fits your preferred method (PS5SX2 for shared mem cards or use LRPS2 in retroarch for per-game support). If you have both installed, RommPS will sync game and saves, but they will be separate and different saves (PS5SX2 will download your shared memory cards, LRPS2 will grab the memory card per game). I know...it's confusing, but this is just a side-effect of the boom in emulators being released.
+
+## Other "Memory Card" Consoles
 PSP, GameCube and Wii saves are synced as one zip per game, the same format other RomM clients use. Depending on the client, they may or may not support unzipping the saves (I don't truly know), but this client does!
 
 My opinion? One card per game is better since 8MB memory cards fill up quick.
