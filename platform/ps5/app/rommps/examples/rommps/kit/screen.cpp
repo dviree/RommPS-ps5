@@ -337,7 +337,7 @@ class RommPS final : public app::Concept
     {
         std::string label;
         bool enabled;
-        int kind; // 0 download, 1 cancel, 2 close
+        int kind; // 0 download, 1 cancel, 2 close, 3 remove
     };
 
     std::vector<SheetAction> sheet_actions() const
@@ -349,7 +349,7 @@ class RommPS final : public app::Concept
         if (d && d->active())
             actions.push_back({"Hold to cancel download", true, 1});
         else if (g && g->installed)
-            actions.push_back({"Downloaded", false, 0});
+            actions.push_back({"Hold to delete this game", true, 3});
         else if (p && p->profile.empty())
             actions.push_back({"No emulator for this platform", false, 0});
         else
@@ -398,6 +398,35 @@ class RommPS final : public app::Concept
         return job_id && job_id == cancel_job_ && cancel_hold_ > 0 ? std::min(1.0f, cancel_hold_ / kCancelHold) : 0.0f;
     }
 
+    bool hold_to_remove(const InputFrame &input, float dt, app::Feedback &feedback)
+    {
+        if (!input.is_held(Action::confirm))
+        {
+            remove_hold_ = -1;
+            return false;
+        }
+
+        if (input.is_pressed(Action::confirm))
+        {
+            remove_hold_ = 0; // every hold begins with a press
+            feedback.play(audio::Cue::tick, 1.0f, 0.0f, 0.5f);
+        }
+
+        if (remove_hold_ < 0)
+            return false; // was held from before or is already done
+
+        remove_hold_ += dt;
+
+        if (remove_hold_ < kCancelHold)
+            return false;
+
+        app_.remove_game(sheet_game_.id);
+        feedback.play(audio::Cue::back);
+        feedback.rumble(0.8f, 0.2f);
+        remove_hold_ = -1;
+        return true;
+    }
+
     void update_sheet(const InputFrame &input, float dt, app::Feedback &feedback)
     {
         const std::vector<SheetAction> actions = sheet_actions();
@@ -412,9 +441,16 @@ class RommPS final : public app::Concept
             }
         }
         action_ = std::clamp(action_, 0, count - 1);
+        if (actions[static_cast<std::size_t>(action_)].kind != 3)
+            remove_hold_ = -1;
         if (actions[static_cast<std::size_t>(action_)].kind == 1)
         {
             if (hold_to_cancel(input, dt, app_.download_for(sheet_game_.id), feedback))
+                sheet_open_ = false;
+        }
+        else if (actions[static_cast<std::size_t>(action_)].kind == 3)
+        {
+            if (hold_to_remove(input, dt, feedback))
                 sheet_open_ = false;
         }
         else if (input.is_pressed(Action::confirm))
@@ -815,6 +851,8 @@ class RommPS final : public app::Concept
                 if (const rommps::Download *d = app_.download_for(g->id))
                     if (const float hold = cancel_progress(d->id); hold > 0)
                         list.rounded_rect({ax, y, std::max(72.0f, 460 * hold), 72}, 36, L.danger.with_alpha(0.85f));
+            if (a.kind == 3 && focused && remove_hold_ > 0)
+                list.rounded_rect({ax, y, std::max(72.0f, 460 * std::min(1.0f, remove_hold_ / kCancelHold)), 72}, 36, L.danger.with_alpha(0.85f));
             ui::text(list, fonts.semibold, context_.fonts.semibold.font->fit(a.label, 26, 400), ax + 36, y + 46, 26,
                      (focused ? L.on_highlight : L.panel_text).with_alpha(a.enabled ? 1.0f : 0.5f));
         }
@@ -910,6 +948,7 @@ class RommPS final : public app::Concept
     tween::Spring action_position_;
     int download_row_ = 0;
     float cancel_hold_ = 0; // seconds Cross has been held to cancel cancel_job_; -1 once done
+    float remove_hold_ = -1; // seconds Cross has been held on remove; -1 waits for a press
     int cancel_job_ = 0;
     bool cancel_seen_ = false; // hold_to_cancel ran this frame
     tween::Spring download_position_;

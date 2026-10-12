@@ -967,7 +967,7 @@ function downloadRow(d) {
   else if (d.status === "cancelled") meta = '<span class="muted">Cancelled</span>';
   else if (d.status === "cancelling") meta = "Cancelling";
   else if (d.status === "queued") meta = "Queued";
-  else meta = fmtSize(d.done) + (d.total ? " of " + fmtSize(d.total) : "") + (d.speed > 0 ? ", " + fmtSize(d.speed) + "/s" + (d.total ? ", " + fmtEta((d.total - d.done) / d.speed) : "") : "");
+  else meta = (d.note ? esc(d.note) + ": " : "") + fmtSize(d.done) + (d.total ? " of " + fmtSize(d.total) : "") + (d.speed > 0 ? ", " + fmtSize(d.speed) + "/s" + (d.total ? ", " + fmtEta((d.total - d.done) / d.speed) : "") : "");
   return '<div class="dl-item"><div class="row"><div>' + (d.platform ? pill(d.platform) : "") + (d.type === "firmware" ? pill("BIOS", "off") : "") + "<b>" + esc(d.name) + "</b>" +
     '<div class="meta">' + meta + "</div></div>" + (active ? '<button class="small" data-cancel="' + d.id + '">Cancel</button>' : "") + "</div>" +
     (active || d.status === "cancelling" ? '<div class="bar"><i style="width:' + pct + '%"></i></div>' : "") + "</div>";

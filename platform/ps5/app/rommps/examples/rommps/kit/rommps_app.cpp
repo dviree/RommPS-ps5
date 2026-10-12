@@ -833,6 +833,23 @@ void App::cancel_download(int job_id)
     });
 }
 
+void App::remove_game(int rom_id)
+{
+    char body[64];
+    std::snprintf(body, sizeof body, "{\"rom_id\":%d}", rom_id);
+    api_.post("/api/delete", body, [this](const Response &r) {
+        if (!r.ok())
+        {
+            say("Couldn't remove the game: " + r.message());
+            return;
+        }
+        say("Game removed. Its saves are kept.");
+        lists_.clear();
+        refresh_installed();
+        refresh_downloads();
+    });
+}
+
 void App::sync_now()
 {
     api_.post("/api/sync", "{}", [this](const Response &r) {

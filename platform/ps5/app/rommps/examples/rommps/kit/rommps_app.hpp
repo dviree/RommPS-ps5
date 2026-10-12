@@ -245,6 +245,7 @@ class App
 
     void download(int rom_id, const std::string &name);
     void cancel_download(int job_id);
+    void remove_game(int rom_id);
     void clear_finished_downloads();
     void sync_now();
 

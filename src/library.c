@@ -36,6 +36,7 @@ typedef struct job {
     int64_t done, total;
     int64_t base; /* bytes from files already finished (multi-file games) */
     double speed; /* bytes/s, smoothed */
+    char note[80]; /* Running job updates this after a download. */
     double sample_t;
     int64_t sample_bytes;
     struct job *next;
@@ -320,7 +321,13 @@ static void run_rom_job(job *j) {
             path_join(other, sizeof other, x->rom_dir, fs_name);
             if (!strcmp(other, dest)) continue;
             mkdir_p(x->rom_dir);
-            if (link_or_copy(dest, other) == 0) {
+            pthread_mutex_lock(&g_q_lock);
+            snprintf(j->note, sizeof j->note, "Copying to %s", x->profile_name);
+            j->base = j->done = j->total = 0;
+            j->speed = 0;
+            j->sample_t = 0;
+            pthread_mutex_unlock(&g_q_lock);
+            if (link_or_copy_progress(dest, other, progress_cb, j) == 0) {
                 record_rom(j, rom, x, other, multi);
                 LOGI("also for %s: %s", x->profile_name, other);
             } else {
@@ -548,6 +555,20 @@ int library_delete_rom(int rom_id, char *err, int en) {
     }
     state_save();
     state_unlock();
+    if (removed) {
+        /* Can't leave a finished download in the downloads page if we removed that title. */
+        pthread_mutex_lock(&g_q_lock);
+        for (job **pp = &g_jobs; *pp;) {
+            job *dead = *pp;
+            if (dead->type == JOB_ROM && dead->target_id == rom_id && finished(dead)) {
+                *pp = dead->next;
+                free(dead);
+            } else {
+                pp = &dead->next;
+            }
+        }
+        pthread_mutex_unlock(&g_q_lock);
+    }
     if (!removed) snprintf(err, (size_t)en, "game is not on this console");
     return removed ? 0 : -1;
 }
@@ -568,6 +589,7 @@ cJSON *library_downloads(void) {
         cJSON_AddNumberToObject(o, "done", (double)j->done);
         cJSON_AddNumberToObject(o, "total", (double)j->total);
         cJSON_AddNumberToObject(o, "speed", j->status == JOB_RUNNING ? j->speed : 0);
+        cJSON_AddStringToObject(o, "note", j->status == JOB_RUNNING ? j->note : "");
         cJSON_AddItemToArray(arr, o);
     }
     pthread_mutex_unlock(&g_q_lock);
