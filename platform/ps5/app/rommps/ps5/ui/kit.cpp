@@ -132,6 +132,12 @@ hui::InputFrame Kit::scripted(const char *program, uint32_t frame) const
 			input.pressed |= hui::action_bit(hui::Action::page_next);
 		} else if (press.action == "l1") {
 			input.pressed |= hui::action_bit(hui::Action::page_prev);
+		} else if (press.action == "circle") {
+			input.pressed |= hui::action_bit(hui::Action::back);
+		} else if (press.action == "triangle") {
+			input.pressed |= hui::action_bit(hui::Action::north);
+		} else if (press.action == "square") {
+			input.pressed |= hui::action_bit(hui::Action::west);
 		}
 		input.held |= input.pressed;
 	}

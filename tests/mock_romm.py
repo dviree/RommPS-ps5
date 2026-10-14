@@ -58,6 +58,14 @@ DB = {
         14: {"id": 14, "platform_id": 1, "name": "Mega Test", "fs_name": "Mega Test (USA).md"},
         20: {"id": 20, "platform_id": 2, "name": "Okami", "fs_name": "Okami.iso"},
         21: {"id": 21, "platform_id": 2, "name": "Other", "fs_name": "Other.iso"},
+        22: {"id": 22, "platform_id": 2, "name": "Downhill Domination", "fs_name": "Downhill Domination (USA)",
+             "files": [{"id": 23, "file_name": "Downhill Domination (USA).iso",
+                        "content": b"ROM:Downhill Domination (USA).iso"}]},
+        25: {"id": 25, "platform_id": 2, "name": "War of the Monsters", "fs_name": "War of the Monsters (USA)",
+             "files": [{"id": 26, "file_name": "War of the Monsters (USA).cue",
+                        "content": b'FILE "War of the Monsters (USA).bin" BINARY\n'},
+                       {"id": 27, "file_name": "War of the Monsters (USA).bin",
+                        "content": b"ROM:War of the Monsters (USA).bin"}]},
         30: {"id": 30, "platform_id": 3, "name": "Crisis Core", "fs_name": "Crisis Core (USA).iso"},
         40: {"id": 40, "platform_id": 4, "name": "Wind Waker", "fs_name": "Wind Waker (USA).iso"},
         50: {"id": 50, "platform_id": 5, "name": "Test Quest", "fs_name": "Test Quest (USA).bin"},
@@ -87,14 +95,24 @@ def next_id():
 
 def rom_public(r):
     p = next(p for p in DB["platforms"] if p["id"] == r["platform_id"])
-    stem = r["fs_name"].rsplit(".", 1)[0]
+    stem = r["fs_name"].rsplit(".", 1)[0] if "." in r["fs_name"] else r["fs_name"]
+    cover = "/assets/romm/resources/roms/%d/%d/cover/small.png?ts=%s" % (
+        r["platform_id"], r["id"], DB["cover_ts"].get(r["id"], "2026-01-01 00:00:00"))
+    if r.get("files"):
+        files = [{"id": f["id"], "file_name": f["file_name"], "file_size_bytes": len(f["content"]),
+                  "category": f.get("category", "content")} for f in r["files"]]
+        return {**{k: v for k, v in r.items() if k != "files"}, "fs_name_no_ext": stem,
+                "fs_size_bytes": sum(f["file_size_bytes"] for f in files),
+                "platform_slug": p["slug"], "platform_fs_slug": p["fs_slug"],
+                "has_multiple_files": len(files) > 1, "files": files,
+                "md5_hash": hashlib.md5(b"".join(f["content"] for f in r["files"])).hexdigest(),
+                "path_cover_small": cover}
     content = ("ROM:" + r["fs_name"]).encode()
     return {**r, "fs_name_no_ext": stem, "fs_size_bytes": len(content), "platform_slug": p["slug"],
             "platform_fs_slug": p["fs_slug"], "has_multiple_files": False, "files": [],
             "md5_hash": hashlib.md5(content).hexdigest(),
             # Like RomM's: the cover's path carries a stamp that changes with it.
-            "path_cover_small": "/assets/romm/resources/roms/%d/%d/cover/small.png?ts=%s" % (
-                r["platform_id"], r["id"], DB["cover_ts"].get(r["id"], "2026-01-01 00:00:00"))}
+            "path_cover_small": cover}
 
 
 def save_public(s):
@@ -230,6 +248,12 @@ class H(BaseHTTPRequestHandler):
                 raw = base64.b64decode(b["content_b64"]) if "content_b64" in b else b["content"].encode()
                 s = new_save(b["rom_id"], b.get("slot"), b.get("emulator", "other-emu"), b.get("file_name", "x.srm"), raw)
                 return self.reply(200, save_public(s))
+            if p == "/_admin/rom" and method == "POST":  # e.g. a game RomM keeps as a folder holding one file
+                b = self.json_body()
+                for f in b.get("files", []):
+                    f["content"] = f["content"].encode()
+                DB["roms"][b["id"]] = b
+                return self.reply(200, rom_public(b))
             if p == "/_admin/state" and method == "POST":
                 b = self.json_body()
                 sid = next_id()
@@ -275,7 +299,25 @@ class H(BaseHTTPRequestHandler):
                 return self.reply(200, rom_public(DB["roms"][int(parts[2])]))
             if len(parts) == 5 and parts[:2] == ["api", "roms"] and parts[3] == "content":
                 r = DB["roms"][int(parts[2])]
+                if r.get("files"):
+                    if len(r["files"]) == 1:
+                        return self.reply(200, raw=r["files"][0]["content"], ctype="application/octet-stream")
+                    import io, zipfile
+                    buf = io.BytesIO()
+                    with zipfile.ZipFile(buf, "w") as zf:
+                        for f in r["files"]:
+                            zf.writestr(f["file_name"], f["content"])
+                        zf.writestr(r["fs_name"] + ".m3u",
+                                    "\n".join(f["file_name"] for f in r["files"]).encode())
+                    return self.reply(200, raw=buf.getvalue(), ctype="application/zip")
                 return self.reply(200, raw=("ROM:" + r["fs_name"]).encode(), ctype="application/octet-stream")
+            if len(parts) == 6 and parts[:2] == ["api", "roms"] and parts[3:5] == ["files", "content"]:
+                # One file of a folder rom, by its file id.
+                for r in DB["roms"].values():
+                    for f in r.get("files") or []:
+                        if f["id"] == int(parts[2]):
+                            return self.reply(200, raw=f["content"], ctype="application/octet-stream")
+                return self.reply(404, {"detail": "file not found"})
             if p == "/api/firmware":
                 pid = int(qs("platform_id", 0))
                 return self.reply(200, [{"id": f["id"], "file_name": f["file_name"], "file_size_bytes": len(f["content"])}

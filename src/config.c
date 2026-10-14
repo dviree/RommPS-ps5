@@ -54,6 +54,7 @@ static void set_defaults(void) {
     g_cfg.sync_on_game_exit = 1;
     g_cfg.sync_on_game_start = 1;
     g_cfg.sync_on_change = 1;
+    g_cfg.save_sync = 1;
     g_cfg.exit_delay_sec = 5;
     g_cfg.sync_states = 1;
     g_cfg.notify = 1;
@@ -65,7 +66,7 @@ static void set_defaults(void) {
     g_cfg.conflicts = CONFLICT_ASK;
     str_copy(g_cfg.slot, sizeof g_cfg.slot, "autosave");
     str_copy(g_cfg.ps2_cards, sizeof g_cfg.ps2_cards, "per_game");
-    str_copy(g_cfg.ui_theme, sizeof g_cfg.ui_theme, "classic");
+    str_copy(g_cfg.ui_theme, sizeof g_cfg.ui_theme, "acrylic");
 }
 
 void config_apply_json(const cJSON *j) {
@@ -80,6 +81,7 @@ void config_apply_json(const cJSON *j) {
     get_int(j, "sync_on_game_exit", &g_cfg.sync_on_game_exit);
     get_int(j, "sync_on_game_start", &g_cfg.sync_on_game_start);
     get_int(j, "sync_on_change", &g_cfg.sync_on_change);
+    get_int(j, "save_sync", &g_cfg.save_sync);
     get_int(j, "exit_delay_sec", &g_cfg.exit_delay_sec);
     get_int(j, "sync_states", &g_cfg.sync_states); /* older configs: true/false */
     char states[16] = "";
@@ -173,6 +175,7 @@ cJSON *config_to_json(int include_secrets) {
     cJSON_AddBoolToObject(j, "sync_on_game_exit", g_cfg.sync_on_game_exit);
     cJSON_AddBoolToObject(j, "sync_on_game_start", g_cfg.sync_on_game_start);
     cJSON_AddBoolToObject(j, "sync_on_change", g_cfg.sync_on_change);
+    cJSON_AddBoolToObject(j, "save_sync", g_cfg.save_sync);
     cJSON_AddNumberToObject(j, "exit_delay_sec", g_cfg.exit_delay_sec);
     cJSON_AddStringToObject(j, "states", g_cfg.sync_states == 2 ? "sync" : g_cfg.sync_states ? "upload" : "off");
     cJSON_AddBoolToObject(j, "notify", g_cfg.notify);

@@ -49,7 +49,8 @@ class Api {
     Api(const Api &) = delete;
     Api &operator=(const Api &) = delete;
 
-    void get(const std::string &path, Callback done);
+    // timeout_ms: how long to wait for the answer (most come in well under a second).
+    void get(const std::string &path, Callback done, int timeout_ms = 15000);
     void post(const std::string &path, const std::string &json_body, Callback done);
     // Runs the callbacks of finished requests. Call once per frame.
     void poll();
@@ -61,6 +62,7 @@ class Api {
         std::string method, path, body;
         Callback done;
         Response result;
+        int timeout_ms = 15000;
     };
     void worker();
 

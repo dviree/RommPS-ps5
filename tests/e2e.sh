@@ -8,7 +8,7 @@ MOCK_PORT=8899 WEB_PORT=8781
 API="http://127.0.0.1:${WEB_PORT}"
 trap 'kill $(jobs -p) 2>/dev/null || true; rm -rf "$T"' EXIT
 
-fail() { echo "FAIL: $*"; echo "--- daemon log"; tail -30 "$T/daemon.log"; exit 1; }
+fail() { echo "FAIL: $*"; echo "--- daemon log"; tail -80 "$T/daemon.log"; exit 1; }
 post() { curl -sf -X POST "$API$1" -d "${2:-{\}}"; }
 wait_sync() { # waits for the history length to reach $1
   for _ in $(seq 1 40); do
@@ -62,6 +62,12 @@ ROMM_SYNC_HOMEBREW="$T/homebrew" ROMM_SYNC_DATA="$T/data" ROMM_SYNC_AUTOSTART="$
   ROMM_SYNC_UPDATE_URL="http://127.0.0.1:$MOCK_PORT/_github/release" "$ROOT/build/host/romm-sync" >"$T/daemon.log" 2>&1 &
 sleep 6   # let the (unpaired, skipped) startup sync pass
 
+echo "web UI script parses"
+if command -v node >/dev/null; then
+    python3 -c "import re,sys; print('\n'.join(re.findall(r'<script>(.*?)</script>', open(sys.argv[1]).read(), re.S)))" "$ROOT/ui/index.html" > "$T/ui.js"
+    node --check "$T/ui.js" || fail "the web UI's script doesn't parse"
+fi
+
 echo "0. self-signed HTTPS needs certificate checks turned off"
 r=$(curl -s -X POST "$API/api/pair/start" -d "{\"server_url\":\"https://127.0.0.1:$TLS_PORT\"}")
 [[ "$r" == *"doesn't trust"* ]] || fail "untrusted certificate not reported: $r"
@@ -86,20 +92,41 @@ post /api/setup/finish '{"conflict_policy":"ask"}' >/dev/null
 wait_sync 1
 [[ "$(last reason)" == "first sync" && "$(last uploaded)" == 1 ]] || fail "expected the first sync to upload the local save"
 
-echo "2. game download, then its server save"
+echo "2. game download brings its server save along"
+curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/_admin/save" -d '{"rom_id":11,"slot":"autosave","file_name":"Super Metroid (USA).srm","content":"server-save"}' >/dev/null
 post /api/download '{"rom_id":11,"name":"Super Metroid"}' >/dev/null
 [[ "$(curl -sf "$API/api/downloads" | python3 -c "import json,sys; print([d['name'] for d in json.load(sys.stdin) if d.get('rom_id') == 11][-1])")" == "Super Metroid" ]] \
   || fail "a download must show its name from the start"
-sleep 1
+wait_sync 2
 [[ -f "$RA/roms/snes/Super Metroid (USA).sfc" ]] || fail "ROM not downloaded"
-curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/_admin/save" -d '{"rom_id":11,"slot":"autosave","file_name":"Super Metroid (USA).srm","content":"server-save"}' >/dev/null
-post /api/sync >/dev/null; wait_sync 2
+[[ "$(last reason)" == "game downloaded" ]] || fail "a finished download must sync the game's saves"
 [[ "$(cat "$RA/saves/Snes9x/Super Metroid (USA).srm")" == "server-save" ]] || fail "server save not downloaded"
+for _ in $(seq 1 20); do
+  dl=$(curl -sf "$API/api/downloads" | python3 -c "import json,sys; d=[d for d in json.load(sys.stdin) if d.get('rom_id') == 11][-1]; print(d['status'], d.get('saves'))")
+  [[ "$dl" == "done 1" ]] && break; sleep 0.25
+done
+[[ "$dl" == "done 1" ]] || fail "the download must end done, with the save it synced: $dl"
+
+echo "2b. folder roms: one iso per folder, and a cue+bin set"
+post /api/download '{"rom_id":22,"name":"Downhill Domination"}' >/dev/null
+post /api/download '{"rom_id":25,"name":"War of the Monsters"}' >/dev/null
+dl_wait() { # wait for a downloaded path to exist
+  for _ in $(seq 1 30); do [[ -e "$1" ]] && return 0; sleep 0.5; done; fail "not downloaded: $1"
+}
+D="$RA/roms/ps2/Downhill Domination (USA)"
+W="$RA/roms/ps2/War of the Monsters (USA)"
+dl_wait "$D/Downhill Domination (USA).iso"; dl_wait "$W/War of the Monsters (USA).cue"
+[[ -d "$D" && -d "$W" ]] || fail "a folder rom must land in a folder named after its fs_name"
+[[ "$(cat "$D/Downhill Domination (USA).iso")" == "ROM:Downhill Domination (USA).iso" ]] || fail "iso content wrong"
+[[ -f "$W/War of the Monsters (USA).bin" ]] || fail "cue's bin not downloaded"
+[[ "$(cat "$W/War of the Monsters (USA).bin")" == "ROM:War of the Monsters (USA).bin" ]] || fail "bin content wrong"
+[[ ! -f "$RA/roms/ps2/Downhill Domination (USA)" ]] || fail "folder rom written as a single extensionless file"
 
 ci=$(curl -sf "$API/api/roms?platform_id=1" | python3 -c "import json,sys; print(sorted(json.load(sys.stdin)['char_index'].items()))")
 [[ "$ci" == "[('c', 0), ('e', 1), ('m', 2), ('s', 3)]" ]] || fail "library char_index for the A-Z ribbon: $ci"
-inst=$(curl -sf "$API/api/installed" | python3 -c "import json,sys; print([(g['id'], g['name'], g['platform_id'] > 0) for g in json.load(sys.stdin)])")
-[[ "$inst" == "[(11, 'Super Metroid', True), (10, 'Chrono Trigger', True)]" ]] || fail "the games on this console, for the app: $inst"
+inst=$(curl -sf "$API/api/installed" | python3 -c "import json,sys; print(sorted([(g['id'], g['name'], g['platform_id'] > 0) for g in json.load(sys.stdin)]))")
+[[ "$inst" == "[(10, 'Chrono Trigger', True), (11, 'Super Metroid', True), (22, 'Downhill Domination', True), (25, 'War of the Monsters', True)]" ]] \
+  || fail "the games on this console, for the app: $inst"
 all=$(curl -sf "$API/api/roms?platform_id=0&search=metroid" | python3 -c "import json,sys; print([(g['name'], g['platform_id']) for g in json.load(sys.stdin)['items']])")
 [[ "$all" == "[('Super Metroid', 1)]" ]] || fail "a search across every platform: $all"
 
@@ -181,9 +208,43 @@ n=$(dump | python3 -c "import json,sys; print(sum(1 for x in json.load(sys.stdin
 
 echo "10. states download, save history and restore"
 post /api/config '{"states":"sync"}' >/dev/null
-curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/_admin/state" -d '{"rom_id":11,"file_name":"Super Metroid (USA).state1","content":"srv-state"}' >/dev/null
+curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/_admin/state" -d '{"rom_id":11,"emulator":"snes9x","file_name":"Super Metroid (USA).state1","content":"srv-state"}' >/dev/null
+# Made by another core (or with no emulator at all): no emulator here can load it.
+curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/_admin/state" -d '{"rom_id":11,"emulator":"bsnes","file_name":"Super Metroid (USA) [bsnes].state5","content":"other-core"}' >/dev/null
+curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/_admin/state" -d '{"rom_id":11,"file_name":"Super Metroid (USA) [unknown].state6","content":"no-emulator"}' >/dev/null
 syncnow
+! grep -rqs "other-core\|no-emulator" "$RA/states" || fail "a state from another core came down"
+grep -q "skipped: made by bsnes" "$T/daemon.log" || fail "a skipped state must say why"
 [[ "$(cat "$RA/states/Super Metroid (USA).state1" 2>/dev/null)" == "srv-state" ]] || fail "server state not downloaded"
+# Two web player states for one game: each gets its own file, and they don't
+# come down again on the next sync.
+for ts in "2026-10-14 01-00-00-000" "2026-10-14 01-00-05-000"; do
+  curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/_admin/state" -d "{\"rom_id\":11,\"emulator\":\"snes9x\",\"file_name\":\"Super Metroid (USA) [$ts].state\",\"content\":\"web-$ts\"}" >/dev/null
+done
+syncnow
+[[ "$(cat "$RA/states/Super Metroid (USA).state")" == "web-2026-10-14 01-00-00-000" ]] || fail "first web state should take slot 0"
+[[ "$(cat "$RA/states/Super Metroid (USA).state2")" == "web-2026-10-14 01-00-05-000" ]] || fail "second web state should take the next free slot"
+[[ "$(cat "$RA/states/Super Metroid (USA).state1")" == "srv-state" ]] || fail "a downloaded state replaced another one"
+syncnow
+[[ "$(last states_downloaded)" == 0 ]] || fail "states came down again: $(last states_downloaded)"
+# Saving over a state that came from elsewhere sends a new one; RomM's copy
+# of the web state stays as it was.
+echo "played-on-console" > "$RA/states/Super Metroid (USA).state"
+syncnow
+web=$(dump | python3 -c "import json,sys; print([s['file_name'] for s in json.load(sys.stdin)['states'] if s['rom_id']==11 and s['file_name'].endswith('.state')])")
+[[ "$web" == *"Super Metroid (USA) [2026-10-14 01-00-00-000].state"* && "$web" == *"Super Metroid (USA) [PlayStation 5].state"* ]] \
+  || fail "a state saved over a web state must go up as a new one: $web"
+orig=$(curl -sf "$API/api/history?rom_id=11" >/dev/null; dump | python3 -c "import json,sys; print([s['file_size_bytes'] for s in json.load(sys.stdin)['states'] if s['file_name']=='Super Metroid (USA) [2026-10-14 01-00-00-000].state'][0])")
+[[ "$orig" == 27 ]] || fail "the web state on RomM was changed (size $orig)"
+syncnow
+[[ "$(last states_downloaded)$(last states_uploaded)" == 00 ]] || fail "an uploaded state came back down or went up again"
+# The player's own slot is never taken by a state from elsewhere.
+echo "my-own-slot" > "$RA/states/Chrono Trigger (USA).state"
+syncnow
+curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/_admin/state" -d '{"rom_id":10,"emulator":"snes9x","file_name":"Chrono Trigger (USA) [2026-10-14 02-00-00-000].state","content":"web-ct"}' >/dev/null
+syncnow
+[[ "$(cat "$RA/states/Chrono Trigger (USA).state")" == "my-own-slot" ]] || fail "a web state replaced the player's own slot"
+[[ "$(cat "$RA/states/Chrono Trigger (USA).state1")" == "web-ct" ]] || fail "the web state should land in the next free slot"
 old=$(curl -sf "$API/api/history?rom_id=10" | python3 -c "import json,sys; s=sorted(json.load(sys.stdin)['saves'], key=lambda x: x['updated_at']); print(s[0]['id'])")
 want="$(curl -sf "http://127.0.0.1:$MOCK_PORT/_admin/save_content?id=$old")"
 post /api/restore "{\"kind\":\"save\",\"id\":$old}" >/dev/null || fail "restore failed"
@@ -239,6 +300,64 @@ syncnow
 [[ -f "$SD/ULUS10336GAMEDATA/BIG.BIN" ]] || fail "game data folder must be left alone"
 ls "$T/data/backups/30/" | grep -q "ULUS10336.zip" || fail "no backup of the PSP save"
 
+echo "12b. GameCube saves stay in the form RomM has them: one .gci, or a whole memory card"
+GC="python3 $ROOT/tests/gccard.py"
+admin_save() { # rom_id file_name path
+    python3 -c "import base64,json,sys; print(json.dumps({'rom_id':int(sys.argv[1]),'slot':'autosave','file_name':sys.argv[2],'content_b64':base64.b64encode(open(sys.argv[3],'rb').read()).decode()}))" "$1" "$2" "$3" > "$T/admin.json"
+    curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/_admin/save" -d @"$T/admin.json" >/dev/null
+}
+newest() { # rom_id: writes RomM's newest save for it to $T/newest, prints its name
+    dump | python3 -c "
+import json,sys,re
+s=sorted([x for x in json.load(sys.stdin)['saves'] if x['rom_id']==$1], key=lambda x: (x['updated_at'], x['id']))
+open('$T/newest','wb').write(s[-1]['content'].encode('latin1')); print(re.sub(r' \[[^]]*\]', '', s[-1]['file_name']))"; }
+blocks_md5() { python3 -c "import hashlib,sys; print(hashlib.md5(open(sys.argv[1],'rb').read()[0x40:]).hexdigest())" "$1"; }
+for g in "41 Sunshine GMSE01" "42 Melee GALE01"; do
+    set -- $g
+    curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/_admin/rom" -d "{\"id\":$1,\"platform_id\":4,\"name\":\"$2\",\"fs_name\":\"$2 (USA).iso\",\"files\":[]}" >/dev/null
+    python3 "$ROOT/tests/make_disc.py" gc "$RA/roms/ngc/$2 (USA).iso" "$3"
+done
+# One .gci on RomM (another app's): it comes down into the GCI folder, and goes back up as one .gci.
+$GC gci "$T/sms.gci" GMSE01 super_mario_sunshine 2 0x11
+admin_save 41 "01-GMSE-super_mario_sunshine.gci" "$T/sms.gci"
+syncnow
+cmp -s "$T/sms.gci" "$CARD/01-GMSE-super_mario_sunshine.gci" || fail "RomM's .gci must land in the GCI folder"
+syncnow
+[[ "$(last uploaded)" == 0 ]] || fail "an unchanged .gci must not go up again"
+sleep 1.1; $GC gci "$CARD/01-GMSE-super_mario_sunshine.gci" GMSE01 super_mario_sunshine 3 0x22
+syncnow
+[[ "$(newest 41)" == "01-GMSE-super_mario_sunshine.gci" ]] || fail "a .gci on RomM must go back up as a .gci: $(newest 41)"
+cmp -s "$T/newest" "$CARD/01-GMSE-super_mario_sunshine.gci" || fail "the .gci RomM got isn't this console's"
+# A whole card on RomM with Melee's save and another game's: Melee's comes
+# down; this console's change goes back onto RomM's card, the other save untouched.
+$GC blank "$T/cardA.raw" 64
+$GC gci "$T/melee.gci" GALE01 SuperSmashBros0110290334 3 0x33; $GC put "$T/cardA.raw" "$T/melee.gci"
+$GC gci "$T/other.gci" GXXE01 other_game 2 0x44; $GC put "$T/cardA.raw" "$T/other.gci"
+admin_save 42 "MemoryCardA.USA.raw" "$T/cardA.raw"
+syncnow
+cmp -s "$T/melee.gci" "$CARD/01-GALE-SuperSmashBros0110290334.gci" 2>/dev/null ||
+    [[ "$(blocks_md5 "$T/melee.gci")" == "$(blocks_md5 "$CARD/01-GALE-SuperSmashBros0110290334.gci" 2>/dev/null)" ]] || fail "Melee's save must come off RomM's card"
+[[ ! -e "$CARD/01-GXXE-other_game.gci" ]] || fail "only the game's own saves come off the card"
+syncnow
+[[ "$(last uploaded)" == 0 ]] || fail "an unchanged save must leave RomM's card alone"
+other_md5=$($GC saves "$T/cardA.raw" GXXE01)
+sleep 1.1; $GC gci "$CARD/01-GALE-SuperSmashBros0110290334.gci" GALE01 SuperSmashBros0110290334 4 0x55
+syncnow
+[[ "$(newest 42)" == "MemoryCardA.USA.raw" ]] || fail "a card on RomM must go back up as the card: $(newest 42)"
+dump | python3 -c "import json,sys; n=[x['file_name'] for x in json.load(sys.stdin)['saves'] if x['rom_id'] in (41,42)]; sys.exit(any(f.count('[') > 1 for f in n))" || fail "a name sent back must not pile up RomM's stamps"
+$GC check "$T/newest" || fail "the card sent to RomM must be one Dolphin reads"
+[[ "$($GC saves "$T/newest" GALE01 | cut -d' ' -f2)" == "$(blocks_md5 "$CARD/01-GALE-SuperSmashBros0110290334.gci")" ]] || fail "this console's Melee save must be on the card"
+[[ "$($GC saves "$T/newest" GXXE01)" == "$other_md5" ]] || fail "the card's other saves must stay as they were"
+# Another device changes the card: it comes down, and this console's file follows.
+cp "$T/newest" "$T/cardB.raw"; $GC gci "$T/melee2.gci" GALE01 SuperSmashBros0110290334 2 0x66; $GC put "$T/cardB.raw" "$T/melee2.gci"
+sleep 1.1; admin_save 42 "MemoryCardA.USA.raw" "$T/cardB.raw"
+syncnow
+[[ "$(blocks_md5 "$CARD/01-GALE-SuperSmashBros0110290334.gci")" == "$(blocks_md5 "$T/melee2.gci")" ]] || fail "a newer card on RomM must update the save here"
+ls "$T/data/backups/42/" 2>/dev/null | grep -q . || fail "no backup before the card's save replaced this console's"
+grep -q "Sunshine (USA).iso: RomM keeps its saves as gci (01-GMSE-super_mario_sunshine.gci)" "$T/daemon.log" &&
+    grep -q "Melee (USA).iso: RomM keeps its saves as card (MemoryCardA.USA.raw)" "$T/daemon.log" ||
+    fail "each game's form must be the one RomM has"
+
 echo "13. in-app update: only a correctly signed release installs"
 SIGN="$ROOT/build/host/release-sign"
 upd() { curl -sf "$API/api/update" | python3 -c "import json,sys; u=json.load(sys.stdin); print(u['$1'])"; }
@@ -279,11 +398,24 @@ cmp -s "$REL/romm-sync.elf" "$T/data/launched.elf" || fail "the new payload was 
 cmp -s "$REL/romm-sync.elf" "$T/etaHEN/payloads/romm-sync.elf" || fail "the installed payload was not replaced"
 [[ ! -e "$T/etaHEN/payloads/romm-sync.elf.bak" ]] || fail "the update left a .bak of the old payload behind"
 
-echo "14. diagnostics report leaves out the token"
-curl -sf "$API/api/diagnostics" > "$T/diag.txt" || fail "no diagnostics report"
-grep -q "RomM Sync diagnostics" "$T/diag.txt" || fail "diagnostics report is empty"
-tok="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['token'])" "$T/data/config.json")"
-[[ -n "$tok" ]] && ! grep -qF "$tok" "$T/diag.txt" || fail "the diagnostics report contains the token"
+echo "14. diagnostic bundle: the logs, nothing that names the person"
+echo "connecting to 10.0.16.84 from aa:bb:cc:dd:ee:ff, mail me@example.com, /user/home/1a2b3c4d/x, onlineId=SomePlayer99" >> "$T/data/romm-sync.log"
+curl -sf "$API/api/diagnostics" > "$T/diag.zip" || fail "no diagnostic bundle"
+python3 - "$T/diag.zip" "$T/data/config.json" <<'PY' || fail "diagnostic bundle"
+import json, sys, zipfile
+z = zipfile.ZipFile(sys.argv[1]); cfg = json.load(open(sys.argv[2]))
+names = z.namelist()
+for want in ("report.txt", "romm-sync.log", "sync-log.json", "emulators-found.json", "emulator-settings.json", "kernel.log"):
+    assert want in names, (want, names)
+assert "RommPS diagnostics" in z.read("report.txt").decode()
+text = "\n".join(z.read(n).decode("utf-8", "replace") for n in names)
+host = cfg["server_url"].split("://")[1].split("/")[0].split(":")[0]
+for secret in (cfg["token"], cfg["server_url"], host, cfg["device_id"], "10.0.16.84", "aa:bb:cc:dd:ee:ff", "me@example.com", "1a2b3c4d", "SomePlayer99"):
+    assert secret and secret not in text, secret
+assert "<ip>" in text and "<mac>" in text and "<email>" in text and "<server>" in text
+PY
+out=$(curl -sf -X POST "$API/api/diagnostics") || fail "saving a bundle refused"
+[[ -f "$(echo "$out" | python3 -c "import json,sys; print(json.load(sys.stdin)['path'])")" ]] || fail "the saved bundle isn't there: $out"
 
 echo "15. one emulator per system when several play it"
 kinds=$(curl -sf "$API/api/setup/detect" | python3 -c "import json,sys; print([(c['kind'], c['title_id']) for c in json.load(sys.stdin)])")
@@ -312,6 +444,10 @@ cat > "$T/catalog.json" <<EOF
   "profile": {"root": "$T/psxemu", "rom_dir": "{root}/games", "save_dir": "{root}/saves", "state_dir": "{root}/states",
               "save_exts": ".mcd", "save_name": "{serial}_1{ext}", "save_stems": "{serial}_1",
               "state_exts": ".state*", "state_stems": "{rom_stem_safe}", "state_name": "{rom_stem_safe}{ext}",
+              "save_name_by_core": {"mednafen_psx_hw": "{rom_stem}_1{ext}"},
+              "state_format": "raw", "state_slot0": ".state0", "state_cores": "pcsx_rearmed,mednafen_psx_hw",
+              "state_core_setting": {"file": "{root}/psxs5.ini", "key": "emulator",
+                                     "values": {"0": "pcsx_rearmed", "2": "mednafen_psx_hw"}},
               "platforms": [{"romm": ["psx", "ps1"], "dir": "psx", "save_format": "psx-card"}]}},
  {"id": "n64like", "name": "N64-like", "detect": ["$T/n64emu"],
   "profile": {"root": "$T/n64emu", "rom_dir": "{root}/games", "save_dir": "{root}/saves", "state_dir": "{root}/saves",
@@ -328,7 +464,8 @@ cat > "$T/catalog.json" <<EOF
 EOF
 python3 "$ROOT/tests/make_disc.py" psxbin "$T/psxemu/games/Test Quest (USA).bin" SLUS_123.45
 printf 'card-from-psx' > "$T/psxemu/saves/SLUS-12345_1.mcd"
-printf 'state-from-psx' > "$T/psxemu/states/Test_Quest__USA_.state0"
+printf 'STv4 PCSXra test-build' > "$T/psxemu/states/Test_Quest__USA_.state0"   # a bare PCSX-ReARMed state
+printf 'emulator=0\n' > "$T/psxemu/psxs5.ini"
 printf 'ROM:Test Racer (U).z64' > "$T/n64emu/games/Test Racer (U).z64"
 cp "$T/n64emu/games/Test Racer (U).z64" "$T/n64b/roms/Test Racer (U).z64"
 fnv=$(python3 -c "
@@ -346,11 +483,11 @@ post /api/setup/emulators "{\"roots\":[\"$HB\",\"$T/psxemu\",\"$T/n64emu\",\"$T/
 for _ in $(seq 1 20); do [[ -f "$T/n64b/roms/Old Racer (U).z64" ]] && break; sleep 0.25; done
 [[ -f "$T/n64b/roms/Old Racer (U).z64" ]] || fail "turning an extra on must give it the games already there"
 for _ in $(seq 1 20); do grep -q "NOTIFY.*now also sync with" "$T/daemon.log" && break; sleep 0.25; done
-grep -q "NOTIFY\] RomM Sync: [0-9]* N64 games\{0,1\} now also sync with" "$T/daemon.log" || fail "no notice that the games now also sync with the extra"
+grep -q "NOTIFY\] RommPS: [0-9]* N64 games\{0,1\} now also sync with" "$T/daemon.log" || fail "no notice that the games now also sync with the extra"
 dirs=$(curl -sf "$API/api/paths" | python3 -c "import json,sys; print(sorted(m['rom_dir'] for m in json.load(sys.stdin)))")
 [[ "$dirs" != *"$T/nope"* ]] || fail "an emulator not supported yet got a profile: $dirs"
 post /api/config '{"states":"upload"}' >/dev/null
-post /api/sync >/dev/null; wait_sync 16
+syncnow
 dump() { curl -sf "http://127.0.0.1:$MOCK_PORT/_admin/dump"; }
 saves=$(dump | python3 -c "import json,sys; d=json.load(sys.stdin); print(sorted((s['rom_id'], s['file_name'], s['slot']) for s in (d['saves'].values() if isinstance(d['saves'], dict) else d['saves']) if s['rom_id'] in (50, 60)))")
 # (RomM puts the upload's time in the name: "SLUS-12345_1 [2026-...].mcd".)
@@ -360,11 +497,50 @@ saves=$(dump | python3 -c "import json,sys; d=json.load(sys.stdin); print(sorted
 [[ "$(cat "$T/n64b/saves/Test Racer (U).srm" 2>/dev/null)" == "n64-save" ]] || fail "the shared save didn't reach the second emulator"
 states=$(dump | python3 -c "import json,sys; d=json.load(sys.stdin); print(sorted(s['file_name'] for s in (d['states'].values() if isinstance(d['states'], dict) else d['states']) if s['rom_id'] == 50))")
 [[ "$states" == "['Test_Quest__USA_"*".state0']" ]] || fail "the state named by the safe name didn't sync: $states"
+# A bare state goes up in RetroArch's container, as the core that made it, so
+# RomM's web player can load it.
+up=$(dump | python3 -c "import json,sys; print([(s['emulator'], s['file_size_bytes']) for s in json.load(sys.stdin)['states'] if s['rom_id'] == 50])")
+[[ "$up" == "[('pcsx_rearmed', 48)]" ]] || fail "a PSXS5 state must go up wrapped, as pcsx_rearmed: $up"
 c2=$(dump | python3 -c "import json,sys; print([c['versions'] for c in json.load(sys.stdin)['cards'] if c['emulator'] == 'ps2like' and c['name'].endswith('PS2-like slot 1')])")
 [[ "$c2" == "[1]" ]] || fail "the shared PS2 card wasn't backed up: $c2"
+# Web player states come down bare, into a slot of their own, and only for the
+# core the emulator runs now.
+post /api/config '{"states":"sync"}' >/dev/null
+rast() { python3 -c "import json,sys,struct; m=sys.argv[1].encode(); print(json.dumps((b'RASTATE\x01MEM '+struct.pack('<I',len(m))+m+b'\0'*(-len(m)%8)+b'END \0\0\0\0').decode('latin1')))" "$1"; }
+curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/_admin/state" -d "{\"rom_id\":50,\"emulator\":\"pcsx_rearmed\",\"file_name\":\"Test Quest (USA) [web].state\",\"content\":$(rast 'STv4 PCSXra web-build')}" >/dev/null
+curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/_admin/state" -d "{\"rom_id\":50,\"emulator\":\"mednafen_psx_hw\",\"file_name\":\"Test Quest (USA) [beetle].state\",\"content\":$(rast 'MDFNSVST beetle')}" >/dev/null
+syncnow
+[[ "$(cat "$T/psxemu/states/Test_Quest__USA_.state1")" == "STv4 PCSXra web-build" ]] || fail "a web state must come down bare, in the next free slot"
+[[ ! -e "$T/psxemu/states/Test_Quest__USA_.state2" ]] || fail "a Beetle state came down while the emulator runs PCSX-ReARMed"
+printf 'emulator=2\n' > "$T/psxemu/psxs5.ini"
+syncnow
+[[ "$(cat "$T/psxemu/states/Test_Quest__USA_.state2")" == "MDFNSVST beetle" ]] || fail "switched to Beetle, its state must come down"
+# With Beetle the card is named after the game file: still the game's card.
+sleep 1; printf 'card-beetle' > "$T/psxemu/saves/Test Quest (USA)_1.mcd"
+syncnow
+card=$(dump | python3 -c "import json,sys; s=sorted([x for x in json.load(sys.stdin)['saves'] if x['rom_id']==50], key=lambda x: x['updated_at']); print(s[-1]['content'])")
+[[ "$card" == "card-beetle" ]] || fail "the card Beetle names after the game file must sync: $card"
+# A blank card an emulator just made under the other name never beats one with a save on it.
+mkcard() { python3 -c "import sys; d=bytearray(131072); d[0:2]=b'MC'; d[128:128*16]=bytes([0xA0])*(128*15)
+if sys.argv[2]=='save': d[128]=0x51; d[0x2000:0x2004]=b'GAME'
+open(sys.argv[1],'wb').write(bytes(d))" "$1" "$2"; }
+mkcard "$T/psxemu/saves/SLUS-12345_1.mcd" save; sleep 1; mkcard "$T/psxemu/saves/Test Quest (USA)_1.mcd" blank
+syncnow
+kind=$(dump | python3 -c "import json,sys; s=sorted([x for x in json.load(sys.stdin)['saves'] if x['rom_id']==50], key=lambda x: x['updated_at']); print('save' if 'GAME' in s[-1]['content'] else 'blank')")
+[[ "$kind" == "save" ]] || fail "a blank card was uploaded over a card with a save"
+# Nor does a blank card from RomM replace one with saves: that's a conflict to settle.
+python3 -c "import base64,json,sys; d=bytearray(131072); d[0:2]=b'MC'; d[128:128*16]=bytes([0xA0])*(128*15)
+json.dump({'rom_id': 50, 'slot': 'autosave', 'file_name': 'SLUS-12345_1.mcd', 'content_b64': base64.b64encode(bytes(d)).decode()}, open(sys.argv[1], 'w'))" "$T/blank.json"
+sleep 1; curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/_admin/save" -d @"$T/blank.json" >/dev/null
+syncnow
+python3 -c "import sys; d=open(sys.argv[1],'rb').read(); sys.exit(0 if d[128]==0x51 else 1)" "$T/psxemu/saves/SLUS-12345_1.mcd" \
+  || fail "a blank card from RomM replaced a card with saves"
+[[ "$(last conflicts)" -ge 1 ]] || fail "a blank card from RomM over one with saves must be a conflict"
+
+post /api/config '{"states":"upload"}' >/dev/null
 # A save from another device reaches both N64 emulators.
 curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/_admin/save" -d '{"rom_id":60,"slot":"autosave","file_name":"Test Racer (U).srm","content":"n64-from-elsewhere","emulator":"other"}' >/dev/null
-post /api/sync >/dev/null; wait_sync 17
+syncnow
 [[ "$(cat "$T/n64emu/saves/$fnv.sav")" == "n64-from-elsewhere" && "$(cat "$T/n64b/saves/Test Racer (U).srm")" == "n64-from-elsewhere" ]] \
   || fail "a downloaded save must reach every emulator that shares it"
 # A download goes to the main emulator and is linked into the extra.
@@ -372,6 +548,57 @@ post /api/download '{"rom_id":61}' >/dev/null; sleep 2
 [[ -f "$T/n64emu/games/Other Racer (U).z64" && -f "$T/n64b/roms/Other Racer (U).z64" ]] || fail "the download didn't reach the extra emulator"
 python3 -c 'import os,sys; sys.exit(not os.path.samefile(sys.argv[1], sys.argv[2]))' \
   "$T/n64emu/games/Other Racer (U).z64" "$T/n64b/roms/Other Racer (U).z64" || fail "the extra copy should be a hard link"
+
+echo "16b. two Dolphins for GameCube keep one save: the main one's .gci files reach the extra's folder"
+mkdir -p "$T/gcA/games" "$T/gcB/ngc"
+python3 - "$T/catalog.json" "$T" <<'PY'
+import json, sys
+cat = json.load(open(sys.argv[1]))
+# Dolphin A keeps GameCube and Wii games in one folder, like Porpoise;
+# Dolphin B a folder for each.
+# Their folders for GameCube are named differently ("gamecube", "ngc"), as
+# Porpoise's and RetroArch's are.
+for gid, name, roms, gc_dir in (("gcA", "Dolphin A", "{root}/games", "gamecube"), ("gcB", "Dolphin B", "{root}/{platform}", "ngc")):
+    cat.append({"id": gid, "name": name, "detect": [f"{sys.argv[2]}/{gid}"],
+                "profile": {"root": f"{sys.argv[2]}/{gid}", "rom_dir": roms, "save_dir": "{root}/User",
+                            "platforms": [{"romm": ["ngc"], "dir": gc_dir, "emulator": "dolphin",
+                                           "save_layout": "gci", "bundle_dirs": "{root}/User/GC",
+                                           **({"state_dir": "{root}/states/{game_id}", "state_exts": ".state",
+                                               "state_format": "raw"} if gid == "gcA" else {})},
+                                          {"romm": ["wii"], "dir": "wii", "emulator": "dolphin",
+                                           "save_layout": "wii", "bundle_dirs": "{root}/User/Wii"}]}})
+json.dump(cat, open(sys.argv[1], "w"))
+PY
+python3 "$ROOT/tests/make_disc.py" gc "$T/gcA/games/Sunshine (USA).iso" GMSE01
+python3 "$ROOT/tests/make_disc.py" gc "$T/gcB/ngc/Sunshine (USA).iso" GMSE01
+post /api/setup/emulators "{\"roots\":[\"$HB\",\"$T/psxemu\",\"$T/n64emu\",\"$T/n64b\",\"$T/ps2emu\",\"$T/nope\",\"$T/gcA\",\"$T/gcB\"],
+  \"choices\":{\"psx\":\"$T/psxemu\",\"n64\":\"$T/n64emu\",\"ps2\":\"$T/ps2emu\",\"ngc\":\"$T/gcA\",\"wii\":\"$T/gcA\"},
+  \"also\":{\"n64\":[\"$T/n64b\"],\"ngc\":[\"$T/gcB\"],\"wii\":[\"$T/gcB\"]}}" >/dev/null \
+  || fail "setup with two Dolphins refused"
+A="$T/gcA/User/GC/USA/Card A"; Bc="$T/gcB/User/GC/USA/Card A"
+syncnow
+sleep 1; syncnow
+[[ ! -e "$T/gcB/wii/Sunshine (USA).iso" ]] || fail "a GameCube game in a folder shared with Wii must not go to the extra's Wii folder"
+cmp -s "$A/01-GMSE-super_mario_sunshine.gci" "$Bc/01-GMSE-super_mario_sunshine.gci" || fail "RomM's save must reach both Dolphins"
+sleep 1.1; $GC gci "$Bc/01-GMSE-super_mario_sunshine.gci" GMSE01 super_mario_sunshine 2 0x77
+syncnow
+cmp -s "$Bc/01-GMSE-super_mario_sunshine.gci" "$A/01-GMSE-super_mario_sunshine.gci" || fail "a save made in the extra must reach the main Dolphin"
+[[ "$(last uploaded)" == 1 ]] || fail "two Dolphins sharing a save must upload it once: $(last uploaded)"
+[[ "$(newest 41)" == "01-GMSE-super_mario_sunshine.gci" ]] && cmp -s "$T/newest" "$A/01-GMSE-super_mario_sunshine.gci" || fail "RomM must get the newer save, as one .gci"
+ls "$T/data/backups/41/" 2>/dev/null | grep -q "GMSE01-shared.zip" || fail "the save replaced in the main Dolphin must be backed up"
+# Porpoise's states: a folder per game id holding slot1.state, slot2.state...
+post /api/config '{"states":"sync"}' >/dev/null
+mkdir -p "$T/gcA/states/GMSE01"; printf 'dolphin-bare-state' > "$T/gcA/states/GMSE01/slot1.state"
+syncnow
+up=$(dump | python3 -c "import json,sys; print([(s['file_name'].split(' [')[0], s['emulator'], s['file_size_bytes']) for s in json.load(sys.stdin)['states'] if s['rom_id']==41])")
+[[ "$up" == "[('slot1', 'dolphin', 48)]" ]] || fail "a state in a folder per game must go up, wrapped: $up"
+curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/_admin/state" -d "{\"rom_id\":41,\"emulator\":\"dolphin\",\"file_name\":\"Sunshine (USA).state3\",\"content\":$(rast 'dolphin-from-retroarch')}" >/dev/null
+syncnow
+[[ "$(cat "$T/gcA/states/GMSE01/slot2.state" 2>/dev/null)" == "dolphin-from-retroarch" ]] || fail "a state from RomM must land unwrapped in the game's next free slot"
+[[ "$(cat "$T/gcA/states/GMSE01/slot1.state")" == "dolphin-bare-state" ]] || fail "the state already there must be left alone"
+rm "$T/gcA/states/GMSE01/slot1.state"
+syncnow
+[[ "$(cat "$T/gcA/states/GMSE01/slot1.state" 2>/dev/null)" == "dolphin-bare-state" ]] || fail "a deleted state must come back bare, in its own emulator's form"
 
 echo "17. paired with another server, the old server's game and save ids are forgotten"
 hist() { curl -sf "$API/api/status" | python3 -c "import json,sys; print(len(json.load(sys.stdin)['sync']['history']))"; }
@@ -412,6 +639,24 @@ import json,sys
 for p in json.load(sys.stdin)['profiles']:
     if p['id'].startswith('custom-'): print(p['id'], p.get('extra'), p['rom_dir'] == '$T/porp/games')")
 [[ "$porp" == "custom-newemu-snes ['snes'] True" ]] || fail "an emulator with no preset should be an extra next to RetroArch: $porp"
+# Each system's folders: detection says where an emulator keeps them, and folders
+# picked for one system in setup are used for it alone.
+found=$(curl -sf "$API/api/setup/detect" | python3 -c "
+import json,sys
+for c in json.load(sys.stdin):
+    if c['root']=='$HB': print(c['dirs']['snes']['rom_dir'] != '', 'fixed' in c)")
+[[ "$found" == "True True" ]] || fail "detection must give each system's folders: $found"
+mkdir -p "$T/mine/snes" "$T/mine/snessaves"
+post /api/setup/emulators "{\"roots\":[\"$HB\"],\"systems\":{\"snes\":{\"main\":\"$HB\",\"on\":[\"$HB\"],
+  \"folders\":{\"$HB\":{\"rom_dir\":\"$T/mine/snes\",\"save_dir\":\"$T/mine/snessaves\",\"state_dir\":\"\"}}}}}" >/dev/null \
+  || fail "setup with a system's own folders refused"
+sn=$(curl -sf "$API/api/paths" | python3 -c "
+import json,sys
+for m in json.load(sys.stdin):
+    if 'snes' in m['platforms'].split(','): print(m['rom_dir'], m['save_dir'])
+    elif m['rom_dir'].startswith('$T/mine/snes'): print('leaked', m['platforms'])")
+grep -q "^$T/mine/snes $T/mine/snessaves$" <<<"$sn" && ! grep -q "^leaked" <<<"$sn" || fail "a system's picked folders must apply to it alone: $sn"
+post /api/setup/emulators "{\"roots\":[\"$HB\"],\"custom\":[{\"id\":\"newemu-snes\",\"slugs\":[\"snes\",\"sfam\"],\"name\":\"NewEmu (SNES)\",\"rom_dir\":\"$T/porp/games\",\"save_dir\":\"$T/porp/saves\"}]}" >/dev/null
 
 echo "19. every cover kept on the console, then only the missing and changed ones fetched"
 # Paired with the HTTPS mock since scenario 17.
@@ -447,5 +692,147 @@ grep -q "^10 False  0$" <<<"$lib" || fail "a game with one version has no label:
 post /api/download '{"rom_id":13}' >/dev/null; sleep 1
 grep -q "systeminfo.txt isn't a game" "$T/daemon.log" || fail "a file that isn't a game was downloaded"
 [[ -z "$(find "$T" -name systeminfo.txt -not -path '*/data/*')" ]] || fail "systeminfo.txt reached an emulator's folder"
+
+echo "21. one-file folder games: saves named after the file sync; old extensionless downloads are moved into the folder"
+curl -sfk -X POST "$TM/_admin/rom" -d '{"id":70,"platform_id":1,"name":"Folder Game","fs_name":"Folder Game",
+  "files":[{"id":701,"file_name":"Folder Game (USA).sfc","content":"ROM:Folder Game (USA).sfc"}]}' >/dev/null
+post /api/download '{"rom_id":70}' >/dev/null
+for _ in $(seq 1 20); do got=$(find "$T" -path "*/Folder Game/Folder Game (USA).sfc" -not -path '*/data/*' | head -1); [[ -n "$got" ]] && break; sleep 0.25; done
+[[ -n "$got" ]] || fail "a one-file folder game must download into its folder"
+gdir=$(dirname "$(dirname "$got")")
+sdir=$(curl -sf "$API/api/paths" | python3 -c "import json,sys; print([m['save_dir'] for m in json.load(sys.stdin) if m['rom_dir']=='$gdir'][0])")
+[[ -n "$sdir" ]] || fail "no save folder for $gdir"
+mkdir -p "$sdir"; printf 'folder-save' > "$sdir/Folder Game (USA).srm"
+syncnow
+saved=$(curl -sfk "$TM/_admin/dump" | python3 -c "import json,sys; s=[x for x in json.load(sys.stdin)['saves'] if x['rom_id']==70]; print(s[-1]['content'] if s else 'none')")
+[[ "$saved" == "folder-save" ]] || fail "a save named after the file inside a one-file folder must sync: $saved"
+# What 1.1.1 left behind: the file named after the folder, no extension.
+curl -sfk -X POST "$TM/_admin/rom" -d '{"id":71,"platform_id":1,"name":"Bare Game","fs_name":"Bare Game",
+  "files":[{"id":711,"file_name":"Bare Game (USA).sfc","content":"ROM:Bare Game (USA).sfc"}]}' >/dev/null
+printf 'ROM:Bare Game (USA).sfc' > "$gdir/Bare Game"; printf 'bare-save' > "$sdir/Bare Game.srm"
+syncnow
+[[ -f "$gdir/Bare Game/Bare Game (USA).sfc" ]] || fail "an extensionless game must be moved into its folder under the file's name"
+[[ "$(cat "$sdir/Bare Game (USA).srm" 2>/dev/null)" == "bare-save" && ! -e "$sdir/Bare Game.srm" ]] || fail "its save must take the file's name"
+
+# A one-file folder game's save from RomM is named after the file inside, as the emulator names it.
+curl -sfk -X POST "$TM/_admin/rom" -d '{"id":76,"platform_id":1,"name":"Folder Two","fs_name":"Folder Two",
+  "files":[{"id":761,"file_name":"Folder Two (USA).sfc","content":"ROM:Folder Two (USA).sfc"}]}' >/dev/null
+curl -sfk -X POST "$TM/_admin/save" -d '{"rom_id":76,"slot":"autosave","file_name":"Folder Two (USA).srm","content":"folder-two-save"}' >/dev/null
+post /api/download '{"rom_id":76}' >/dev/null
+for _ in $(seq 1 40); do [[ -f "$sdir/Folder Two (USA).srm" ]] && break; sleep 0.25; done
+[[ "$(cat "$sdir/Folder Two (USA).srm" 2>/dev/null)" == "folder-two-save" ]] || fail "a one-file folder game's save must take the file's name: $(ls "$sdir" | grep -i 'folder two')"
+[[ ! -e "$sdir/Folder Two.srm" ]] || fail "not the folder's name"
+
+# A save from before RomM's sync slots (no slot) comes down with its game.
+curl -sfk -X POST "$TM/_admin/rom" -d '{"id":72,"platform_id":1,"name":"Old Save Game","fs_name":"Old Save Game (USA).sfc",
+  "files":[{"id":721,"file_name":"Old Save Game (USA).sfc","content":"ROM:Old Save Game (USA).sfc"}]}' >/dev/null
+curl -sfk -X POST "$TM/_admin/save" -d '{"rom_id":72,"slot":null,"file_name":"Old Save Game (USA) [2026-08-01].srm","content":"from-before-slots"}' >/dev/null
+curl -sfk -X POST "$TM/_admin/save" -d '{"rom_id":72,"slot":null,"file_name":"Old Save Game (USA) [2026-08-01].rtc","content":"clock"}' >/dev/null
+post /api/download '{"rom_id":72}' >/dev/null
+for _ in $(seq 1 40); do [[ -f "$sdir/Old Save Game (USA).srm" ]] && break; sleep 0.25; done
+[[ "$(cat "$sdir/Old Save Game (USA).srm" 2>/dev/null)" == "from-before-slots" ]] || fail "a save with no slot must come down with its game"
+if [[ "$(curl -sf "$API/api/paths" | python3 -c "import json,sys; print([m for m in json.load(sys.stdin) if m['rom_dir']=='$gdir'][0].get('save_exts', '.srm,.rtc'))")" == *rtc* ]]; then
+    [[ "$(cat "$sdir/Old Save Game (USA).rtc" 2>/dev/null)" == "clock" ]] || fail "the clock file beside it must come down too"
+fi
+syncnow
+up=$(curl -sfk "$TM/_admin/dump" | python3 -c "import json,sys; print(sorted(str(s['slot']) for s in json.load(sys.stdin)['saves'] if s['rom_id']==72))")
+[[ "$up" == "['None', 'None', 'autosave', 'autosave-rtc']" ]] || fail "they must then sync in this console's slots: $up"
+
+# Another device's slot: never mixed into this console's save. A game with
+# none of its own takes the newest from elsewhere, then syncs in its own slot.
+for g in "74 Phone Game" "75 Both Game"; do
+    set -- $g
+    curl -sfk -X POST "$TM/_admin/rom" -d "{\"id\":$1,\"platform_id\":1,\"name\":\"$2 $3\",\"fs_name\":\"$2 $3 (USA).sfc\",
+      \"files\":[{\"id\":${1}1,\"file_name\":\"$2 $3 (USA).sfc\",\"content\":\"ROM:$2 $3 (USA).sfc\"}]}" >/dev/null
+done
+curl -sfk -X POST "$TM/_admin/save" -d '{"rom_id":74,"slot":"phone","file_name":"Phone Game (USA).srm","content":"from-the-phone"}' >/dev/null
+curl -sfk -X POST "$TM/_admin/save" -d '{"rom_id":75,"slot":"phone","file_name":"Both Game (USA).srm","content":"phone-copy"}' >/dev/null
+sleep 1.1
+curl -sfk -X POST "$TM/_admin/save" -d '{"rom_id":75,"slot":"autosave","file_name":"Both Game (USA).srm","content":"this-slot"}' >/dev/null
+post /api/download '{"rom_id":74}' >/dev/null; post /api/download '{"rom_id":75}' >/dev/null
+for _ in $(seq 1 40); do [[ -f "$sdir/Phone Game (USA).srm" && -f "$sdir/Both Game (USA).srm" ]] && break; sleep 0.25; done
+syncnow
+[[ "$(cat "$sdir/Phone Game (USA).srm" 2>/dev/null)" == "from-the-phone" ]] || fail "a game with only another device's save must get it"
+[[ "$(cat "$sdir/Both Game (USA).srm" 2>/dev/null)" == "this-slot" ]] || fail "another device's slot must never replace this console's save"
+curl -sf "$API/api/events?rom_id=74" | grep -q "From another device" || fail "the sync log must say where it came from"
+
+echo "22. the sync log and the tracked saves"
+ev=$(curl -sf "$API/api/events?limit=500" | python3 -c "
+import json,sys; L=json.load(sys.stdin)
+print(sorted({(e['kind'], e['action']) for e in L}))
+print(next((e['game'] for e in L if e['rom_id']==70 and e['action']=='uploaded'), 'none'))")
+grep -q "('save', 'uploaded')" <<<"$ev" && grep -q "('state', 'downloaded')" <<<"$ev" && grep -q "('state', 'skipped')" <<<"$ev" \
+  || fail "the sync log is missing kinds of entries: $ev"
+[[ "$(tail -1 <<<"$ev")" == "Folder Game" ]] || fail "a log entry must name its game: $ev"
+one=$(curl -sf "$API/api/events?rom_id=70" | python3 -c "import json,sys; print({e['rom_id'] for e in json.load(sys.stdin)})")
+[[ "$one" == "{70}" ]] || fail "the log for one game holds only that game: $one"
+tr=$(curl -sf "$API/api/tracked" | python3 -c "
+import json,sys; t=json.load(sys.stdin)
+g={x['rom_id']: x for p in t['platforms'] for x in p['games']}
+print(t['saves'] > 0, t['states'] > 0, g[70]['name'], [f['status'] for f in g[70]['files']])")
+[[ "$tr" == "True True Folder Game ['synced']" ]] || fail "tracked saves by platform: $tr"
+printf 'changed-again' > "$sdir/Folder Game (USA).srm"
+st=$(curl -sf "$API/api/tracked?rom_id=70" | python3 -c "import json,sys; print([f['status'] for p in json.load(sys.stdin)['platforms'] for g in p['games'] for f in g['files']])")
+[[ "$st" == "['changed']" ]] || fail "a save changed here must say so: $st"
+
+echo "23. save sync off: RomM only as a game source"
+post /api/config '{"save_sync":false}' >/dev/null
+n=$(curl -sf "$API/api/status" | python3 -c "import json,sys; print(json.load(sys.stdin)['sync']['sync_count'])")
+curl -sfk -X POST "$TM/_admin/rom" -d '{"id":73,"platform_id":1,"name":"No Sync Game","fs_name":"No Sync Game (USA).sfc",
+  "files":[{"id":731,"file_name":"No Sync Game (USA).sfc","content":"ROM:No Sync Game (USA).sfc"}]}' >/dev/null
+curl -sfk -X POST "$TM/_admin/save" -d '{"rom_id":73,"slot":"autosave","file_name":"No Sync Game (USA).srm","content":"stays-on-romm"}' >/dev/null
+post /api/download '{"rom_id":73}' >/dev/null; post /api/sync >/dev/null; sleep 3
+[[ -n "$(find "$T" -name "No Sync Game (USA).sfc" -not -path '*/data/*')" ]] || fail "games must still download with save sync off"
+[[ ! -e "$sdir/No Sync Game (USA).srm" ]] || fail "no save may come down with save sync off"
+[[ "$(curl -sf "$API/api/status" | python3 -c "import json,sys; print(json.load(sys.stdin)['sync']['sync_count'])")" == "$n" ]] || fail "no sync may run with save sync off"
+grep -q "skipped: save sync is off" "$T/daemon.log" || fail "a skipped sync must say why"
+post /api/config '{"save_sync":true}' >/dev/null
+syncnow
+[[ "$(cat "$sdir/No Sync Game (USA).srm" 2>/dev/null)" == "stays-on-romm" ]] || fail "turned back on, the save must come down"
+grep -q "\[NOTIFY\] RommPS: No Sync Game downloaded$" "$T/daemon.log" || fail "a download with save sync off must still say it's done"
+grep -qE "\[NOTIFY\] RommPS: ([0-9]+ (saves?|states?) (up|down)(, )?)+$" "$T/daemon.log" || fail "a sync's notification must say what moved"
+! grep -q "\[NOTIFY\] RommPS: 0 " "$T/daemon.log" || fail "a notification must not count nothing"
+grep -A1 -E "\[NOTIFY\] RommPS: [0-9]+ saves? (up|down)" "$T/daemon.log" | grep -q "No Sync Game" || fail "a sync's notification must name the games"
+
+echo "24. save sync per emulator and platform: saves only, then off, then everything"
+path_of() { curl -sf "$API/api/paths" | python3 -c "import json,sys; print([m['$1'] for m in json.load(sys.stdin) if m['rom_dir']=='$gdir'][0])"; }
+emu_root=$(path_of root); stdir=$(path_of state_dir)
+[[ -n "$emu_root" && -n "$stdir" ]] || fail "no emulator folders for $gdir"
+post /api/config '{"states":"sync"}' >/dev/null
+post /api/emulators/sync "{\"root\":\"$emu_root\",\"sync\":\"saves\"}" >/dev/null || fail "choosing saves only refused"
+[[ -z "$(path_of state_dir)" && -n "$(path_of save_dir)" ]] || fail "saves only: states must show as not synced"
+curl -sfk -X POST "$TM/_admin/state" -d '{"rom_id":73,"emulator":"snes9x","file_name":"No Sync Game (USA).state1","content":"emu-state"}' >/dev/null
+printf 'saves-only' > "$sdir/No Sync Game (USA).srm"
+syncnow
+[[ ! -e "$stdir/No Sync Game (USA).state1" ]] || fail "saves only: a state came down"
+last73() { curl -sfk "$TM/_admin/dump" | python3 -c "import json,sys; s=[x for x in json.load(sys.stdin)['saves'] if x['rom_id']==73]; print(s[-1]['content'] if s else 'none')"; }
+[[ "$(last73)" == "saves-only" ]] || fail "saves only: the save must still go up: $(last73)"
+post /api/emulators/sync "{\"root\":\"$emu_root\",\"sync\":\"off\"}" >/dev/null
+sleep 1.1; printf 'not-synced' > "$sdir/No Sync Game (USA).srm"
+syncnow
+[[ "$(last73)" == "saves-only" ]] || fail "off: a save went up"
+[[ -z "$(path_of save_dir)" ]] || fail "off: saves must show as not synced"
+post /api/setup/emulators "{\"roots\":[\"$emu_root\"]}" >/dev/null || true
+[[ "$(curl -sf "$API/api/config" | python3 -c "import json,sys; print([e.get('sync','all') for p in json.load(sys.stdin)['profiles'] if p.get('root')=='$emu_root' for e in p['platforms']])")" == *"'off'"* ]] || fail "setting up again must keep each platform's choice"
+post /api/emulators/sync "{\"root\":\"$emu_root\",\"sync\":\"all\"}" >/dev/null
+syncnow
+[[ "$(last73)" == "not-synced" ]] || fail "back on: the save must go up: $(last73)"
+[[ "$(cat "$stdir/No Sync Game (USA).state1" 2>/dev/null)" == "emu-state" ]] || fail "back on: the state must come down"
+curl -s -X POST "$API/api/emulators/sync" -d '{"root":"/nope","sync":"off"}' | grep -q error || fail "an unknown emulator must be refused"
+# Per platform, the way the app sets it: only this system's saves stop.
+post /api/setup/emulators "{\"roots\":[\"$emu_root\"],\"systems\":{\"snes\":{\"main\":\"$emu_root\",\"on\":[\"$emu_root\"],\"sync\":\"off\"}}}" >/dev/null
+modes=$(curl -sf "$API/api/config" | python3 -c "import json,sys; print(sorted((e['romm'][0], e.get('sync','all')) for p in json.load(sys.stdin)['profiles'] if p.get('root')=='$emu_root' for e in p['platforms']))")
+[[ "$modes" == *"('snes', 'off')"* && "$modes" == *"('ps2', 'all')"* ]] || fail "save sync must be set for one platform only: $modes"
+[[ -z "$(path_of save_dir)" ]] || fail "a platform with save sync off must show its saves as not synced"
+post /api/setup/emulators "{\"roots\":[\"$emu_root\"],\"systems\":{\"snes\":{\"main\":\"$emu_root\",\"on\":[\"$emu_root\"],\"sync\":\"all\"}}}" >/dev/null
+
+echo "25. a save or state deleted from the console comes back from RomM"
+rm -f "$sdir/No Sync Game (USA).srm"
+syncnow
+[[ "$(cat "$sdir/No Sync Game (USA).srm" 2>/dev/null)" == "not-synced" ]] || fail "a deleted save must come back"
+curl -sf "$API/api/events?rom_id=73" | grep -q "Missing here" || fail "the sync log must say why it came back"
+rm -f "$stdir/No Sync Game (USA).state1"
+syncnow
+[[ "$(cat "$stdir/No Sync Game (USA).state1" 2>/dev/null)" == "emu-state" ]] || fail "a deleted state must come back"
 
 echo "PASS"

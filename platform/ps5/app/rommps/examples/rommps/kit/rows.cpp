@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cctype>
 
 namespace rommps
 {
@@ -35,13 +36,28 @@ RowEvent RowList::handle(const std::vector<Row> &rows, const hui::InputFrame &in
     if (count == 0)
         return event;
     focus_ = std::clamp(focus_, 0, count - 1);
+    // A section's name can't hold the focus: the first row after it does
+    // (or, at the end of the list, the last one before it).
+    if (rows[static_cast<std::size_t>(focus_)].kind == RowKind::header)
+    {
+        int at = focus_;
+        while (at < count && rows[static_cast<std::size_t>(at)].kind == RowKind::header)
+            ++at;
+        if (at == count)
+            for (at = focus_; at > 0 && rows[static_cast<std::size_t>(at)].kind == RowKind::header;)
+                --at;
+        focus_ = at;
+    }
     const Row &row = rows[static_cast<std::size_t>(focus_)];
     switch (input.nav)
     {
     case Direction::up:
     case Direction::down:
     {
-        const int next = focus_ + (input.nav == Direction::down ? 1 : -1);
+        const int step = input.nav == Direction::down ? 1 : -1;
+        int next = focus_ + step;
+        while (next >= 0 && next < count && rows[static_cast<std::size_t>(next)].kind == RowKind::header)
+            next += step;
         if (next >= 0 && next < count)
         {
             focus_ = next;
@@ -118,6 +134,14 @@ void RowList::draw(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, const 
         const float y = bounds.y + static_cast<float>(i) * kRowHeight - scroll_.value;
         if (y + kRowHeight < bounds.y || y > bounds.y + bounds.h)
             continue;
+        if (row.kind == RowKind::header)
+        {
+            std::string caps = row.label;
+            for (char &ch : caps)
+                ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+            ui::text(list, fonts.semibold, caps, bounds.x + 32, y + kRowHeight - 20, 18, look.muted);
+            continue;
+        }
         const bool focused = i == focus_;
         const float dim = row.enabled ? 1.0f : 0.45f;
         const Color ink = focused ? look.on_highlight : row.danger ? look.danger : look.text;
@@ -155,10 +179,27 @@ void RowList::draw(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, const 
             }
             used = w + chevrons + (row.kind == RowKind::choice ? 50.0f : 24.0f);
         }
-        const float room = std::max(200.0f, bounds.w - 64 - used);
-        ui::text(list, fonts.semibold, fonts.semibold.font->fit(row.label, 26, room), x, label_y, 26, ink.with_alpha(dim));
+        // A chevron for a row that opens: right when closed, down when open.
+        const float indent = row.expander ? 30.0f : 0.0f;
+        if (row.expander)
+        {
+            const float cx = x + 8, cy = label_y - 9;
+            const Color c = ink.with_alpha(dim);
+            if (row.expander == 1)
+            {
+                list.line(cx - 3, cy - 8, cx + 4, cy, 3.0f, c);
+                list.line(cx + 4, cy, cx - 3, cy + 8, 3.0f, c);
+            }
+            else
+            {
+                list.line(cx - 8, cy - 3, cx, cy + 4, 3.0f, c);
+                list.line(cx, cy + 4, cx + 8, cy - 3, 3.0f, c);
+            }
+        }
+        const float room = std::max(200.0f, bounds.w - 64 - used - indent);
+        ui::text(list, fonts.semibold, fonts.semibold.font->fit(row.label, 26, room), x + indent, label_y, 26, ink.with_alpha(dim));
         if (two_lines)
-            ui::text(list, fonts.regular, fonts.regular.font->fit(row.detail, 19, room), x, label_y + 30, 19,
+            ui::text(list, fonts.regular, fonts.regular.font->fit(row.detail, 19, room), x + indent, label_y + 30, 19,
                      soft.with_alpha(dim));
     }
     list.pop_clip();

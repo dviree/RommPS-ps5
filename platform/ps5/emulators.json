@@ -1,14 +1,32 @@
 [
   {
-    "id": "psxs5", "name": "PSXS5 / SwanStationPS5",
-    "title_ids": ["PPSA97510", "PPSA98510"],
-    "detect": ["/data/PSXS5", "/data/homebrew/PPSA97510", "/data/homebrew/PPSA98510"],
-    "note": "Both apps share /data/PSXS5. One memory card per game, named after the disc.",
+    "id": "psxs5", "name": "PSXS5",
+    "title_ids": ["PPSA97510"],
+    "detect": ["/data/PSXS5", "/data/homebrew/PPSA97510"],
+    "note": "One memory card per game, named after the disc (after the game file with the Beetle core).",
     "profile": {
       "root": "/data/PSXS5", "rom_dir": "{root}/games", "save_dir": "{root}/saves", "state_dir": "{root}/states",
       "bios_dir": "{root}/bios",
       "save_exts": ".mcd", "save_name": "{serial}_1{ext}", "save_stems": "{serial}_1",
       "state_exts": ".state*", "state_stems": "{rom_stem_safe}", "state_name": "{rom_stem_safe}{ext}",
+      "save_name_by_core": {"mednafen_psx_hw": "{rom_stem}_1{ext}"},
+      "state_format": "raw", "state_slot0": ".state0", "state_cores": "pcsx_rearmed,mednafen_psx_hw",
+      "state_core_setting": {"file": "{root}/psxs5.ini", "key": "emulator",
+                             "values": {"0": "pcsx_rearmed", "1": "pcsx_rearmed", "2": "mednafen_psx_hw"}},
+      "platforms": [{"romm": ["psx", "ps1", "playstation"], "dir": "psx", "save_format": "psx-card"}]
+    }
+  },
+  {
+    "id": "swanstationps5", "name": "SwanStationPS5",
+    "title_ids": ["PPSA98510"],
+    "detect": ["/data/SwanStationPS5", "/data/homebrew/PPSA98510"],
+    "note": "Plays the games in PSXS5's folder. One memory card per game, named after the game file. Its save states load only in SwanStationPS5.",
+    "profile": {
+      "root": "/data/SwanStationPS5", "rom_dir": "/data/PSXS5/games", "save_dir": "{root}/saves", "state_dir": "{root}/states",
+      "bios_dir": "{root}/bios",
+      "save_exts": ".mcd", "save_name": "{rom_stem}_1{ext}", "save_stems": "{rom_stem}_1",
+      "state_exts": ".state*", "state_stems": "{rom_stem_safe}", "state_name": "{rom_stem_safe}{ext}",
+      "state_format": "raw", "state_slot0": ".state0", "state_cores": "swanstation",
       "platforms": [{"romm": ["psx", "ps1", "playstation"], "dir": "psx", "save_format": "psx-card"}]
     }
   },
@@ -30,17 +48,17 @@
     "note": "Saves and states are named after a hash of the game file.",
     "profile": {
       "root": "/data/PS5N64", "rom_dir": "{root}/games", "save_dir": "{root}/saves", "state_dir": "{root}/saves",
+      "fixed": ["rom_dir", "save_dir", "state_dir"],
       "save_exts": ".sav", "save_name": "{rom_fnv64}{ext}", "save_stems": "{rom_fnv64}",
-      "state_exts": ".state", "state_stems": "{rom_fnv64}", "state_name": "{rom_fnv64}{ext}",
+      "state_exts": ".state", "state_stems": "{rom_fnv64}", "state_name": "{rom_fnv64}{ext}", "state_format": "raw",
       "platforms": [{"romm": ["n64"], "dir": "n64", "save_format": "n64-srm"}]
     }
   },
   {
     "id": "ps5nes", "name": "PS5NES",
     "title_ids": ["PPSA99204"],
-    "detect": ["/data/homebrew/PPSA99204"],
-    "ready": false,
-    "note": "PS5NES v7 looks for its games in PS5SX2's folder, so there's no preset for it yet.",
+    "detect": ["/data/PS5NES", "/data/homebrew/PPSA99204"],
+    "note": "Untested: v7 may look for games in PS5SX2's folder.",
     "profile": {
       "root": "/data/PS5NES", "rom_dir": "{root}/games", "save_dir": "{root}/saves", "state_dir": "{root}/saves",
       "save_exts": ".sav", "save_name": "{rom_fnv64}{ext}", "save_stems": "{rom_fnv64}",
@@ -51,11 +69,14 @@
     "id": "porpoise", "name": "Porpoise",
     "title_ids": ["PPSA99764"],
     "detect": ["/data/porpoise", "/data/homebrew/PPSA99764"],
-    "ready": false,
-    "note": "The current build crashes when it leaves the app sandbox, so there's no preset for it yet.",
+    "note": "Dolphin, with its user folder in {root}/saves/User.",
     "profile": {
-      "root": "/data/porpoise", "rom_dir": "{root}/games", "save_dir": "{root}/saves",
-      "platforms": [{"romm": ["ngc", "gamecube"], "dir": "gamecube"}, {"romm": ["wii"], "dir": "wii"}]
+      "root": "/data/porpoise", "rom_dir": "{root}/games", "save_dir": "{root}/saves/User",
+      "state_dir": "{root}/states/{game_id}", "state_exts": ".state", "state_format": "raw",
+      "platforms": [
+        {"romm": ["ngc", "gamecube"], "dir": "gamecube", "emulator": "dolphin", "save_layout": "gci", "bundle_dirs": "{root}/saves/User/GC"},
+        {"romm": ["wii"], "dir": "wii", "emulator": "dolphin", "save_layout": "wii", "bundle_dirs": "{root}/saves/User/Wii"}
+      ]
     }
   }
 ]

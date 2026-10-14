@@ -109,6 +109,6 @@ stop; : > "$T/daemon.log"; SELF_UPDATE=0 APP_INSTALLED=1 start; sleep 1
 stop; : > "$T/daemon.log"; SELF_UPDATE=0 APP_INSTALLED=1 APP_VERSION=1.1.0 start; sleep 1
 grep -q "NOTIFY.*RommPS 1.1.0 is out of date" "$T/daemon.log" || fail "no hint to update an older RommPS: $(grep NOTIFY "$T/daemon.log")"
 stop; : > "$T/daemon.log"; SELF_UPDATE=0 start; sleep 1
-grep -q "NOTIFY.*Install RommPS from ProsperoStore" "$T/daemon.log" || fail "no hint to install RommPS: $(grep NOTIFY "$T/daemon.log")"
+grep -q "NOTIFY.*Install the RommPS app from ProsperoStore" "$T/daemon.log" || fail "no hint to install RommPS: $(grep NOTIFY "$T/daemon.log")"
 
 echo PASS

@@ -13,6 +13,7 @@
 #include "detect.h"
 
 #include <dirent.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -323,6 +324,18 @@ static cJSON *emulator_catalog(void) {
     return plat_info()->emulator_catalog ? cJSON_Parse(plat_info()->emulator_catalog) : NULL;
 }
 
+static cJSON *g_catalog;
+static void load_catalog(void) { g_catalog = emulator_catalog(); }
+
+const cJSON *detect_catalog_entry(const char *id) {
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, load_catalog);
+    const cJSON *e;
+    cJSON_ArrayForEach(e, g_catalog)
+        if (!strcmp(jget_str(e, "id", ""), id)) return e;
+    return NULL;
+}
+
 static void add_standalone(cJSON *out) {
     cJSON *catalog = emulator_catalog();
     const cJSON *e, *x;
@@ -398,12 +411,79 @@ cJSON *detect_emulators(void) {
         closedir(d);
     }
     add_standalone(out);
+    /* The folders each emulator uses by default, for a given platform. */
+    cJSON *c;
+    cJSON_ArrayForEach(c, out) {
+        if (cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(c, "ready"))) continue; /* No preset, custom */
+        cJSON *profile = cJSON_GetObjectItemCaseSensitive(c, "profile"), *one = cJSON_CreateArray();
+        cJSON_AddItemReferenceToArray(one, profile);
+        profile_map *maps = NULL;
+        int n = profiles_expand(one, &maps);
+        cJSON *dirs = cJSON_AddObjectToObject(c, "dirs");
+        for (int i = 0; i < n; i++) {
+            char key[64];
+            str_copy(key, sizeof key, maps[i].romm_slugs);
+            char *comma = strchr(key, ',');
+            if (comma) *comma = 0;
+            cJSON *d = cJSON_AddObjectToObject(dirs, key);
+            cJSON_AddStringToObject(d, "rom_dir", maps[i].rom_dir);
+            cJSON_AddStringToObject(d, "save_dir", maps[i].save_dir);
+            cJSON_AddStringToObject(d, "state_dir", maps[i].state_dir);
+            /* Games already there, so setup can pick the emulator they're in. */
+            int games = 0;
+            DIR *g = opendir(maps[i].rom_dir);
+            struct dirent *ge;
+            while (g && (ge = readdir(g)))
+                if (ge->d_name[0] != '.' && !ext_in_list(ge->d_name, maps[i].save_exts) &&
+                    !ext_in_list(ge->d_name, maps[i].state_exts) && !ext_in_list(ge->d_name, ".part,.tmp,.txt,.png,.jpg,.xml"))
+                    games++;
+            if (g) closedir(g);
+            cJSON_AddNumberToObject(d, "games", games);
+        }
+        free(maps);
+        cJSON_Delete(one);
+        const cJSON *fixed = cJSON_GetObjectItemCaseSensitive(profile, "fixed");
+        cJSON_AddItemToObject(c, "fixed", fixed ? cJSON_Duplicate(fixed, 1) : cJSON_CreateArray());
+    }
     return out;
+}
+
+/* Keys a newer preset has that a saved profile lacks (a state folder added
+ * to Porpoise's, say) are added to it. Nothing already there changes, so
+ * folders the user picked stay. */
+static int fill_from_catalog(cJSON *p) {
+    const cJSON *entry = detect_catalog_entry(jget_str(p, "id", ""));
+    const cJSON *preset = entry ? cJSON_GetObjectItemCaseSensitive(entry, "profile") : NULL, *k;
+    cJSON *pe;
+    if (!preset) return 0;
+    int added = 0;
+    cJSON_ArrayForEach(k, preset)
+        if (strcmp(k->string, "platforms") && !cJSON_GetObjectItemCaseSensitive(p, k->string)) {
+            cJSON_AddItemToObject(p, k->string, cJSON_Duplicate(k, 1));
+            added++;
+        }
+    cJSON_ArrayForEach(pe, cJSON_GetObjectItemCaseSensitive(p, "platforms")) {
+        const cJSON *first = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(pe, "romm"), 0), *ce;
+        if (!cJSON_IsString(first)) continue;
+        cJSON_ArrayForEach(ce, cJSON_GetObjectItemCaseSensitive(preset, "platforms")) {
+            const cJSON *cf = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(ce, "romm"), 0);
+            if (!cJSON_IsString(cf) || strcmp(cf->valuestring, first->valuestring)) continue;
+            cJSON_ArrayForEach(k, ce)
+                if (!cJSON_GetObjectItemCaseSensitive(pe, k->string)) {
+                    cJSON_AddItemToObject(pe, k->string, cJSON_Duplicate(k, 1));
+                    added++;
+                }
+        }
+    }
+    if (added) LOGI("the %s profile got %d setting%s from its newer preset", jget_str(p, "name", ""), added, added == 1 ? "" : "s");
+    return added;
 }
 
 int detect_refresh_profiles(cJSON *profiles) {
     int changed = 0;
     cJSON *found = NULL;
+    cJSON *each;
+    cJSON_ArrayForEach(each, profiles) changed += fill_from_catalog(each) > 0;
     for (int i = 0; i < cJSON_GetArraySize(profiles); i++) {
         cJSON *p = cJSON_GetArrayItem(profiles, i);
         const char *id = jget_str(p, "id", "");
@@ -420,6 +500,19 @@ int detect_refresh_profiles(cJSON *profiles) {
             /* The user's choice of emulator per system survives a refresh. */
             const cJSON *ex = cJSON_GetObjectItemCaseSensitive(p, "exclude");
             if (ex) cJSON_AddItemToObject(fresh, "exclude", cJSON_Duplicate(ex, 1));
+            const cJSON *extra = cJSON_GetObjectItemCaseSensitive(p, "extra");
+            if (extra) cJSON_AddItemToObject(fresh, "extra", cJSON_Duplicate(extra, 1));
+            const cJSON *mode = cJSON_GetObjectItemCaseSensitive(p, "sync");
+            if (cJSON_IsString(mode)) cJSON_AddStringToObject(fresh, "sync", mode->valuestring);
+            /* ... and each platform's. */
+            cJSON *fe;
+            cJSON_ArrayForEach(fe, cJSON_GetObjectItemCaseSensitive(fresh, "platforms")) {
+                const cJSON *pe, *m;
+                cJSON_ArrayForEach(pe, cJSON_GetObjectItemCaseSensitive(p, "platforms"))
+                    if (!strcmp(profiles_system_key(pe), profiles_system_key(fe)) &&
+                        cJSON_IsString(m = cJSON_GetObjectItemCaseSensitive(pe, "sync")))
+                        cJSON_AddStringToObject(fe, "sync", m->valuestring);
+            }
             LOGI("updated the %s profile for %s", jget_str(fresh, "name", ""), jget_str(p, "root", ""));
             cJSON_ReplaceItemInArray(profiles, i, fresh);
             changed++;

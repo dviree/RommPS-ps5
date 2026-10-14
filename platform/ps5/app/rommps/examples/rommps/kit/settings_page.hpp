@@ -1,8 +1,11 @@
-// RommPS: the Settings tab. The look, when and what RomM Sync syncs, its
-// updates, the setup again and unpairing; an About panel beside them.
+// RommPS: the Settings tab, in sections: when and what it syncs, downloads,
+// the look and notifications, emulators, updates and the RomM connection; an
+// About panel beside them.
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
+
+#include <string>
 
 #include "credits.hpp"
 #include "rommps_app.hpp"
@@ -34,6 +37,7 @@ class SettingsPage
   private:
     enum Id
     {
+        kSaveSync,
         kLook,
         kInterval,
         kOnExit,
@@ -49,14 +53,20 @@ class SettingsPage
         kEmulators,
         kSetup,
         kForget,
-        kCount
+        kDiagnostics,
+        kCount,
+        kHeader = -1 // a section's name
     };
-    std::vector<Row> rows(const App &app) const;
+    // The rows as shown, sections included; ids[i] is row i's Id.
+    std::vector<Row> rows(const App &app, std::vector<int> *ids = nullptr) const;
 
     RowList list_;
     bool on_credits_ = false;
     bool emulators_asked_ = false; // the focus is on the author's portrait, below the rows
     CodecCall call_;
+    // The diagnostic bundle: 0 not asked, 1 being made, 2 saved (where_), 3 failed.
+    int diag_ = 0;
+    std::string diag_where_;
     int armed_ = -1; // a row that does something lasting, waiting for its second press
     float armed_age_ = 0.0f;
 };

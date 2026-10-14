@@ -11,4 +11,8 @@ cJSON *detect_emulators(void);
  * features. Profiles written by hand are left alone. Returns how many changed. */
 int detect_refresh_profiles(cJSON *profiles);
 
+/* The built-in emulator catalog entry with this id (emulators.json), or NULL.
+ * Parsed once; don't free. */
+const cJSON *detect_catalog_entry(const char *id);
+
 #endif

@@ -262,12 +262,39 @@ static int enabled(void) {
 /* The console is busy with something that matters more. */
 static int busy(void) { return sync_game_running() || sync_is_running() || library_busy(); }
 
+struct cover_list { char **list; int n, cap; };
+
+/* The covers seen first go first: the games on this console, then each
+ * platform's tile, then the rest in RomM's order. */
+static void prioritize(struct cover_list *c, const char *heads) {
+    char **out = malloc(sizeof *out * (size_t)(c->n ? c->n : 1));
+    char *taken = calloc((size_t)(c->n ? c->n : 1), 1);
+    if (!out || !taken) { free(out); free(taken); return; }
+    int n = 0;
+    state_lock();
+    const cJSON *e;
+    cJSON_ArrayForEach(e, state_section("roms")) {
+        const char *cover = jget_str(e, "cover", "");
+        if (!cover[0] || !(file_exists(e->string) || dir_exists(e->string))) continue;
+        for (int i = 0; i < c->n; i++)
+            if (!taken[i] && !strcmp(c->list[i], cover)) { taken[i] = 1; out[n++] = c->list[i]; break; }
+    }
+    state_unlock();
+    for (int pass = 0; pass < 2; pass++)
+        for (int i = 0; i < c->n; i++)
+            if (!taken[i] && (pass || heads[i])) { taken[i] = 1; out[n++] = c->list[i]; }
+    free(taken);
+    free(c->list);
+    c->list = out;
+}
+
 static int collect_cover(const cJSON *it, const cJSON *page, int first, void *ctx) {
     (void)page, (void)first;
     if (!it) return 0;
     const char *p = jget_str(it, "path_cover_small", "");
     if (!valid_path(p)) return 0;
-    struct { char **list; int n, cap; } *c = ctx;
+    struct cover_list *c = ctx;
+    if (c->n >= 100000) return 0;
     if (c->n == c->cap) {
         c->cap = c->cap ? c->cap * 2 : 512;
         char **grown = realloc(c->list, sizeof *grown * (size_t)c->cap);
@@ -281,7 +308,9 @@ static int collect_cover(const cJSON *it, const cJSON *page, int first, void *ct
 /* Every game's cover path, platform by platform. 0 when RomM gave the whole
  * list; -1 if it couldn't be reached part way (what came is still used). */
 static int list_all(void) {
-    struct { char **list; int n, cap; } c = {0};
+    struct cover_list c = {0};
+    static char heads[100000]; /* a platform's first covers (its tile) */
+    memset(heads, 0, sizeof heads);
     long st = 0;
     cJSON *plats = romm_call("GET", "/api/platforms", NULL, &st), *p;
     int ok = st == 200 && cJSON_IsArray(plats);
@@ -289,9 +318,12 @@ static int list_all(void) {
         if (jget_num(p, "rom_count", 0) <= 0) continue;
         char path[160];
         snprintf(path, sizeof path, "/api/roms?platform_ids=%d&order_by=name&order_dir=asc&with_char_index=false" ROMS_LEAN, (int)jget_num(p, "id", 0));
+        int before = c.n;
         if (romm_list(path, 0, 100000, collect_cover, &c, &st) < 0) ok = 0;
+        for (int k = before; k < c.n && k < before + 3; k++) heads[k] = 1;
     }
     cJSON_Delete(plats);
+    prioritize(&c, heads);
     pthread_mutex_lock(&g_lock);
     for (int i = 0; i < g_nall; i++) free(g_all[i]);
     free(g_all);

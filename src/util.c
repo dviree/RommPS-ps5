@@ -194,8 +194,9 @@ int write_file_atomic(const char *path, const void *data, size_t len) {
     return rename(tmp, path);
 }
 
-int copy_file(const char *src, const char *dst) {
+int copy_file_progress(const char *src, const char *dst, copy_progress_fn cb, void *ud) {
     char tmp[PATH_MAX_LEN];
+    int64_t total = file_size(src), done = 0;
     FILE *in = fopen(src, "rb");
     if (!in) return -1;
     char *buf = malloc(64 * 1024);
@@ -218,6 +219,11 @@ int copy_file(const char *src, const char *dst) {
             rc = -1;
             break;
         }
+        done += (int64_t)n;
+        if (cb && cb(ud, done, total)) {
+            rc = -1;
+            break;
+        }
     }
     fclose(in);
     free(buf);
@@ -227,6 +233,10 @@ int copy_file(const char *src, const char *dst) {
     if (rc == 0) rc = rename(tmp, dst);
     if (rc != 0) unlink(tmp);
     return rc;
+}
+
+int copy_file(const char *src, const char *dst) {
+    return copy_file_progress(src, dst, NULL, NULL);
 }
 
 static void parse_version(const char *s, int v[3]) {
@@ -447,7 +457,7 @@ int md5_file_hex(const char *path, char out[33]) {
 }
 
 /* A hard link to src at dst (a copy across drives); folders file by file. */
-int link_or_copy(const char *src, const char *dst) {
+int link_or_copy_progress(const char *src, const char *dst, copy_progress_fn cb, void *ud) {
     if (dir_exists(src)) {
         if (mkdir_p(dst) != 0) return -1;
         DIR *d = opendir(src);
@@ -459,7 +469,7 @@ int link_or_copy(const char *src, const char *dst) {
             char a[PATH_MAX_LEN], b[PATH_MAX_LEN];
             path_join(a, sizeof a, src, de->d_name);
             path_join(b, sizeof b, dst, de->d_name);
-            if (link_or_copy(a, b) != 0) rc = -1;
+            if (link_or_copy_progress(a, b, cb, ud) != 0) rc = -1;
         }
         closedir(d);
         return rc;
@@ -469,7 +479,12 @@ int link_or_copy(const char *src, const char *dst) {
         unlink(dst);
     }
     if (link(src, dst) == 0) return 0;
-    return copy_file(src, dst);
+    LOGI("can't link %s to %s (%s), copying instead", src, dst, strerror(errno));
+    return copy_file_progress(src, dst, cb, ud);
+}
+
+int link_or_copy(const char *src, const char *dst) {
+    return link_or_copy_progress(src, dst, NULL, NULL);
 }
 
 int fnv1a64_file_hex(const char *path, char out[17]) {

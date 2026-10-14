@@ -2,8 +2,9 @@
 //
 //   1. the RomM server's address, typed on the kit's on-screen keyboard;
 //   2. the code to approve in RomM (its device pairing), until it's approved;
-//   3. the emulators found on the console, and which one plays a system
-//      several of them can;
+//   3. the emulators found on the console, then each system they play: which
+//      one plays it when several can, and its folders (the ones found, or
+//      folders the user picks);
 //   4. what the first sync would do, and a word about backups;
 //   5. when to sync, then the first sync.
 //
@@ -17,6 +18,7 @@
 #include "rows.hpp"
 #include "ui/components/keyboard.hpp"
 
+#include <array>
 #include <map>
 #include <set>
 #include <string>
@@ -72,9 +74,14 @@ class SetupPage
         std::vector<std::string> cores;
         std::vector<System> systems;
         bool on = true;
+        std::string sync = "all"; // its save sync: "all", "saves" (no states) or "off"
         bool ready = true; // false: found, no preset yet (set up by its folders, like a system with no emulator)
-        bool fresh = false; // found since the last setup
         std::string note;
+        // Its folders for each system when left as they are (detection's
+        // "dirs"): games, saves, states; and which it doesn't let you change.
+        std::map<std::string, std::array<std::string, 3>> dirs;
+        std::map<std::string, int> games; // games already in its folder, by system
+        std::set<std::string> fixed; // "rom_dir", "save_dir", "state_dir"
     };
     // What a row of the emulator step does.
     struct RowRef
@@ -83,11 +90,15 @@ class SetupPage
         {
             kNone,
             kEmulator,
+            kEmuSync, // an emulator's save sync (unused since save sync is per platform)
+            kSysSync, // a platform's save sync
             kMain,
             kAlso,
             kPs2,
             kOwn,
             kOwnFolder,
+            kFolders,   // a system's folders in an emulator: as found, or picked
+            kSysFolder, // one of them (emulator: 0 games, 1 saves, 2 states)
             kContinue
         } kind = kNone;
         int emulator = -1; // or, for kOwnFolder, which folder (0 games, 1 saves, 2 states)
@@ -119,19 +130,31 @@ class SetupPage
     void load_emulators(App &app);
     void load_preview(App &app);
     void load_autostart(App &app);
-    std::vector<Conflict> conflicts() const;
-    // The root of the emulator that keeps a system: the one picked, else RetroArch, else the first.
+    std::vector<Conflict> conflicts() const; // systems several emulators on play
+    std::vector<Conflict> systems() const;   // every system an emulator on plays, by name
+    // The root of the emulator that keeps a system: the one picked ("" when
+    // it's off), else RetroArch, else the first.
     std::string chosen(const Conflict &conflict) const;
-    // Rows above the emulators' (a message instead of them).
-    int lead() const { return error_.empty() && !emulators_.empty() ? 0 : 1; }
+    // Whether an emulator plays a system, as the main one or an extra.
+    bool used(const Emulator &e) const;
+    // Rows above the emulators': their heading, or a message instead of them.
+    int lead() const { return 1; }
     std::vector<Row> emulator_rows(const App &app, std::vector<RowRef> *refs = nullptr) const;
-    std::vector<Row> preview_rows() const;
-    std::vector<Row> finish_rows() const;
+    // Settings' Emulators: what Save sends, whether it differs from what was
+    // saved, and saving it.
+    std::string save_body() const;
+    bool dirty() const;
+    void save_emulators(App &app, hui::ui::Feedback &feedback);
+    // Leaving with changes not saved: Save, Discard or Keep editing.
+    std::vector<Row> leave_rows() const;
+    // ids: what each row is (the steps' rows depend on save_sync_).
+    std::vector<Row> preview_rows(std::vector<int> *ids = nullptr) const;
+    std::vector<Row> finish_rows(std::vector<int> *ids = nullptr) const;
     bool has_ps2() const;
     // The server's systems no ticked emulator plays, in the server's order.
     std::vector<std::string> uncovered() const;
     // The folder picker (/api/fs), for one of a system's folders.
-    void open_picker(App &app, const std::string &key, int which);
+    void open_picker(App &app, const std::string &key, int which, const std::string &root = "");
     void browse(App &app, const std::string &path);
     void update_picker(App &app, const hui::InputFrame &input, float dt, hui::ui::Feedback &feedback);
     void draw_picker(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, const Look &look, float clock) const;
@@ -159,15 +182,26 @@ class SetupPage
     // 3
     std::vector<Emulator> emulators_;
     bool emulators_loaded_ = false;
-    std::map<std::string, std::string> choices_; // system key -> the root of its main emulator
+    float retry_in_ = 0.0f; // after an error: looking again (the service may have been restarting)
+    std::map<std::string, std::string> choices_; // system key -> the root of its main emulator ("": off)
+    std::map<std::string, std::string> sync_;    // system key -> its save sync: "all", "saves" or "off"
+    std::string expanded_;                       // the system whose details show
+    int focus_expander_ = 0;                     // the focused row's chevron (for the hint): 0, 1 closed, 2 open
     std::map<std::string, std::set<std::string>> also_; // system key -> roots of its extra emulators
+    // Folders picked for a system in an emulator, instead of the ones found:
+    // system key -> emulator root -> games, saves, states ("" keeps that one).
+    std::map<std::string, std::map<std::string, std::array<std::string, 3>>> custom_dirs_;
     bool editing_ = false;
+    std::string saved_;      // save_body() + ps2_cards_ as last saved (Settings' Emulators)
+    bool leaving_ = false;   // asking whether to save before going back
+    RowList leave_list_;
     std::string ps2_cards_ = "per_game";
     std::map<std::string, Own> own_;    // by system key (first slug)
     std::vector<std::string> own_order_; // the server's order
     std::vector<std::string> manual_;    // own_ keys of emulators with no preset, in the order found
     bool picking_ = false;
     std::string pick_key_;
+    std::string pick_root_; // set: the folder is for custom_dirs_[pick_key_][pick_root_], not own_
     int pick_which_ = 0;
     std::string fs_path_, fs_parent_;
     std::vector<std::string> fs_folders_;
@@ -178,6 +212,7 @@ class SetupPage
     // 4
     Preview preview_;
     bool backed_up_ = false;
+    bool save_sync_ = true; // false: RomM only as a game source, the sync steps skipped
 
     // 5
     Config finish_;

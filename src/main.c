@@ -11,6 +11,7 @@
 
 #include "autostart.h"
 #include "config.h"
+#include "events.h"
 #include "covers.h"
 #include "detect.h"
 #include "http.h"
@@ -97,7 +98,7 @@ static void *app_main(void *arg) {
     int init = plat_init();
     if (init > 0) {
         /* RommPS and the HEN can both start a copy at boot; that's no news. */
-        if (!plat_app_installed()) plat_notify("RomM Sync is already running");
+        if (!plat_app_installed()) plat_notify("RommPS is already running");
         return NULL;
     }
     if (init != 0) fprintf(stderr, "platform init reported a problem\n");
@@ -120,12 +121,13 @@ static void *app_main(void *arg) {
      * breaks HTTPS certificate checks and save timestamps. */
     if (time(NULL) < 1577836800) { /* 2020-01-01 */
         LOGW("the console clock isn't set; HTTPS and save times will be wrong");
-        plat_notify("RomM Sync: the console's date and time aren't set. Set them in the console's Settings for syncing to work.");
+        plat_notify("RommPS: the console's date and time aren't set. Set them in the console's Settings for syncing to work.");
     }
 
     config_load();
     if (g_cfg.profiles_custom && detect_refresh_profiles(g_cfg.profiles) > 0) config_save();
     state_load();
+    events_load();
     /* Copies of older versions left on the console are brought up to date. */
     autostart_repair();
     http_global_init(plat_ca_bundle(), g_cfg.tls_verify);
@@ -156,11 +158,11 @@ static void *app_main(void *arg) {
         plat_notify("RommPS %s is out of date. Update it from ProsperoStore.", app_version);
     } else if (quiet) {
     } else if (!plat_info()->self_update) {
-        plat_notify("RomM Sync is running. Install RommPS from ProsperoStore to use it on the console.");
+        plat_notify("RommPS is running. Install the RommPS app from ProsperoStore to use it on the console.");
     } else if (config_is_paired()) {
-        plat_notify("RomM Sync running - http://%s:%d", ip[0] ? ip : "127.0.0.1", port);
+        plat_notify("RommPS running - http://%s:%d", ip[0] ? ip : "127.0.0.1", port);
     } else {
-        plat_notify("RomM Sync: open http://%s:%d to pair with RomM", ip[0] ? ip : "127.0.0.1", port);
+        plat_notify("RommPS: open http://%s:%d to pair with RomM", ip[0] ? ip : "127.0.0.1", port);
     }
 
     sleep(5); /* wait for the network after boot */
@@ -198,7 +200,7 @@ static void *app_main(void *arg) {
             if (ip[0] || --resume_ticks == 0) {
                 resume_ticks = 0;
                 resume_notified = now;
-                if (!quiet) plat_notify("RomM Sync resumed - http://%s:%d", ip[0] ? ip : "127.0.0.1", port);
+                if (!quiet) plat_notify("RommPS resumed - http://%s:%d", ip[0] ? ip : "127.0.0.1", port);
             }
         }
 

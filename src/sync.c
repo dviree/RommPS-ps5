@@ -11,13 +11,16 @@
 
 #include "config.h"
 #include "bundle.h"
+#include "gcmem.h"
 #include "gameid.h"
 #include "http.h"
 #include "memcard.h"
 #include "platform.h"
 #include "profiles.h"
 #include "romm.h"
+#include "events.h"
 #include "state.h"
+#include "statefmt.h"
 #include "util.h"
 #include "zip.h"
 
@@ -51,6 +54,11 @@ typedef struct {
     int is_bundle;          /* several files synced as one zip, see bundle.h */
     char game_id[16];
     char upload_name[256];
+    /* GameCube saves in a GCI folder keep the form RomM has them in (gc_form):
+     * "zip" (the folder's files for the game), "gci" (one of them, gc_file)
+     * or "card" (a whole memory card with them on it). */
+    char gc_form[8];
+    char gc_file[PATH_MAX_LEN];
 } local_file;
 
 typedef struct {
@@ -88,6 +96,13 @@ static void set_phase(const char *p) { str_copy(g_phase, sizeof g_phase, p); }
 
 
 static char *url_q(const char *s) { return http_escape(s ? s : ""); }
+
+/* This console's slots: its own ("autosave"), and the ones derived from it
+ * ("autosave-rtc", "autosave-<emulator>"). Other slots are other devices'. */
+static int our_slot(const scan_ctx *c, const char *slot) {
+    size_t n = strlen(c->slot);
+    return !strncmp(slot, c->slot, n) && (slot[n] == 0 || slot[n] == '-');
+}
 
 static const char *slot_for(const scan_ctx *c, const profile_map *m, const char *file,
                             char *buf, size_t n) {
@@ -150,6 +165,7 @@ static int game_file(const local_rom *r, char *out, size_t n) {
 
 static int map_uses(const profile_map *m, const char *var) {
     return strstr(m->save_stems, var) || strstr(m->state_stems, var) || strstr(m->save_name, var) ||
+           strstr(m->save_names_by_core, var) ||
            strstr(m->state_name, var);
 }
 
@@ -203,6 +219,15 @@ static void add_derived_stems(local_rom *r, cJSON *e) {
             /* A template whose value is unknown (no serial) names nothing. */
             if (stem[0] && !strchr(stem, '{') && strcmp(stem, "_1") != 0 && stem[0] != '_') add_stem(r, stem);
         }
+    }
+    /* Names other cores of the emulator give the save ("core=template;..."). */
+    char list[256], *save = NULL;
+    str_copy(list, sizeof list, m->save_names_by_core);
+    for (char *t = strtok_r(list, ";", &save); t; t = strtok_r(NULL, ";", &save)) {
+        char *eq = strchr(t, '='), stem[256];
+        if (!eq) continue;
+        str_template(stem, sizeof stem, eq + 1, vars);
+        if (stem[0] && !strchr(stem, '{') && stem[0] != '_') add_stem(r, stem);
     }
 }
 
@@ -260,6 +285,14 @@ static cJSON *resolve_rom_on_server(const scan_ctx *c, const profile_map *m, con
     return match.by_stem;
 }
 
+/* Whether a comma separated list has item. */
+static int list_has(const char *list, const char *item) {
+    size_t n = strlen(item);
+    for (const char *p = list; n && (p = strstr(p, item)); p += n)
+        if ((p == list || p[-1] == ',') && (p[n] == ',' || !p[n])) return 1;
+    return 0;
+}
+
 static void record_local_rom(const char *path, int rom_id, const profile_map *m, const cJSON *srv,
                              const char *md5, const local_rom *r) {
     const char *name = jget_str(srv, "name", ""), *fs_name = jget_str(srv, "fs_name", "");
@@ -280,6 +313,84 @@ static void record_local_rom(const char *path, int rom_id, const profile_map *m,
     else
         cJSON_AddItemToObject(e, "stems", stems);
     cJSON_DeleteItemFromObjectCaseSensitive(e, "miss_at");
+    cJSON_DeleteItemFromObjectCaseSensitive(e, "miss_dirs");
+}
+
+/* Renames files in dir (and its folders one level down, RetroArch's per-core
+ * ones) named "<old>.<ext>" to "<new>.<ext>", unless that's taken. */
+static void rename_by_stem(const char *dir, const char *old_stem, const char *new_stem, int depth) {
+    DIR *d = opendir(dir);
+    struct dirent *de;
+    size_t ol = strlen(old_stem);
+    while (d && (de = readdir(d))) {
+        if (de->d_name[0] == '.') continue;
+        char from[PATH_MAX_LEN], to[PATH_MAX_LEN + 256];
+        path_join(from, sizeof from, dir, de->d_name);
+        if (dir_exists(from)) {
+            if (depth == 0) rename_by_stem(from, old_stem, new_stem, 1);
+            continue;
+        }
+        if (strncmp(de->d_name, old_stem, ol) != 0 || de->d_name[ol] != '.') continue;
+        snprintf(to, sizeof to, "%s/%s%s", dir, new_stem, de->d_name + ol);
+        if (file_exists(to) || rename(from, to) != 0) continue;
+        LOGI("renamed %s -> %s", from, to);
+        state_lock();
+        static const char *const sections[] = {"saves", "states"};
+        for (int i = 0; i < 2; i++) {
+            cJSON *sec = state_section(sections[i]), *e = cJSON_DetachItemFromObjectCaseSensitive(sec, from);
+            if (e) cJSON_AddItemToObject(sec, to, e);
+        }
+        state_unlock();
+    }
+    if (d) closedir(d);
+}
+
+/* Version 1.1.1 downloaded a game RomM keeps as a folder holding one file as
+ * a single file named after the folder, with no extension, which emulators
+ * don't list. It becomes that folder with the file inside under its own
+ * name, as downloads do now; its saves and states take the file's name, which
+ * is what the emulator looks for. Returns 1 when it moved the game. */
+static int fix_bare_rom(const profile_map *m, const char *path, int rom_id) {
+    char api[64];
+    long st = 0;
+    snprintf(api, sizeof api, "/api/roms/%d", rom_id);
+    cJSON *rom = romm_call("GET", api, NULL, &st);
+    const cJSON *files = cJSON_GetObjectItemCaseSensitive(rom, "files");
+    const char *fn = path_basename(jget_str(cJSON_GetArrayItem(files, 0), "file_name", ""));
+    int done = 0;
+    if (st == 200 && cJSON_GetArraySize(files) == 1 && path_ext(fn)[0] &&
+        !strcmp(jget_str(rom, "fs_name", ""), path_basename(path))) {
+        char tmp[PATH_MAX_LEN + 8], inside[PATH_MAX_LEN + 256];
+        snprintf(tmp, sizeof tmp, "%s.moving", path);
+        snprintf(inside, sizeof inside, "%s/%s", path, fn);
+        if (rename(path, tmp) == 0) {
+            if (mkdir_p(path) == 0 && rename(tmp, inside) == 0) {
+                char old_stem[256], new_stem[256];
+                str_copy(old_stem, sizeof old_stem, path_basename(path));
+                path_stem(new_stem, sizeof new_stem, fn);
+                LOGI("moved %s into %s, so the emulator lists it", path, inside);
+                state_lock();
+                cJSON *e = state_entry("roms", path);
+                if (e) {
+                    cJSON_DeleteItemFromObjectCaseSensitive(e, "stems");
+                    cJSON *stems = cJSON_AddArrayToObject(e, "stems");
+                    cJSON_AddItemToArray(stems, cJSON_CreateString(old_stem));
+                    cJSON_AddItemToArray(stems, cJSON_CreateString(new_stem));
+                }
+                state_unlock();
+                if (strcmp(old_stem, new_stem) != 0) {
+                    rename_by_stem(m->save_dir, old_stem, new_stem, 0);
+                    if (strcmp(m->state_dir, m->save_dir) != 0) rename_by_stem(m->state_dir, old_stem, new_stem, 0);
+                }
+                done = 1;
+            } else {
+                rmdir(path);
+                rename(tmp, path); /* put it back as it was */
+            }
+        }
+    }
+    cJSON_Delete(rom);
+    return done;
 }
 
 static void scan_rom_dir(scan_ctx *c, const profile_map *m) {
@@ -309,12 +420,29 @@ static void scan_rom_dir(scan_ctx *c, const profile_map *m) {
             add_stem(&r, de->d_name);
             DIR *sd = opendir(path);
             struct dirent *se;
+            char only[256] = "";
+            int files = 0;
             while (sd && (se = readdir(sd))) {
                 if (se->d_name[0] == '.') continue;
                 path_stem(stem, sizeof stem, se->d_name);
                 if (ext_in_list(se->d_name, ".cue,.m3u,.gdi,.chd,.ccd,.iso,.pbp")) add_stem(&r, stem);
+                if (files++ == 0) str_copy(only, sizeof only, stem);
             }
             if (sd) closedir(sd);
+            /* One file in the folder (RomM keeps some single-file games so):
+             * emulators name its saves after that file. */
+            if (files == 1) {
+                /* The emulator names saves after the file inside, so new
+                 * saves take its name (the folder's still matches old ones). */
+                add_stem(&r, only);
+                for (int k = 1; k < r.nstems; k++)
+                    if (!strcmp(r.stems[k], only)) {
+                        char first[sizeof r.stems[0]];
+                        str_copy(first, sizeof first, r.stems[0]);
+                        str_copy(r.stems[0], sizeof r.stems[0], only);
+                        str_copy(r.stems[k], sizeof r.stems[k], first);
+                    }
+            }
         } else {
             path_stem(stem, sizeof stem, de->d_name);
             add_stem(&r, stem);
@@ -324,6 +452,34 @@ static void scan_rom_dir(scan_ctx *c, const profile_map *m) {
         cJSON *e = state_entry("roms", path);
         int rom_id = e ? (int)jget_num(e, "rom_id", 0) : 0;
         time_t miss_at = e ? (time_t)jget_num(e, "miss_at", 0) : 0;
+        /* A folder that holds several of the emulator's systems (Porpoise:
+         * GameCube and Wii): a game is the system's it matched for, and a
+         * miss for one system doesn't stop the others asking. */
+        const char *was_dir = e ? jget_str(e, "platform_dir", "") : "";
+        const int other_system = e && rom_id && was_dir[0] && !strcmp(jget_str(e, "profile", ""), m->profile_id) &&
+                                 strcmp(was_dir, m->platform_dir) != 0;
+        if (miss_at && !list_has(jget_str(e, "miss_dirs", ""), m->platform_dir)) miss_at = 0;
+        if (other_system) {
+            state_unlock();
+            continue;
+        }
+        /* Seen under this emulator now (an older version named its profile otherwise). */
+        if (e && rom_id && strcmp(jget_str(e, "profile", ""), m->profile_id) != 0) {
+            int stale = 1; /* no profile has that name now */
+            for (int k = 0; k < c->nmaps && stale; k++) stale = strcmp(c->maps[k].profile_id, jget_str(e, "profile", "")) != 0;
+            /* In a folder shared by systems, the system it was recorded for takes it. */
+            int theirs = 0;
+            for (int k = 0; k < c->nmaps && stale && was_dir[0] && strcmp(was_dir, m->platform_dir) != 0; k++)
+                theirs |= !strcmp(c->maps[k].profile_id, m->profile_id) && !strcmp(c->maps[k].platform_dir, was_dir);
+            if (theirs) {
+                state_unlock();
+                continue;
+            }
+            if (stale) {
+                jset_str(e, "profile", m->profile_id);
+                jset_str(e, "platform_dir", m->platform_dir);
+            }
+        }
         if (e) {
             const cJSON *s;
             cJSON_ArrayForEach(s, cJSON_GetObjectItemCaseSensitive(e, "stems"))
@@ -344,8 +500,13 @@ static void scan_rom_dir(scan_ctx *c, const profile_map *m) {
                 LOGI("matched %s -> RomM rom %d", path, rom_id);
             } else {
                 cJSON *ne = state_entry_ensure("roms", path);
+                char dirs[256];
+                const char *had = jget_str(ne, "miss_dirs", "");
+                if (list_has(had, m->platform_dir)) str_copy(dirs, sizeof dirs, had);
+                else snprintf(dirs, sizeof dirs, "%s%s%s", had, had[0] ? "," : "", m->platform_dir);
                 jset_num(ne, "rom_id", 0);
                 jset_num(ne, "miss_at", (double)now);
+                jset_str(ne, "miss_dirs", dirs);
                 jset_str(ne, "profile", m->profile_id);
             }
             state_unlock();
@@ -356,6 +517,18 @@ static void scan_rom_dir(scan_ctx *c, const profile_map *m) {
             cJSON_AddItemToArray(g_unmatched, cJSON_CreateString(path));
             state_unlock();
             continue;
+        }
+        if (!is_dir && !path_ext(de->d_name)[0] && fix_bare_rom(m, path, rom_id)) {
+            char fixed[PATH_MAX_LEN];
+            str_copy(fixed, sizeof fixed, path); /* the folder, now */
+            DIR *sd = opendir(fixed);
+            struct dirent *se;
+            while (sd && (se = readdir(sd)))
+                if (se->d_name[0] != '.') {
+                    path_stem(stem, sizeof stem, se->d_name);
+                    add_stem(&r, stem);
+                }
+            if (sd) closedir(sd);
         }
         r.rom_id = rom_id;
         if (m->save_stems[0] || m->state_stems[0] || map_uses(m, "{rom_stem_safe}")) {
@@ -377,8 +550,19 @@ static void scan_rom_dir(scan_ctx *c, const profile_map *m) {
 
 /* The folder the emulator reads this game's saves (or states) from. Returns 0
  * when saves are sorted by core and the core name isn't known. */
+static int rom_game_id(const local_rom *r, char *out, size_t n);
+
 static int expected_dir(const local_rom *r, int states, char *out, size_t n) {
     const rom_rules *ru = &r->rules;
+    /* A folder per game, by its id (Porpoise's states/GAFE01). */
+    const char *at = strstr(states ? ru->state_dir : ru->save_dir, "{game_id}");
+    if (at) {
+        char id[16];
+        if (rom_game_id(r, id, sizeof id) != 0) return 0;
+        const char *dir = states ? ru->state_dir : ru->save_dir;
+        snprintf(out, n, "%.*s%s%s", (int)(at - dir), dir, id, at + 9);
+        return 1;
+    }
     char content_dir[PATH_MAX_LEN];
     str_copy(content_dir, sizeof content_dir, r->path);
     if (!dir_exists(r->path)) { /* multi-file games are folders themselves */
@@ -411,8 +595,16 @@ static const local_rom *match_rom(const scan_ctx *c, const char *file_dir, const
     size_t best_len = 0, best_active_len = 0;
     for (int i = 0; i < c->nroms; i++) {
         const local_rom *r = &c->roms[i];
-        if (!r->rules.sync_saves || (!states && r->map->save_layout[0])) continue;
+        if (!r->rules.sync_saves || (states && !r->map->sync_states) || (!states && r->map->save_layout[0])) continue;
         if (!ext_in_list(file_name, states ? r->map->state_exts : r->map->save_exts)) continue;
+        if (strstr(states ? r->rules.state_dir : r->rules.save_dir, "{game_id}")) {
+            char exp[PATH_MAX_LEN];
+            if (expected_dir(r, states, exp, sizeof exp) && !strcmp(exp, file_dir)) {
+                *active = 1;
+                return r;
+            }
+            continue;
+        }
         for (int s = 0; s < r->nstems; s++) {
             size_t l = strlen(r->stems[s]);
             if (strncmp(file_name, r->stems[s], l) != 0 || file_name[l] != '.') continue;
@@ -485,6 +677,21 @@ static void add_stray(const local_rom *r, const char *path, int states) {
     state_unlock();
 }
 
+/* Saves on a PS1 memory card (directory frames starting one), or -1 when
+ * it isn't one. */
+static int psx_card_saves(const profile_map *m, const char *path) {
+    if (strcmp(m->save_format, "psx-card") != 0) return -1;
+    unsigned char dir[16 * 128];
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return -1;
+    size_t n = fread(dir, 1, sizeof dir, fp);
+    fclose(fp);
+    if (n < sizeof dir || dir[0] != 'M' || dir[1] != 'C') return -1;
+    int used = 0;
+    for (int i = 1; i < 16; i++) used += dir[i * 128] == 0x51;
+    return used;
+}
+
 static void scan_file_dir(scan_ctx *c, const char *dir, int depth, int states) {
     DIR *d = opendir(dir);
     if (!d) return;
@@ -525,9 +732,22 @@ static void scan_file_dir(scan_ctx *c, const char *dir, int depth, int states) {
             for (int i = 0; i < c->nsaves; i++) {
                 local_file *o = &c->saves[i];
                 if (o->rom_id == f.rom_id && !strcmp(o->slot, f.slot)) {
-                    LOGW("two local saves for rom %d slot %s: %s, %s (using newest)", f.rom_id,
-                         f.slot, o->path, f.path);
-                    if (f.mtime > o->mtime) {
+                    /* Said once per pair while running, not at every sync. */
+                    static cJSON *told;
+                    char key[2 * PATH_MAX_LEN + 8];
+                    snprintf(key, sizeof key, "%s|%s", o->path, f.path);
+                    state_lock();
+                    if (!told) told = cJSON_CreateObject();
+                    const int first = !cJSON_GetObjectItemCaseSensitive(told, key);
+                    if (first) cJSON_AddTrueToObject(told, key);
+                    state_unlock();
+                    if (first)
+                        LOGW("two local saves for rom %d slot %s: %s, %s (using newest)", f.rom_id, f.slot, o->path, f.path);
+                    /* A blank card (an emulator made a fresh one under another
+                     * name) never beats one with saves on it. */
+                    int fo = psx_card_saves(r->map, f.path), oo = psx_card_saves(r->map, o->path);
+                    int take = fo == 0 && oo > 0 ? 0 : oo == 0 && fo > 0 ? 1 : f.mtime > o->mtime;
+                    if (take) {
                         hash_cached("saves", &f);
                         *o = f;
                     }
@@ -558,6 +778,9 @@ static void base_dir(const local_rom *r, int states, char *out, size_t n) {
         }
     } else {
         str_copy(out, n, states ? r->rules.state_dir : r->rules.save_dir);
+        /* A folder per game ("states/{game_id}"): scan from its parent. */
+        char *id = strstr(out, "/{game_id}");
+        if (id) *id = 0;
     }
 }
 
@@ -815,6 +1038,203 @@ static int rom_game_id(const local_rom *r, char *out, size_t n) {
     return 0;
 }
 
+/* ---- GameCube: the form RomM keeps a game's saves in ----
+ * RomM is the authority: a game's saves go up in the form they're there in.
+ *   zip   the game's .gci files zipped (this app's own form, and the default)
+ *   gci   a single .gci, as other apps send it
+ *   card  a whole memory card (.raw), as Dolphin keeps one: this console's
+ *         saves for the game are put on a copy of RomM's card (kept in
+ *         gccards/<rom id>.raw), so the card's other saves stay as they are. */
+
+static const char *gc_form_of_name(const char *file_name) {
+    if (str_ends_with_ci(file_name, ".gci")) return "gci";
+    if (ext_in_list(file_name, ".raw,.gcp,.mcp")) return "card";
+    return "zip";
+}
+
+static void gc_card_cache(int rom_id, char *out, size_t n) {
+    char dir[PATH_MAX_LEN];
+    path_join(dir, sizeof dir, plat_data_dir(), "gccards");
+    snprintf(out, n, "%s/%d.raw", dir, rom_id);
+}
+
+static void gc_form_get(const local_rom *r, char *form, size_t n, char *name, size_t nn) {
+    state_lock();
+    cJSON *e = state_entry("roms", r->path);
+    str_copy(form, n, e ? jget_str(e, "gc_form", "zip") : "zip");
+    if (name) str_copy(name, nn, e ? jget_str(e, "gc_name", "") : "");
+    state_unlock();
+}
+
+static void gc_form_set(const local_rom *r, const char *form, const char *name) {
+    state_lock();
+    cJSON *e = state_entry("roms", r->path);
+    if (e) {
+        jset_str(e, "gc_form", form);
+        if (name && name[0]) jset_str(e, "gc_name", name);
+    }
+    state_unlock();
+}
+
+/* Fetches a save's content without telling RomM this console has it. */
+static int gc_fetch(int save_id, const char *dest) {
+    char api[64];
+    snprintf(api, sizeof api, "/api/saves/%d/content", save_id);
+    http_resp resp;
+    mkdir_parent(dest);
+    if (romm_download(api, dest, NULL, NULL, &resp) != 0) {
+        LOGW("save %d: %s", save_id, resp.error);
+        unlink(dest);
+        return -1;
+    }
+    return 0;
+}
+
+static int gc_is_card_file(const char *path) {
+    size_t len = 0;
+    char *data = read_file(path, &len);
+    gc_card card;
+    int ok = data && gc_card_open(&card, (const unsigned char *)data, len) == 0;
+    if (ok) gc_card_free(&card);
+    free(data);
+    return ok;
+}
+
+/* Which form RomM has the game's saves in: its newest one in this console's
+ * slot, or else its newest one anywhere. For a card, a copy of it is kept
+ * here so this console's saves can be put on it. */
+static void gc_learn_form(const scan_ctx *c, const local_rom *r) {
+    char api[64];
+    snprintf(api, sizeof api, "/api/saves?rom_id=%d", r->rom_id);
+    long st = 0;
+    cJSON *all = romm_call("GET", api, NULL, &st);
+    const cJSON *s, *mine = NULL, *any = NULL;
+    cJSON_ArrayForEach(s, (st == 200 ? all : NULL)) {
+        if ((int)jget_num(s, "rom_id", 0) != r->rom_id) continue;
+        const char *up = jget_str(s, "updated_at", "");
+        if (!any || strcmp(up, jget_str(any, "updated_at", "")) > 0) any = s;
+        if (!strcmp(jget_str(s, "slot", ""), c->slot) && (!mine || strcmp(up, jget_str(mine, "updated_at", "")) > 0))
+            mine = s;
+    }
+    const cJSON *pick = mine ? mine : any;
+    if (!pick && st == 200) { /* nothing on RomM: this app's own form, no card kept */
+        char cache[PATH_MAX_LEN];
+        gc_card_cache(r->rom_id, cache, sizeof cache);
+        unlink(cache);
+        gc_form_set(r, "zip", NULL);
+    }
+    if (pick) {
+        /* RomM stamps the names it keeps: "MemoryCardA.USA [2026-10-14_16-39-01].raw". */
+        char name[256];
+        str_copy(name, sizeof name, jget_str(pick, "file_name", ""));
+        char *open = strrchr(name, '['), *close = open ? strchr(open, ']') : NULL;
+        if (open && close && open > name && open[-1] == ' ') memmove(open - 1, close + 1, strlen(close + 1) + 1);
+        const char *form = gc_form_of_name(name);
+        char was[8];
+        gc_form_get(r, was, sizeof was, NULL, 0);
+        if (strcmp(was, form) != 0) LOGI("%s: RomM keeps its saves as %s (%s)", path_basename(r->path), form, name);
+        gc_form_set(r, form, name);
+        char cache[PATH_MAX_LEN];
+        gc_card_cache(r->rom_id, cache, sizeof cache);
+        if (strcmp(form, "card") != 0) unlink(cache); /* RomM keeps no card for it now */
+        if (!strcmp(form, "card") && !file_exists(cache) && gc_fetch((int)jget_num(pick, "id", 0), cache) == 0 &&
+            !gc_is_card_file(cache)) {
+            LOGW("%s: RomM's save %s isn't a GameCube memory card", path_basename(r->path), name);
+            unlink(cache);
+        }
+    }
+    cJSON_Delete(all);
+}
+
+/* .gci files taken off a card. */
+typedef struct {
+    unsigned char *g[32];
+    size_t n[32];
+    int count;
+} gc_list;
+
+static void gc_keep(const unsigned char *g, size_t n, void *ud) {
+    gc_list *l = ud;
+    if (l->count >= 32 || !(l->g[l->count] = malloc(n))) return;
+    memcpy(l->g[l->count], g, n);
+    l->n[l->count++] = n;
+}
+
+static void gc_list_free(gc_list *l) {
+    for (int k = 0; k < l->count; k++) free(l->g[k]);
+    l->count = 0;
+}
+
+/* RomM's card with this console's saves for the game on it, in place of the
+ * card's own. Unchanged saves leave the card exactly as RomM has it. */
+static int gc_virtual_card(int rom_id, const bundle *b, unsigned char **out, size_t *out_n) {
+    char cache[PATH_MAX_LEN];
+    gc_card_cache(rom_id, cache, sizeof cache);
+    size_t len = 0;
+    char *raw = read_file(cache, &len);
+    gc_card card;
+    if (!raw || gc_card_open(&card, (const unsigned char *)raw, len) != 0) {
+        free(raw);
+        return -1;
+    }
+    free(raw);
+    /* Same saves, same bytes (where each sits on the card aside)? */
+    gc_list on_card = {0};
+    gc_card_saves(&card, b->game_id, gc_keep, &on_card);
+    int same = on_card.count == b->n;
+    for (int i = 0; same && i < b->n; i++) {
+        size_t gl = 0;
+        char *g = read_file(b->files[i].path, &gl);
+        int match = 0;
+        for (int k = 0; g && k < on_card.count && !match; k++)
+            match = on_card.n[k] == gl && !memcmp(on_card.g[k], g, 0x36) &&
+                    !memcmp(on_card.g[k] + 0x38, g + 0x38, gl - 0x38);
+        same = match;
+        free(g);
+    }
+    gc_list_free(&on_card);
+    int rc = 0;
+    if (!same) {
+        gc_card_remove(&card, b->game_id);
+        for (int i = 0; i < b->n && rc == 0; i++) {
+            size_t gl = 0;
+            char *g = read_file(b->files[i].path, &gl);
+            if (!g || gc_card_put(&card, (const unsigned char *)g, gl) != 0) {
+                LOGW("%s doesn't fit on RomM's memory card", b->files[i].name);
+                rc = -1;
+            }
+            free(g);
+        }
+    }
+    if (rc == 0) {
+        *out = card.data;
+        *out_n = card.size;
+        card.data = NULL;
+    }
+    gc_card_free(&card);
+    return rc;
+}
+
+/* The one .gci that goes up when RomM keeps a single one: the same save as
+ * RomM's, or the newest. */
+static int gc_pick_gci(const bundle *b, const char *server_name, char *out, size_t n) {
+    time_t best = 0;
+    out[0] = 0;
+    for (int i = 0; i < b->n; i++)
+        if (server_name && !strcmp(b->files[i].name, server_name)) {
+            str_copy(out, n, b->files[i].path);
+            return 0;
+        }
+    for (int i = 0; i < b->n; i++) {
+        time_t t = file_mtime(b->files[i].path);
+        if (!out[0] || t > best) {
+            best = t;
+            str_copy(out, n, b->files[i].path);
+        }
+    }
+    return out[0] ? 0 : -1;
+}
+
 static void fill_bundle_file(local_file *f, const scan_ctx *c, const local_rom *r, const bundle *b) {
     memset(f, 0, sizeof *f);
     snprintf(f->path, sizeof f->path, "%s#%s", b->dir, b->game_id);
@@ -834,6 +1254,26 @@ static void fill_bundle_file(local_file *f, const scan_ctx *c, const local_rom *
         path_stem(stem, sizeof stem, r->path);
         snprintf(f->upload_name, sizeof f->upload_name, "%s.zip", stem);
     }
+    if (strcmp(r->map->save_layout, "gci") != 0) return;
+    /* In the form RomM has it: the hash RomM would give what we'd send. */
+    char form[8], name[256];
+    gc_form_get(r, form, sizeof form, name, sizeof name);
+    if (!strcmp(form, "gci") && gc_pick_gci(b, name, f->gc_file, sizeof f->gc_file) == 0) {
+        str_copy(f->gc_form, sizeof f->gc_form, "gci");
+        md5_file_hex(f->gc_file, f->hash);
+        str_copy(f->upload_name, sizeof f->upload_name, name[0] ? name : path_basename(f->gc_file));
+    } else if (!strcmp(form, "card")) {
+        unsigned char *card = NULL;
+        size_t n = 0;
+        str_copy(f->gc_form, sizeof f->gc_form, "card");
+        if (gc_virtual_card(r->rom_id, b, &card, &n) == 0) {
+            md5_hex(card, n, f->hash);
+            free(card);
+        } else {
+            f->hash[0] = 0; /* no card to put them on: not sent (scan_bundles) */
+        }
+        str_copy(f->upload_name, sizeof f->upload_name, name[0] ? name : "MemoryCardA.raw");
+    }
 }
 
 static void scan_bundles(scan_ctx *c) {
@@ -846,13 +1286,76 @@ static void scan_bundles(scan_ctx *c) {
         state_lock();
         cJSON_AddItemToArray(g_bundle_roots, cJSON_CreateString(b.dir));
         state_unlock();
+        if (!strcmp(r->map->save_layout, "gci")) gc_learn_form(c, r);
         if (b.n > 0 && !find_save(c, r->rom_id, c->slot)) {
             local_file f;
             fill_bundle_file(&f, c, r, &b);
-            add_file(&c->saves, &c->nsaves, &c->capsaves, &f);
+            if (f.hash[0]) add_file(&c->saves, &c->nsaves, &c->capsaves, &f);
+            else LOGW("%s: its saves can't go on RomM's memory card yet", path_basename(r->path));
         }
         bundle_free(&b);
     }
+}
+
+/* A GameCube save from RomM that's a memory card or a single .gci: the
+ * game's saves on it replace the game's .gci files here. 1 when placed, 0
+ * when it's neither (a zip), -1 when it can't be used. The bundle is listed
+ * again. */
+static int gc_place(const local_rom *r, bundle *b, const char *file) {
+    size_t len = 0;
+    char *data = read_file(file, &len);
+    if (!data) return -1;
+    const unsigned char *u = (const unsigned char *)data;
+    gc_card card;
+    int rc = 0;
+    if (gc_card_open(&card, u, len) == 0) {
+        gc_list on_card = {0};
+        gc_card_saves(&card, b->game_id, gc_keep, &on_card);
+        if (on_card.count) {
+            for (int i = 0; i < b->n; i++) unlink(b->files[i].path);
+            mkdir_p(b->dir);
+        } else {
+            LOGI("RomM's memory card has no saves for %s: keeping this console's", b->game_id);
+        }
+        for (int k = 0; k < on_card.count; k++) {
+            char name[256], path[PATH_MAX_LEN];
+            gc_gci_name(on_card.g[k], name, sizeof name);
+            path_join(path, sizeof path, b->dir, name);
+            if (write_file_atomic(path, on_card.g[k], on_card.n[k]) != 0) rc = -1;
+        }
+        gc_list_free(&on_card);
+        gc_card_free(&card);
+        char cache[PATH_MAX_LEN];
+        gc_card_cache(r->rom_id, cache, sizeof cache);
+        mkdir_parent(cache);
+        if (rc == 0) rc = copy_file(file, cache) == 0 ? 1 : -1;
+        if (rc > 0) gc_form_set(r, "card", NULL);
+    } else if (gc_gci_valid(u, len)) {
+        /* Over the same save here, or beside the others. */
+        char path[PATH_MAX_LEN] = "";
+        for (int i = 0; i < b->n && !path[0]; i++) {
+            size_t gl = 0;
+            char *g = read_file(b->files[i].path, &gl);
+            if (g && gl >= GC_DENTRY && gc_gci_same_save((const unsigned char *)g, u)) str_copy(path, sizeof path, b->files[i].path);
+            free(g);
+        }
+        if (!path[0]) {
+            char name[256];
+            gc_gci_name(u, name, sizeof name);
+            mkdir_p(b->dir);
+            path_join(path, sizeof path, b->dir, name);
+        }
+        rc = write_file_atomic(path, u, len) == 0 ? 1 : -1;
+        if (rc > 0) gc_form_set(r, "gci", NULL);
+    }
+    free(data);
+    if (rc > 0) {
+        char id[16];
+        str_copy(id, sizeof id, b->game_id);
+        bundle_free(b);
+        if (bundle_for_rom(r, id, b) != 0) rc = -1;
+    }
+    return rc;
 }
 
 /* Downloads a save zip and unpacks it over the game's current files. With
@@ -889,7 +1392,9 @@ static int do_download_bundle(const scan_ctx *c, int save_id, const local_rom *r
         if (bundle_zip(&b, cur) == 0) backup_file(c, cur, r->rom_id);
         unlink(cur);
     }
-    if (bundle_replace(&b, zip, tmpdir) != 0) {
+    int placed = !strcmp(r->map->save_layout, "gci") ? gc_place(r, &b, zip) : 0;
+    if (placed < 0) goto out;
+    if (!placed && bundle_replace(&b, zip, tmpdir) != 0) {
         LOGE("save %d is not a usable zip", save_id);
         goto out;
     }
@@ -929,7 +1434,26 @@ static int do_upload(const scan_ctx *c, const local_file *f, int session_id, int
     free(dev);
     long st = 0;
     cJSON *j;
-    if (f->is_bundle) {
+    char card_up[PATH_MAX_LEN] = "";
+    if (!strcmp(f->gc_form, "gci")) {
+        j = romm_upload("POST", path, "saveFile", f->gc_file, f->upload_name, &st);
+    } else if (!strcmp(f->gc_form, "card")) {
+        /* RomM's card with this console's saves for the game on it. */
+        bundle b;
+        unsigned char *card = NULL;
+        size_t n = 0;
+        snprintf(card_up, sizeof card_up, "%s/tmp/upload-%d.raw", plat_data_dir(), f->rom_id);
+        if (bundle_reopen(f, &b) != 0 || gc_virtual_card(f->rom_id, &b, &card, &n) != 0 ||
+            write_file_atomic(card_up, card, n) != 0) {
+            bundle_free(&b);
+            free(card);
+            if (status_out) *status_out = 0;
+            return -1;
+        }
+        bundle_free(&b);
+        free(card);
+        j = romm_upload("POST", path, "saveFile", card_up, f->upload_name, &st);
+    } else if (f->is_bundle) {
         char zip[PATH_MAX_LEN];
         bundle b;
         snprintf(zip, sizeof zip, "%s/tmp/upload-%d.zip", plat_data_dir(), f->rom_id);
@@ -946,6 +1470,12 @@ static int do_upload(const scan_ctx *c, const local_file *f, int session_id, int
     }
     if (status_out) *status_out = st;
     int ok = (st == 200 || st == 201) && j;
+    if (card_up[0]) { /* the card RomM has now is the one kept here */
+        char cache[PATH_MAX_LEN];
+        gc_card_cache(f->rom_id, cache, sizeof cache);
+        if (ok) move_file(card_up, cache);
+        else unlink(card_up);
+    }
     if (ok) {
         record_save(f, (int)jget_num(j, "id", 0), jget_str(j, "content_hash", f->hash));
         LOGI("uploaded %s (rom %d, slot %s)", f->path, f->rom_id, f->slot);
@@ -955,6 +1485,23 @@ static int do_upload(const scan_ctx *c, const local_file *f, int session_id, int
 }
 
 /* Where a downloaded save goes when the game has no local save yet. */
+static void active_core(const profile_map *m, char *out, size_t n);
+
+/* The save name the emulator uses with the core it runs now. */
+static void save_name_now(const profile_map *m, char *out, size_t n) {
+    str_copy(out, n, m->save_name);
+    if (!m->save_names_by_core[0]) return;
+    char core[64], list[256], *save = NULL;
+    active_core(m, core, sizeof core);
+    str_copy(list, sizeof list, m->save_names_by_core);
+    for (char *t = strtok_r(list, ";", &save); t; t = strtok_r(NULL, ";", &save)) {
+        char *eq = strchr(t, '=');
+        if (!eq) continue;
+        *eq = 0;
+        if (!strcmp(t, core)) str_copy(out, n, eq + 1);
+    }
+}
+
 static void download_target(const local_rom *r, const char *server_name, const char *slot,
                             const scan_ctx *c, char *out, size_t n) {
     char ext[32];
@@ -971,8 +1518,9 @@ static void download_target(const local_rom *r, const char *server_name, const c
     }
     const char *vars[13];
     name_vars(r, ext, vars);
-    char name[512], dir[PATH_MAX_LEN];
-    str_template(name, sizeof name, r->map->save_name, vars);
+    char name[512], dir[PATH_MAX_LEN], tmpl[128];
+    save_name_now(r->map, tmpl, sizeof tmpl);
+    str_template(name, sizeof name, tmpl, vars);
     /* A name from a value this game lacks (no serial read) falls back to its own. */
     if (!name[0] || name[0] == '_' || name[0] == '.' || strchr(name, '{'))
         str_template(name, sizeof name, "{rom_stem}{ext}", vars);
@@ -980,9 +1528,11 @@ static void download_target(const local_rom *r, const char *server_name, const c
     path_join(out, n, dir, name);
 }
 
+/* Returns 0, -1 when it failed, or -2 when it would put a blank PS1 card over
+ * one with saves on it (only with guard; the user choosing RomM's copy isn't). */
 static int do_download(const scan_ctx *c, int save_id, const char *dest, const local_file *f,
                        int rom_id, const char *slot, int session_id, const char *server_hash,
-                       const char *server_updated_at) {
+                       const char *server_updated_at, int guard) {
     char path[512], tmp[PATH_MAX_LEN];
     char *dev = url_q(c->device_id);
     int o = snprintf(path, sizeof path, "/api/saves/%d/content?device_id=%s&optimistic=false", save_id, dev);
@@ -994,6 +1544,11 @@ static int do_download(const scan_ctx *c, int save_id, const char *dest, const l
         LOGE("download of save %d failed: %s", save_id, r.error);
         unlink(tmp);
         return -1;
+    }
+    if (guard && f && psx_card_saves(f->map, tmp) == 0 && psx_card_saves(f->map, dest) > 0) {
+        LOGW("save %d is a blank memory card and %s has saves on it: not replacing it", save_id, dest);
+        unlink(tmp);
+        return -2;
     }
     backup_file(c, dest, rom_id);
     if (move_file(tmp, dest) != 0) {
@@ -1043,6 +1598,248 @@ static const local_rom *find_rom(const scan_ctx *c, int rom_id, const char *emul
     return any;
 }
 
+/* The core an emulator runs now, from its own settings file
+ * ("state_core_setting"); the first listed value when the file says nothing. */
+static void active_core(const profile_map *m, char *out, size_t n) {
+    out[0] = 0;
+    char value[32] = "";
+    char *txt = m->core_key[0] ? read_file(m->core_file, NULL) : NULL;
+    for (char *l = txt; l && *l;) {
+        size_t kl = strlen(m->core_key);
+        if (!strncmp(l, m->core_key, kl) && l[kl] == '=') {
+            size_t v = 0;
+            for (l += kl + 1; *l && *l != '\n' && *l != '\r' && v + 1 < sizeof value; l++) value[v++] = *l;
+            value[v] = 0;
+            break;
+        }
+        l = strchr(l, '\n');
+        if (l) l++;
+    }
+    free(txt);
+    char list[256];
+    str_copy(list, sizeof list, m->core_values);
+    char *save = NULL;
+    for (char *t = strtok_r(list, ",", &save); t; t = strtok_r(NULL, ",", &save)) {
+        char *eq = strchr(t, '=');
+        if (!eq) continue;
+        *eq = 0;
+        if (!out[0] || !strcmp(t, value)) str_copy(out, n, eq + 1);
+        if (!strcmp(t, value)) break;
+    }
+}
+
+/* Whether an emulator can load a state RomM says `emulator` made. */
+static int map_takes_state(const profile_map *m, const char *emulator) {
+    char want[64], key[64];
+    emulator_key(emulator ? emulator : "", want, sizeof want);
+    if (!want[0]) return 0;
+    if (m->core_values[0]) {
+        char core[64];
+        active_core(m, core, sizeof core);
+        emulator_key(core, key, sizeof key);
+        if (strcmp(key, want) != 0) return 0;
+    }
+    char list[256];
+    str_copy(list, sizeof list, m->state_cores);
+    char *save = NULL;
+    for (char *t = strtok_r(list, ",", &save); t; t = strtok_r(NULL, ",", &save)) {
+        emulator_key(t, key, sizeof key);
+        if (!strcmp(key, want)) return 1;
+    }
+    return 0;
+}
+
+/* The local copy of a game whose emulator can load a state from `emulator`. */
+static const local_rom *find_rom_for_state(const scan_ctx *c, int rom_id, const char *emulator) {
+    for (int i = 0; i < c->nroms; i++) {
+        const local_rom *r = &c->roms[i];
+        if (r->rom_id == rom_id && r->rules.sync_saves && r->map->sync_states && map_takes_state(r->map, emulator)) return r;
+    }
+    return NULL;
+}
+
+/* The emulator as the log names it: "RetroArch (mGBA)", "PSXS5". */
+static const char *emu_name(const profile_map *m) {
+    static __thread char out[160];
+    if (m->core_name[0]) snprintf(out, sizeof out, "%s (%s)", m->profile_name, m->core_name);
+    else str_copy(out, sizeof out, m->profile_name);
+    return out;
+}
+
+/* Saves from before RomM's sync slots (no slot), or kept in another device's
+ * slot: this console's sync never brings them.
+ * A game here with no save of its own gets the newest one, and from then on
+ * syncs it in this console's slot. Never over a file that's there. */
+static int fetch_slotless_saves(scan_ctx *c, int only_rom) {
+    int want = 0;
+    for (int i = 0; i < c->nroms && !want; i++) {
+        const local_rom *r = &c->roms[i];
+        want = r->rules.sync_saves && !r->map->save_layout[0] && (!only_rom || r->rom_id == only_rom) &&
+               !find_save(c, r->rom_id, c->slot);
+    }
+    if (!want) return 0;
+    long st = 0;
+    char api[64] = "/api/saves";
+    if (only_rom) snprintf(api, sizeof api, "/api/saves?rom_id=%d", only_rom);
+    cJSON *all = romm_call("GET", api, NULL, &st);
+    int n = 0;
+    for (int i = 0; st == 200 && i < c->nroms; i++) {
+        const local_rom *r = &c->roms[i];
+        if (!r->rules.sync_saves || r->map->save_layout[0] || (only_rom && r->rom_id != only_rom) ||
+            find_save(c, r->rom_id, c->slot))
+            continue;
+        int done_before = 0; /* another emulator's copy of the game took it */
+        for (int k = 0; k < i; k++) done_before |= c->roms[k].rom_id == r->rom_id;
+        if (done_before) continue;
+        /* The newest of each kind: the save, and files beside it such as a
+         * real-time clock (.rtc), each in the slot it would sync in. */
+        struct { char slot[64]; const cJSON *s; } picks[4];
+        int np = 0, slotted = 0;
+        const cJSON *s;
+        cJSON_ArrayForEach(s, all) {
+            if ((int)jget_num(s, "rom_id", 0) != r->rom_id) continue;
+            if (our_slot(c, jget_str(s, "slot", ""))) { /* the sync's own */
+                slotted = 1;
+                continue;
+            }
+            const char *name = jget_str(s, "file_name", "");
+            if (!ext_in_list(name, r->map->save_exts)) continue;
+            char sl[64];
+            slot_for(c, r->map, name, sl, sizeof sl);
+            int at = -1;
+            for (int k = 0; k < np; k++)
+                if (!strcmp(picks[k].slot, sl)) at = k;
+            if (at < 0 && np < 4) {
+                at = np++;
+                str_copy(picks[at].slot, sizeof picks[at].slot, sl);
+                picks[at].s = s;
+            } else if (at >= 0 && strcmp(jget_str(s, "updated_at", ""), jget_str(picks[at].s, "updated_at", "")) > 0) {
+                picks[at].s = s;
+            }
+        }
+        if (slotted) continue; /* the sync's own job */
+        for (int k = 0; k < np; k++) {
+            if (find_save(c, r->rom_id, picks[k].slot)) continue;
+            char dest[PATH_MAX_LEN];
+            download_target(r, jget_str(picks[k].s, "file_name", ""), picks[k].slot, c, dest, sizeof dest);
+            if (file_exists(dest)) continue;
+            mkdir_parent(dest);
+            if (do_download(c, (int)jget_num(picks[k].s, "id", 0), dest, NULL, r->rom_id, picks[k].slot, 0, "",
+                            jget_str(picks[k].s, "updated_at", ""), 0) == 0) {
+                n++;
+                events_add("save", "downloaded", r->rom_id, dest, emu_name(r->map),
+                           jget_str(picks[k].s, "slot", "")[0] ? "From another device" : "Older save with no slot");
+            }
+        }
+    }
+    cJSON_Delete(all);
+    return n;
+}
+
+/* Saves synced before whose file is gone from this console (deleted, or lost
+ * with the emulator): RomM sees nothing new, so negotiate never offers them.
+ * The newest version of that slot comes back to where it was. To get rid of a
+ * save for good, delete it on RomM too. */
+static int restore_missing_saves(scan_ctx *c, int only_rom) {
+    typedef struct { char path[PATH_MAX_LEN]; char slot[64]; int rom_id, save_id; } missing;
+    missing *list = NULL;
+    int nlist = 0, cap = 0;
+    state_lock();
+    const cJSON *e;
+    cJSON_ArrayForEach(e, state_section("saves")) {
+        const char *path = e->string;
+        int rom_id = (int)jget_num(e, "rom_id", 0);
+        if (!rom_id || (only_rom && rom_id != only_rom) || strchr(path, '#') || file_exists(path)) continue;
+        if (nlist == cap) {
+            cap = cap ? cap * 2 : 16;
+            missing *grown = realloc(list, (size_t)cap * sizeof *list);
+            if (!grown) break;
+            list = grown;
+        }
+        str_copy(list[nlist].path, sizeof list[nlist].path, path);
+        str_copy(list[nlist].slot, sizeof list[nlist].slot, jget_str(e, "slot", ""));
+        list[nlist].save_id = (int)jget_num(e, "save_id", 0);
+        list[nlist++].rom_id = rom_id;
+    }
+    state_unlock();
+    int n = 0;
+    for (int i = 0; i < nlist; i++) {
+        const missing *m = &list[i];
+        const local_rom *r = NULL;
+        for (int k = 0; k < c->nroms && !r; k++)
+            if (c->roms[k].rom_id == m->rom_id && c->roms[k].rules.sync_saves && !c->roms[k].map->save_layout[0])
+                r = &c->roms[k];
+        if (!r || find_save(c, m->rom_id, m->slot) || file_exists(m->path)) continue; /* the game's gone, or it has a save */
+        int done_before = 0; /* one file per slot: another name of the same save came back already */
+        for (int k = 0; k < i; k++) done_before |= list[k].rom_id == m->rom_id && !strcmp(list[k].slot, m->slot) && file_exists(list[k].path);
+        if (done_before) continue;
+        char api[64];
+        snprintf(api, sizeof api, "/api/saves?rom_id=%d", m->rom_id);
+        long st = 0;
+        cJSON *all = romm_call("GET", api, NULL, &st);
+        const cJSON *s, *best = NULL;
+        cJSON_ArrayForEach(s, (st == 200 ? all : NULL))
+            if ((int)jget_num(s, "rom_id", 0) == m->rom_id && !strcmp(jget_str(s, "slot", ""), m->slot) &&
+                (!best || strcmp(jget_str(s, "updated_at", ""), jget_str(best, "updated_at", "")) > 0))
+                best = s;
+        /* Two names for one slot (a PS1 card by serial and by file name): the
+         * one that had RomM's newest version gets it. */
+        int other = 0;
+        const int best_id = best ? (int)jget_num(best, "id", 0) : 0;
+        for (int k = i + 1; best && m->save_id != best_id && k < nlist; k++)
+            other |= list[k].rom_id == m->rom_id && !strcmp(list[k].slot, m->slot) && list[k].save_id == best_id;
+        if (best && !other) {
+            mkdir_parent(m->path);
+            if (do_download(c, (int)jget_num(best, "id", 0), m->path, NULL, m->rom_id, m->slot, 0,
+                            jget_str(best, "content_hash", ""), jget_str(best, "updated_at", ""), 0) == 0) {
+                n++;
+                events_add("save", "downloaded", m->rom_id, m->path, emu_name(r->map), "Missing here");
+            }
+        }
+        cJSON_Delete(all);
+    }
+    free(list);
+    return n;
+}
+
+/* A game whose saves are a folder (GameCube, PSP, Wii) with none of them on
+ * this console while RomM has some: a new emulator, or files deleted. RomM's
+ * newest in this console's slot (or else anywhere) comes down. */
+static int restore_missing_bundles(scan_ctx *c, int only_rom) {
+    int n = 0;
+    for (int i = 0; i < c->nroms; i++) {
+        const local_rom *r = &c->roms[i];
+        if (!r->rules.sync_saves || !bundle_supported(r->map->save_layout) || (only_rom && r->rom_id != only_rom)) continue;
+        int done_before = 0; /* another emulator's copy of the game */
+        for (int k = 0; k < i; k++) done_before |= c->roms[k].rom_id == r->rom_id && c->roms[k].rules.sync_saves && bundle_supported(c->roms[k].map->save_layout);
+        char id[16];
+        bundle b = {0};
+        if (done_before || rom_game_id(r, id, sizeof id) != 0 || bundle_for_rom(r, id, &b) != 0) continue;
+        const int empty = b.n == 0;
+        bundle_free(&b);
+        if (!empty) continue;
+        char api[64];
+        snprintf(api, sizeof api, "/api/saves?rom_id=%d", r->rom_id);
+        long st = 0;
+        cJSON *all = romm_call("GET", api, NULL, &st);
+        const cJSON *s, *mine = NULL, *any = NULL;
+        cJSON_ArrayForEach(s, (st == 200 ? all : NULL)) {
+            if ((int)jget_num(s, "rom_id", 0) != r->rom_id) continue;
+            const char *up = jget_str(s, "updated_at", "");
+            if (!any || strcmp(up, jget_str(any, "updated_at", "")) > 0) any = s;
+            if (!strcmp(jget_str(s, "slot", ""), c->slot) && (!mine || strcmp(up, jget_str(mine, "updated_at", "")) > 0))
+                mine = s;
+        }
+        const cJSON *pick = mine ? mine : any;
+        if (pick && do_download_bundle(c, (int)jget_num(pick, "id", 0), r, c->slot, 0, jget_str(pick, "content_hash", ""), 1) == 0) {
+            n++;
+            events_add("save", "downloaded", r->rom_id, b.dir, emu_name(r->map), "Missing here");
+        }
+        cJSON_Delete(all);
+    }
+    return n;
+}
+
 static void record_conflict(const local_file *f, const cJSON *op) {
     state_lock();
     int is_new = state_entry("conflicts", f->path) == NULL;
@@ -1056,14 +1853,86 @@ static void record_conflict(const local_file *f, const cJSON *op) {
     jset_num(e, "local_mtime", (double)f->mtime);
     jset_num(e, "detected_at", (double)time(NULL));
     state_unlock();
-    if (is_new) LOGW("conflict for %s: %s", f->path, jget_str(op, "reason", ""));
+    if (is_new) {
+        LOGW("conflict for %s: %s", f->path, jget_str(op, "reason", ""));
+        events_add("save", "conflict", f->rom_id, f->path, emu_name(f->map), "Changed in both places");
+    }
 }
 
 
-static int sync_states_up(scan_ctx *c) {
+/* Server states already brought down or sent up, by id, with the updated_at
+ * we saw. Caller holds state_lock. */
+static int same_time(const char *a, const char *b) {
+    time_t ta = iso8601_parse(a), tb = iso8601_parse(b);
+    return ta > 0 ? ta == tb : !strcmp(a, b);
+}
+
+static void mark_seen(int id, const char *updated_at) {
+    char key[16];
+    snprintf(key, sizeof key, "%d", id);
+    cJSON *seen = state_section("states_seen");
+    cJSON_DeleteItemFromObjectCaseSensitive(seen, key);
+    cJSON_AddStringToObject(seen, key, updated_at);
+}
+
+static int was_seen(int id, const char *updated_at) {
+    char key[16];
+    snprintf(key, sizeof key, "%d", id);
+    const char *at = jget_str(state_section("states_seen"), key, NULL);
+    return at && same_time(at, updated_at);
+}
+
+/* The local file holding server state id, if we have one. */
+static cJSON *state_record_for(int id, char *path, size_t n) {
+    cJSON *e;
+    cJSON_ArrayForEach(e, state_section("states")) {
+        if ((int)jget_num(e, "state_id", 0) == id) {
+            str_copy(path, n, e->string);
+            return e;
+        }
+    }
+    return NULL;
+}
+
+/* Name a state goes up under: the local name with this console's name in it,
+ * so other devices' states (and RomM, which replaces a state of the same
+ * name) never meet it. "Game.state1" -> "Game [PlayStation 5].state1". */
+static void state_upload_name(const char *path, char *out, size_t n) {
+    char device[64];
+    config_lock();
+    str_copy(device, sizeof device, g_cfg.device_name[0] ? g_cfg.device_name : "RommPS");
+    config_unlock();
+    const char *base = path_basename(path), *ext = path_ext(base);
+    snprintf(out, n, "%.*s [%s]%s", (int)(ext - base), base, device, ext);
+}
+
+/* A local state as RomM's web player loads it, in a temp file: RetroArch's
+ * container, uncompressed. *core becomes the core a bare state comes from
+ * when its signature says (PSXS5 runs several). */
+static int state_for_romm(const char *path, char *tmp, size_t n, const char **core) {
+    size_t len = 0, out_n = 0;
+    unsigned char *data = (unsigned char *)read_file(path, &len);
+    if (!data) return -1;
+    const char *sig = state_core_of(data, len);
+    if (sig && core) *core = sig;
+    unsigned char *out = state_to_rastate(data, len, &out_n);
+    free(data);
+    if (!out) {
+        LOGW("can't read the state %s", path);
+        return -1;
+    }
+    static int seq;
+    snprintf(tmp, n, "%s/tmp/state-up-%d.bin", plat_data_dir(), __sync_add_and_fetch(&seq, 1));
+    int rc = write_file_atomic(tmp, out, out_n);
+    free(out);
+    return rc;
+}
+
+static int sync_states_up(scan_ctx *c, int only_rom) {
     int uploaded = 0;
     for (int i = 0; i < c->nstates; i++) {
         local_file *f = &c->states[i];
+        if (only_rom && f->rom_id != only_rom) continue;
         if (file_mtime_ns(f->path) != f->mtime_ns) { /* replaced by the download pass */
             f->mtime = file_mtime(f->path);
             f->mtime_ns = file_mtime_ns(f->path);
@@ -1074,24 +1943,39 @@ static int sync_states_up(scan_ctx *c) {
         cJSON *e = state_entry("states", f->path);
         int same = e && !strcmp(jget_str(e, "hash", ""), f->hash);
         int state_id = e ? (int)jget_num(e, "state_id", 0) : 0;
+        int mine = e && jget_num(e, "mine", 0);
         state_unlock();
         if (same) continue;
 
         char path[512];
         long st = 0;
         cJSON *j = NULL;
-        if (state_id) {
-            snprintf(path, sizeof path, "/api/states/%d", state_id);
-            j = romm_upload("PUT", path, "stateFile", f->path, path_basename(f->path), &st);
+        const char *core = f->map->emulator; /* or the core a bare state's signature names */
+        /* Only a state this console made is replaced on RomM. One that came
+         * from elsewhere and was then saved over here goes up as a new one. */
+        if (state_id && mine) {
+            char tmp[PATH_MAX_LEN];
+            if (state_for_romm(f->path, tmp, sizeof tmp, &core) == 0) {
+                snprintf(path, sizeof path, "/api/states/%d", state_id);
+                j = romm_upload("PUT", path, "stateFile", tmp, path_basename(f->path), &st);
+                unlink(tmp);
+            }
         }
-        if (!state_id || st == 404) {
+        if (!state_id || !mine || st == 404) {
             cJSON_Delete(j);
-            char *emu = url_q(f->map->emulator);
-            snprintf(path, sizeof path, "/api/states?rom_id=%d&emulator=%s", f->rom_id, emu);
-            free(emu);
-            j = romm_upload("POST", path, "stateFile", f->path, path_basename(f->path), &st);
+            j = NULL;
+            char name[300], tmp[PATH_MAX_LEN];
+            state_upload_name(f->path, name, sizeof name);
+            if (state_for_romm(f->path, tmp, sizeof tmp, &core) == 0) {
+                char *emu = url_q(core);
+                snprintf(path, sizeof path, "/api/states?rom_id=%d&emulator=%s", f->rom_id, emu);
+                free(emu);
+                j = romm_upload("POST", path, "stateFile", tmp, name, &st);
+                unlink(tmp);
+            }
         }
         if ((st == 200 || st == 201) && j) {
+            int id = (int)jget_num(j, "id", state_id);
             state_lock();
             cJSON *ne = state_entry_ensure("states", f->path);
             jset_num(ne, "rom_id", f->rom_id);
@@ -1101,12 +1985,15 @@ static int sync_states_up(scan_ctx *c) {
             snprintf(ns, sizeof ns, "%lld", (long long)file_mtime_ns(f->path));
             jset_str(ne, "mtime_ns", ns);
             jset_num(ne, "size", (double)f->size);
-            jset_num(ne, "state_id", jget_num(j, "id", state_id));
+            jset_num(ne, "state_id", id);
+            jset_num(ne, "mine", 1);
             jset_str(ne, "server_updated_at", jget_str(j, "updated_at", ""));
             jset_num(ne, "synced_at", (double)time(NULL));
+            mark_seen(id, jget_str(j, "updated_at", ""));
             state_unlock();
             uploaded++;
             LOGI("uploaded state %s", f->path);
+            events_add("state", "uploaded", f->rom_id, f->path, emu_name(f->map), NULL);
         }
         cJSON_Delete(j);
     }
@@ -1124,21 +2011,68 @@ static void state_local_name(const local_rom *r, const char *server_name, char *
             return;
         }
     }
-    const char *vars[13];
-    name_vars(r, path_ext(server_name), vars);
+    const char *ext = path_ext(server_name), *vars[13];
+    if (!strcmp(ext, ".state")) ext = r->map->state_slot0;
+    name_vars(r, ext, vars);
     str_template(out, n, r->map->state_name, vars);
+    /* A name from a value this game lacks (no hash read): none at all. */
+    if (out[0] == '.' || out[0] == '_' || strchr(out, '{')) out[0] = 0;
+}
+
+/* A file there already, or one another server state is kept in. */
+static int state_path_taken(const char *path, int id) {
+    if (file_exists(path)) return 1;
+    state_lock();
+    const cJSON *e = state_entry("states", path);
+    int taken = e && (int)jget_num(e, "state_id", 0) != id;
+    state_unlock();
+    return taken;
+}
+
+/* The next free numbered slot beside path ("Game.state" -> "Game.state1"),
+ * for an emulator whose states are numbered. 0 if there's none. */
+static int free_state_slot(const local_rom *r, char *path, size_t n, int id) {
+    if (!strchr(r->map->state_exts, '*')) return 0;
+    char base[PATH_MAX_LEN];
+    str_copy(base, sizeof base, path);
+    char *dot = strrchr(base, '.');
+    if (!dot || strncmp(dot, ".state", 6) != 0) return 0;
+    dot[6] = 0; /* "Game.state" */
+    for (int slot = 1; slot < 100; slot++) {
+        char p[PATH_MAX_LEN + 8];
+        snprintf(p, sizeof p, "%s%d", base, slot);
+        if (!state_path_taken(p, id)) {
+            str_copy(path, n, p);
+            return 1;
+        }
+    }
+    return 0;
 }
 
 /* Downloads a state into place (backing up what was there) and records it. */
-static int fetch_state(const scan_ctx *c, const cJSON *s, const char *path, int rom_id) {
+static int fetch_state(const scan_ctx *c, const cJSON *s, const char *path, const local_rom *r) {
+    int rom_id = r->rom_id;
     char api[128], tmp[PATH_MAX_LEN];
     int id = (int)jget_num(s, "id", 0);
     snprintf(api, sizeof api, "/api/states/%d/content", id);
     snprintf(tmp, sizeof tmp, "%s/tmp/state-%d.bin", plat_data_dir(), id);
-    http_resp r;
-    if (romm_download(api, tmp, NULL, NULL, &r) != 0) {
+    http_resp resp;
+    if (romm_download(api, tmp, NULL, NULL, &resp) != 0) {
         unlink(tmp);
         return -1;
+    }
+    if (!strcmp(r->map->state_format, "raw")) {
+        size_t len = 0, raw_n = 0;
+        unsigned char *data = (unsigned char *)read_file(tmp, &len);
+        unsigned char *raw = data ? state_to_raw(data, len, &raw_n) : NULL;
+        free(data);
+        if (!raw || write_file_atomic(tmp, raw, raw_n) != 0) {
+            LOGW("state %d: can't unpack it for %s", id, path);
+            free(raw);
+            unlink(tmp);
+            return -1;
+        }
+        free(raw);
     }
     backup_file(c, path, rom_id);
     if (move_file(tmp, path) != 0) return -1;
@@ -1156,44 +2090,158 @@ static int fetch_state(const scan_ctx *c, const cJSON *s, const char *path, int 
     jset_str(e, "mtime_ns", ns);
     jset_num(e, "size", (double)file_size(path));
     jset_num(e, "state_id", id);
+    jset_num(e, "mine", 0);
     jset_str(e, "server_updated_at", jget_str(s, "updated_at", ""));
     jset_num(e, "synced_at", (double)time(NULL));
+    mark_seen(id, jget_str(s, "updated_at", ""));
     state_unlock();
     LOGI("downloaded state %s", path);
     return 0;
 }
 
-/* Pulls states that changed on the server since we last saw them. A state
- * that also changed here is kept; the upload pass sends it. */
-static int sync_states_down(scan_ctx *c) {
+/* Logs, once per version, a state no emulator here can load: made by another
+ * core, or by an app whose states only it reads. */
+static void note_skipped_state(const scan_ctx *c, const cJSON *s) {
+    int rom_id = (int)jget_num(s, "rom_id", 0), local = 0;
+    for (int i = 0; i < c->nroms && !local; i++)
+        local = c->roms[i].rom_id == rom_id && c->roms[i].rules.sync_saves && c->roms[i].map->sync_states;
+    if (!local) return; /* game isn't on this console, or its emulator doesn't sync states */
+    char key[16];
+    snprintf(key, sizeof key, "%d", (int)jget_num(s, "id", 0));
+    const char *up = jget_str(s, "updated_at", "");
+    state_lock();
+    cJSON *sk = state_section("states_skipped");
+    int known = !strcmp(jget_str(sk, key, ""), up);
+    if (!known) {
+        cJSON_DeleteItemFromObjectCaseSensitive(sk, key);
+        cJSON_AddStringToObject(sk, key, up);
+    }
+    state_unlock();
+    if (!known) {
+        const char *by = jget_str(s, "emulator", "")[0] ? jget_str(s, "emulator", "") : "an unknown emulator";
+        LOGI("state %s skipped: made by %s, which no emulator here for rom %d can load", jget_str(s, "file_name", "?"), by,
+             rom_id);
+        events_add("state", "skipped", rom_id, jget_str(s, "file_name", ""), "", "No suitable emulator on console");
+    }
+}
+
+/* Pulls states that are new or changed on the server. Each server state keeps
+ * one local file; a new one never replaces a file that's there (the player's
+ * own slot, or another server state) but takes the next free slot. A state
+ * changed here since it came down is kept; the upload pass sends it. */
+static int sync_states_down(scan_ctx *c, int only_rom) {
     long st = 0;
     cJSON *list = romm_call("GET", "/api/states", NULL, &st);
     int n = 0;
     const cJSON *s;
     cJSON_ArrayForEach(s, list) {
-        const local_rom *r = find_rom(c, (int)jget_num(s, "rom_id", 0), jget_str(s, "emulator", NULL));
-        char dir[PATH_MAX_LEN], name[256], path[PATH_MAX_LEN];
-        if (!r || !expected_dir(r, 1, dir, sizeof dir)) continue;
-        const char *server_name = jget_str(s, "file_name", "");
-        if (!ext_in_list(server_name, r->map->state_exts)) continue;
-        state_local_name(r, server_name, name, sizeof name);
-        path_join(path, sizeof path, dir, name);
-
+        if (only_rom && (int)jget_num(s, "rom_id", 0) != only_rom) continue;
+        int id = (int)jget_num(s, "id", 0);
         const char *server_up = jget_str(s, "updated_at", "");
+        char path[PATH_MAX_LEN], rec_hash[33] = "", rec_up[64] = "";
         state_lock();
-        cJSON *e = state_entry("states", path);
-        int known = e && !strcmp(jget_str(e, "server_updated_at", ""), server_up);
-        char rec_hash[33];
-        str_copy(rec_hash, sizeof rec_hash, e ? jget_str(e, "hash", "") : "");
-        state_unlock();
-        if (known) continue;
-
-        if (file_exists(path)) {
-            char hash[33];
-            md5_file_hex(path, hash);
-            if (rec_hash[0] ? strcmp(hash, rec_hash) != 0 : file_mtime(path) >= iso8601_parse(server_up)) continue;
+        int seen = was_seen(id, server_up);
+        cJSON *e = state_record_for(id, path, sizeof path);
+        /* One we kept whose file is gone from here comes back. */
+        const int missing = e && !file_exists(path);
+        if (missing) seen = 0;
+        if (e && !seen && !missing) {
+            str_copy(rec_hash, sizeof rec_hash, jget_str(e, "hash", ""));
+            str_copy(rec_up, sizeof rec_up, jget_str(e, "server_updated_at", ""));
+            /* Recorded before states_seen existed. */
+            if (same_time(rec_up, server_up)) {
+                mark_seen(id, server_up);
+                seen = 1;
+            }
         }
-        if (fetch_state(c, s, path, r->rom_id) == 0) n++;
+        state_unlock();
+        if (seen) continue;
+
+        const char *emulator = jget_str(s, "emulator", "");
+        const local_rom *r = NULL;
+        if (e) { /* a state kept here: the emulator whose folder it's in (two can play the game) */
+            char folder[PATH_MAX_LEN], exp[PATH_MAX_LEN];
+            str_copy(folder, sizeof folder, path);
+            char *slash = strrchr(folder, '/');
+            if (slash) *slash = 0;
+            for (int k = 0; k < c->nroms && !r; k++)
+                if (c->roms[k].rom_id == (int)jget_num(s, "rom_id", 0) && c->roms[k].rules.sync_saves &&
+                    c->roms[k].map->sync_states && map_takes_state(c->roms[k].map, emulator) &&
+                    expected_dir(&c->roms[k], 1, exp, sizeof exp) && !strcmp(exp, folder))
+                    r = &c->roms[k];
+        }
+        if (!r) r = find_rom_for_state(c, (int)jget_num(s, "rom_id", 0), emulator);
+        if (!r) {
+            note_skipped_state(c, s);
+            continue;
+        }
+        char dir[PATH_MAX_LEN], name[256];
+        if (!expected_dir(r, 1, dir, sizeof dir)) continue;
+        const char *server_name = jget_str(s, "file_name", "");
+        /* A folder per game renames what comes down (slot1.state): any state will do. */
+        const int per_game = strstr(r->rules.state_dir, "{game_id}") != NULL;
+        const char *sx = path_ext(server_name);
+        if (per_game ? strncmp(sx, ".state", 6) != 0 : !ext_in_list(server_name, r->map->state_exts)) continue;
+
+        if (e) { /* a newer version of a state we keep */
+            if (file_exists(path)) {
+                char hash[33];
+                md5_file_hex(path, hash);
+                if (strcmp(hash, rec_hash) != 0) continue;
+            }
+        } else if (strstr(r->rules.state_dir, "{game_id}")) {
+            /* A folder per game holding slot1.state, slot2.state...: the first free. */
+            int k = 1;
+            for (; k < 10; k++) {
+                snprintf(name, sizeof name, "slot%d.state", k);
+                path_join(path, sizeof path, dir, name);
+                if (!state_path_taken(path, id)) break;
+            }
+            if (k == 10) {
+                LOGI("state %d skipped: no free slot in %s", id, dir);
+                continue;
+            }
+        } else {
+            state_local_name(r, server_name, name, sizeof name);
+            if (!name[0]) continue;
+            path_join(path, sizeof path, dir, name);
+            if (state_path_taken(path, id) && !free_state_slot(r, path, sizeof path, id)) {
+                LOGI("state %d skipped: no free slot beside %s", id, path);
+                continue;
+            }
+        }
+        if (missing) mkdir_parent(path);
+        if (fetch_state(c, s, path, r) == 0) {
+            n++;
+            events_add("state", "downloaded", r->rom_id, path, emu_name(r->map), missing ? "Missing here" : NULL);
+        } else {
+            events_add("state", "failed", r->rom_id, path, emu_name(r->map), "Download failed");
+        }
+    }
+    /* Forget states that are gone from the server, and the records of states
+     * gone from both sides. */
+    if (st == 200 && cJSON_IsArray(list)) {
+        static const char *const sections[] = {"states_seen", "states_skipped"};
+        state_lock();
+        cJSON *recs = state_section("states"), *rec = recs->child;
+        while (rec) {
+            cJSON *next = rec->next;
+            int id = (int)jget_num(rec, "state_id", 0), there = 0;
+            cJSON_ArrayForEach(s, list) if ((int)jget_num(s, "id", 0) == id) there = 1;
+            if (!there && !file_exists(rec->string)) cJSON_Delete(cJSON_DetachItemViaPointer(recs, rec));
+            rec = next;
+        }
+        for (int i = 0; i < 2; i++) {
+            cJSON *sec = state_section(sections[i]), *k = sec->child;
+            while (k) {
+                cJSON *next = k->next;
+                int there = 0;
+                cJSON_ArrayForEach(s, list) if ((int)jget_num(s, "id", 0) == atoi(k->string)) there = 1;
+                if (!there) cJSON_Delete(cJSON_DetachItemViaPointer(sec, k));
+                k = next;
+            }
+        }
+        state_unlock();
     }
     cJSON_Delete(list);
     return n;
@@ -1208,11 +2256,13 @@ typedef struct {
  * (save_format) has one save: the newest of their copies goes to the others,
  * the copies replaced backed up first. Runs before the saves are scanned (so
  * one save goes up) and after the downloads (so a new one reaches them all). */
+static int share_bundles(scan_ctx *c);
+
 static int share_saves(scan_ctx *c) {
-    int copied = 0;
+    int copied = share_bundles(c);
     for (int i = 0; i < c->nroms; i++) {
         const local_rom *a = &c->roms[i];
-        if (!a->map->save_format[0] || a->map->own_slot || !a->rules.sync_saves) continue;
+        if (!a->map->save_format[0] || a->map->own_slot || !a->rules.sync_saves || a->map->save_layout[0]) continue;
         /* The first member of each group does the work. */
         int first = 1;
         for (int k = 0; k < i && first; k++)
@@ -1247,6 +2297,57 @@ static int share_saves(scan_ctx *c) {
                 copied++;
             }
         }
+    }
+    return copied;
+}
+
+/* The same for a GameCube game two Dolphins play (GCI folders): the game's
+ * .gci files from the one that saved last go to the other's folder. */
+static int share_bundles(scan_ctx *c) {
+    int copied = 0;
+    for (int i = 0; i < c->nroms; i++) {
+        const local_rom *a = &c->roms[i];
+        if (strcmp(a->map->save_layout, "gci") != 0 || a->map->own_slot || !a->rules.sync_saves) continue;
+        int first = 1;
+        for (int k = 0; k < i && first; k++)
+            if (c->roms[k].rom_id == a->rom_id && !strcmp(c->roms[k].map->save_layout, "gci") &&
+                !c->roms[k].map->own_slot && c->roms[k].rules.sync_saves)
+                first = 0;
+        char id[16];
+        if (!first || rom_game_id(a, id, sizeof id) != 0) continue;
+        bundle bs[4];
+        int n = 0, newest = -1;
+        for (int k = i; k < c->nroms && n < 4; k++) {
+            const local_rom *r = &c->roms[k];
+            if (r->rom_id != a->rom_id || strcmp(r->map->save_layout, "gci") || r->map->own_slot || !r->rules.sync_saves)
+                continue;
+            if (bundle_for_rom(r, id, &bs[n]) != 0) continue;
+            if (bs[n].n && (newest < 0 || bs[n].mtime > bs[newest].mtime)) newest = n;
+            n++;
+        }
+        char want[33] = "";
+        if (n >= 2 && newest >= 0) bundle_hash(&bs[newest], want);
+        for (int k = 0; want[0] && k < n; k++) {
+            char have[33];
+            bundle_hash(&bs[k], have);
+            if (k == newest || !strcmp(have, want)) continue;
+            if (bs[k].n) { /* what was there, kept as a zip */
+                char cur[PATH_MAX_LEN];
+                snprintf(cur, sizeof cur, "%s/tmp/%s-shared.zip", plat_data_dir(), id);
+                if (bundle_zip(&bs[k], cur) == 0) backup_file(c, cur, a->rom_id);
+                unlink(cur);
+            }
+            for (int f = 0; f < bs[k].n; f++) unlink(bs[k].files[f].path);
+            mkdir_p(bs[k].dir);
+            for (int f = 0; f < bs[newest].n; f++) {
+                char to[PATH_MAX_LEN];
+                path_join(to, sizeof to, bs[k].dir, bs[newest].files[f].name);
+                if (copy_file(bs[newest].files[f].path, to) == 0) set_file_mtime(to, file_mtime(bs[newest].files[f].path));
+            }
+            LOGI("shared save: %s's GameCube saves -> %s", id, bs[k].dir);
+            copied++;
+        }
+        for (int k = 0; k < n; k++) bundle_free(&bs[k]);
     }
     return copied;
 }
@@ -1296,7 +2397,8 @@ static void forget_other_server(void) {
     state_unlock();
 }
 
-static void run_sync(const char *reason, sync_result *res) {
+/* only_rom limits the transfers to one game; the rest wait for the next sync. */
+static void run_sync(const char *reason, int only_rom, sync_result *res) {
     memset(res, 0, sizeof *res);
     forget_other_server();
     scan_ctx c;
@@ -1342,7 +2444,7 @@ static void run_sync(const char *reason, sync_result *res) {
     int session_id = (int)jget_num(neg, "session_id", 0);
     /* A running game would overwrite a downloaded save, so downloads wait until
      * it closes. The sync right after launch still downloads. */
-    int upload_only = g_game_running && strcmp(reason, "game started") != 0;
+    int upload_only = g_game_running && strcmp(reason, "game started") != 0 && !only_rom;
 
     const cJSON *op;
     int nops = cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(neg, "operations")), k = 0;
@@ -1355,6 +2457,8 @@ static void run_sync(const char *reason, sync_result *res) {
         int rom_id = (int)jget_num(op, "rom_id", 0);
         int save_id = (int)jget_num(op, "save_id", 0);
         const char *slot = jget_str(op, "slot", "");
+        if (only_rom && rom_id != only_rom) continue;
+        if (!our_slot(&c, slot)) continue; /* another device's slot: its saves stay its own */
         const local_file *f = find_save(&c, rom_id, slot);
 
         const char *server_hash = jget_str(op, "server_content_hash", "");
@@ -1424,12 +2528,14 @@ static void run_sync(const char *reason, sync_result *res) {
                 res->uploaded++;
                 if (last_rom != rom_id) roms_touched++;
                 last_rom = rom_id;
+                events_add("save", "uploaded", rom_id, f->path, emu_name(f->map), overwrite ? "Kept this console's" : NULL);
             } else if (ust == 409) {
                 /* The server copy changed since negotiate. */
                 record_conflict(f, op);
                 res->conflicts++;
             } else {
                 res->failed++;
+                events_add("save", "failed", rom_id, f->path, emu_name(f->map), "Upload failed");
             }
         } else if (want_down && upload_only) {
             res->deferred++;
@@ -1448,27 +2554,39 @@ static void run_sync(const char *reason, sync_result *res) {
                     str_copy(dest, sizeof dest, f->path);
                 else
                     download_target(r, jget_str(op, "file_name", ""), slot, &c, dest, sizeof dest);
-                ok = do_download(&c, save_id, dest, f, rom_id, slot, session_id, jget_str(op, "server_content_hash", ""),
-                                 jget_str(op, "server_updated_at", "")) == 0;
+                int rc = do_download(&c, save_id, dest, f, rom_id, slot, session_id, jget_str(op, "server_content_hash", ""),
+                                     jget_str(op, "server_updated_at", ""), 1);
+                if (rc == -2) {
+                    record_conflict(f, op);
+                    res->conflicts++;
+                    events_add("save", "conflict", rom_id, dest, emu_name(r->map), "RomM's card is blank");
+                    continue;
+                }
+                ok = rc == 0;
             }
+            const char *where = r->map->save_layout[0] ? r->path : dest;
             if (ok) {
                 res->downloaded++;
+                events_add("save", "downloaded", rom_id, where, emu_name(r->map), is_conflict ? "Kept RomM's" : NULL);
             } else {
                 res->failed++;
+                events_add("save", "failed", rom_id, where, emu_name(r->map), "Download failed");
             }
         } else {
             res->skipped++;
         }
     }
     cJSON_Delete(neg);
+    if (!upload_only) res->downloaded += restore_missing_saves(&c, only_rom) + restore_missing_bundles(&c, only_rom);
+    if (!upload_only) res->downloaded += fetch_slotless_saves(&c, only_rom);
 
     set_phase("finishing");
     cJSON *done = cJSON_CreateObject();
     cJSON_AddNumberToObject(done, "operations_completed", res->uploaded + res->downloaded + res->noop);
     cJSON_AddNumberToObject(done, "operations_failed", res->failed);
     pthread_mutex_lock(&g_req_lock);
-    cJSON *ps = g_play_sessions;
-    g_play_sessions = NULL;
+    cJSON *ps = only_rom ? NULL : g_play_sessions;
+    if (!only_rom) g_play_sessions = NULL;
     pthread_mutex_unlock(&g_req_lock);
     if (ps) {
         /* If one game's save changed, that's the game that was played. */
@@ -1493,11 +2611,11 @@ static void run_sync(const char *reason, sync_result *res) {
     config_unlock();
     if (do_states) {
         set_phase("syncing save states");
-        if (do_states == 2 && !upload_only) res->states_down = sync_states_down(&c);
-        res->states_up = sync_states_up(&c);
+        if (do_states == 2 && !upload_only) res->states_down = sync_states_down(&c, only_rom);
+        res->states_up = sync_states_up(&c, only_rom);
     }
 
-    res->cards = memcard_backup();
+    if (!only_rom) res->cards = memcard_backup();
     /* A save that just came down reaches the other emulators that share it. */
     share_saves(&c);
 
@@ -1505,6 +2623,47 @@ static void run_sync(const char *reason, sync_result *res) {
     state_save();
     state_unlock();
     scan_free(&c);
+}
+
+/* Runs a sync and adds it to the history. */
+static void run_and_record(const char *reason, int only_rom, sync_result *r) {
+    pthread_mutex_lock(&g_run_lock);
+    events_set_sync(reason);
+    g_running = 1;
+    run_sync(reason, only_rom, r);
+    g_running = 0;
+    g_last_run = time(NULL);
+    set_phase("idle");
+    pthread_mutex_unlock(&g_run_lock);
+    events_save();
+
+    cJSON *h = cJSON_CreateObject();
+    g_sync_count++;
+    cJSON_AddNumberToObject(h, "time", (double)g_last_run);
+    cJSON_AddStringToObject(h, "reason", reason);
+    cJSON_AddNumberToObject(h, "uploaded", r->uploaded);
+    cJSON_AddNumberToObject(h, "downloaded", r->downloaded);
+    cJSON_AddNumberToObject(h, "conflicts", r->conflicts);
+    cJSON_AddNumberToObject(h, "skipped", r->skipped);
+    cJSON_AddNumberToObject(h, "failed", r->failed);
+    cJSON_AddNumberToObject(h, "states_uploaded", r->states_up);
+    cJSON_AddNumberToObject(h, "states_downloaded", r->states_down);
+    cJSON_AddNumberToObject(h, "deferred", r->deferred);
+    cJSON_AddNumberToObject(h, "cards_uploaded", r->cards);
+    if (r->error[0]) cJSON_AddStringToObject(h, "error", r->error);
+    state_lock();
+    state_history_add(h);
+    state_save();
+    state_unlock();
+}
+
+static int sync_summary(const sync_result *r, char *out, size_t n);
+
+static int notify_on(void) {
+    config_lock();
+    int notify = g_cfg.notify;
+    config_unlock();
+    return notify;
 }
 
 static void *worker(void *arg) {
@@ -1518,63 +2677,97 @@ static void *worker(void *arg) {
         pthread_mutex_unlock(&g_req_lock);
 
         if (!config_is_paired()) continue;
-        /* Only manual syncs run until setup is finished. */
-        int ready;
+        /* Only manual syncs run until setup is finished, and none at all
+         * with save sync off (RomM is then only where games come from). */
+        int ready, on;
         config_lock();
         ready = g_cfg.setup_complete;
+        on = g_cfg.save_sync;
         config_unlock();
+        if (!on) {
+            LOGI("sync (%s) skipped: save sync is off", reason);
+            continue;
+        }
         if (!ready && strcmp(reason, "manual") != 0 && strcmp(reason, "first sync") != 0) {
             LOGI("sync (%s) skipped: setup not finished", reason);
             continue;
         }
-        pthread_mutex_lock(&g_run_lock);
-        g_running = 1;
         sync_result r;
-        run_sync(reason, &r);
-        g_running = 0;
-        g_last_run = time(NULL);
-        set_phase("idle");
-        pthread_mutex_unlock(&g_run_lock);
+        const unsigned mark = events_seq();
+        run_and_record(reason, 0, &r);
 
-        cJSON *h = cJSON_CreateObject();
-        g_sync_count++;
-        cJSON_AddNumberToObject(h, "time", (double)g_last_run);
-        cJSON_AddStringToObject(h, "reason", reason);
-        cJSON_AddNumberToObject(h, "uploaded", r.uploaded);
-        cJSON_AddNumberToObject(h, "downloaded", r.downloaded);
-        cJSON_AddNumberToObject(h, "conflicts", r.conflicts);
-        cJSON_AddNumberToObject(h, "skipped", r.skipped);
-        cJSON_AddNumberToObject(h, "failed", r.failed);
-        cJSON_AddNumberToObject(h, "states_uploaded", r.states_up);
-        cJSON_AddNumberToObject(h, "states_downloaded", r.states_down);
-        cJSON_AddNumberToObject(h, "deferred", r.deferred);
-        cJSON_AddNumberToObject(h, "cards_uploaded", r.cards);
-        if (r.error[0]) cJSON_AddStringToObject(h, "error", r.error);
-        state_lock();
-        state_history_add(h);
-        state_save();
-        state_unlock();
-
-        int notify;
-        config_lock();
-        notify = g_cfg.notify;
-        config_unlock();
+        int notify = notify_on();
         if (r.error[0]) {
             LOGE("sync failed: %s", r.error);
-            if (notify) plat_notify("RomM Sync: sync failed: %s", r.error);
+            if (notify) plat_notify("RommPS: couldn't sync. %s", r.error);
         } else {
-            LOGI("sync done: %d up, %d down, %d conflicts, %d failed, %d states", r.uploaded,
-                 r.downloaded, r.conflicts, r.failed, r.states_up);
-            if (notify && (r.uploaded || r.downloaded || r.conflicts || r.failed))
-                plat_notify("RomM Sync: %d uploaded, %d downloaded%s", r.uploaded, r.downloaded,
-                            r.conflicts ? ", conflicts to resolve" : "");
+            /* Issue #10 - Added notification and log file for memory card operations. */
+            LOGI("sync done: %d up, %d down, %d conflicts, %d failed, %d states, %d cards", r.uploaded,
+                 r.downloaded, r.conflicts, r.failed, r.states_up, r.cards);
+            char text[200], games[400];
+            if (notify && sync_summary(&r, text, sizeof text)) {
+                if (events_games(mark, 3, games, sizeof games)) plat_notify("RommPS: %s\n%s", text, games);
+                else plat_notify("RommPS: %s", text);
+            }
         }
     }
     return NULL;
 }
 
+/* What a sync did, for its notification: "2 saves up, 1 state down, 1
+ * conflict to resolve". 0 when it did nothing worth telling. */
+static int sync_summary(const sync_result *r, char *out, size_t n) {
+    struct { int count; const char *one, *many; } parts[] = {
+        {r->uploaded, "save up", "saves up"},       {r->downloaded, "save down", "saves down"},
+        {r->states_up, "state up", "states up"},    {r->states_down, "state down", "states down"},
+        {r->cards, "memory card up", "memory cards up"},
+        {r->conflicts, "conflict to resolve", "conflicts to resolve"}, {r->failed, "failed", "failed"}};
+    size_t o = 0;
+    out[0] = 0;
+    for (size_t i = 0; i < sizeof parts / sizeof parts[0] && o < n; i++)
+        if (parts[i].count > 0)
+            o += (size_t)snprintf(out + o, n - o, "%s%d %s", o ? ", " : "", parts[i].count,
+                                  parts[i].count == 1 ? parts[i].one : parts[i].many);
+    return o > 0;
+}
+
 void sync_init(void) {
     thread_start(worker, NULL);
+}
+
+static void plural(char *out, size_t n, int count, const char *what) {
+    snprintf(out, n, "%d %s%s", count, what, count == 1 ? "" : "s");
+}
+
+int sync_game(int rom_id, const char *name, sync_game_result *out) {
+    memset(out, 0, sizeof *out);
+    config_lock();
+    int ready = g_cfg.setup_complete && g_cfg.save_sync;
+    config_unlock();
+    if (!config_is_paired() || !ready) return -1;
+
+    sync_result r;
+    run_and_record("game downloaded", rom_id, &r);
+    out->saves = r.uploaded + r.downloaded;
+    out->states = r.states_up + r.states_down;
+    out->conflicts = r.conflicts;
+    out->failed = r.failed || r.error[0];
+    LOGI("saves for %s: %d saves, %d states, %d conflicts%s", name, out->saves, out->states, out->conflicts,
+         out->failed ? ", some failed" : "");
+    if (!notify_on()) return 0;
+    if (out->failed) {
+        plat_notify("RommPS: %s downloaded. Its saves couldn't sync", name);
+    } else if (out->conflicts) {
+        plat_notify("RommPS: %s downloaded. A save conflict needs you", name);
+    } else if (out->saves || out->states) {
+        char saves[32] = "", states[32] = "";
+        if (out->saves) plural(saves, sizeof saves, out->saves, "save");
+        if (out->states) plural(states, sizeof states, out->states, "state");
+        plat_notify("RommPS: %s downloaded with %s%s%s", name, saves, out->saves && out->states ? " and " : "", states);
+    } else {
+        plat_notify("RommPS: %s downloaded", name);
+    }
+    return 0;
 }
 
 void sync_request(const char *reason) {
@@ -1669,7 +2862,7 @@ int sync_resolve_conflict(const char *path, const char *keep, char *err, int en)
         if (rc) snprintf(err, (size_t)en, "download failed");
     } else {
         rc = do_download(&c, (int)jget_num(e, "save_id", 0), path, f, f->rom_id, f->slot, 0, jget_str(e, "server_hash", ""),
-                         jget_str(e, "server_updated_at", ""));
+                         jget_str(e, "server_updated_at", ""), 0);
         if (rc) snprintf(err, (size_t)en, "download failed");
     }
     if (rc == 0) {
@@ -1677,6 +2870,9 @@ int sync_resolve_conflict(const char *path, const char *keep, char *err, int en)
         state_entry_remove("conflicts", path);
         state_save();
         state_unlock();
+        events_set_sync("conflict resolved");
+        events_add("save", "resolved", f->rom_id, path, emu_name(f->map), local ? "Kept this console's" : "Kept RomM's");
+        events_save();
     }
 done:
     cJSON_Delete(e);
@@ -1799,6 +2995,7 @@ cJSON *sync_preview(char *err, int en) {
         const char *action = jget_str(op, "action", "");
         int rom_id = (int)jget_num(op, "rom_id", 0);
         const char *slot = jget_str(op, "slot", "");
+        if (!our_slot(&c, slot)) continue;
         const local_file *f = find_save(&c, rom_id, slot);
         char game[256] = "";
         if (f) rom_display_name(f->rom, game, sizeof game);
@@ -1947,7 +3144,13 @@ int sync_restore(const char *kind, int id, char *err, int en) {
     }
     scan_saves(&c);
     int rom_id = (int)jget_num(meta, "rom_id", 0);
-    const local_rom *r = find_rom(&c, rom_id, jget_str(meta, "emulator", NULL));
+    const local_rom *r = is_state ? find_rom_for_state(&c, rom_id, jget_str(meta, "emulator", ""))
+                                  : find_rom(&c, rom_id, jget_str(meta, "emulator", NULL));
+    if (!r && is_state && find_rom(&c, rom_id, NULL)) {
+        snprintf(err, (size_t)en, "made by %s, which this console's emulator can't load",
+                 jget_str(meta, "emulator", "")[0] ? jget_str(meta, "emulator", "") : "an unknown emulator");
+        goto done;
+    }
     if (!r) {
         snprintf(err, (size_t)en, "the game isn't on this console");
         goto done;
@@ -1960,7 +3163,7 @@ int sync_restore(const char *kind, int id, char *err, int en) {
         }
         state_local_name(r, jget_str(meta, "file_name", ""), name, sizeof name);
         path_join(dest, sizeof dest, dir, name);
-        rc = fetch_state(&c, meta, dest, rom_id);
+        rc = fetch_state(&c, meta, dest, r);
         if (rc) snprintf(err, (size_t)en, "download failed");
     } else if (r->map->save_layout[0]) {
         const char *slot = jget_str(meta, "slot", c.slot);
@@ -1988,11 +3191,126 @@ int sync_restore(const char *kind, int id, char *err, int en) {
         if (rc) snprintf(err, (size_t)en, "could not write %s", dest);
         /* Not recorded as synced: the next sync uploads it as the newest version. */
     }
-    if (rc == 0) LOGI("restored %s %d to %s", kind, id, dest);
+    if (rc == 0) {
+        LOGI("restored %s %d to %s", kind, id, dest);
+        events_add(is_state ? "state" : "save", "restored", rom_id, dest, r ? emu_name(r->map) : "", "Older version");
+    }
 done:
     scan_free(&c);
     pthread_mutex_unlock(&g_run_lock);
     cJSON_Delete(meta);
     if (rc == 0) sync_request("restore");
     return rc;
+}
+
+/* One tracked file for sync_tracked. */
+static void tracked_file(cJSON *games, const cJSON *roms, const profile_map *maps, int nmaps, const char *kind,
+                         const cJSON *e, const cJSON *conflicts) {
+    int rom_id = (int)jget_num(e, "rom_id", 0);
+    /* The game's record, one whose file is here first. */
+    const cJSON *game = NULL, *g;
+    int here = 0;
+    cJSON_ArrayForEach(g, roms) if ((int)jget_num(g, "rom_id", -1) == rom_id && rom_id) {
+        const int exists = file_exists(g->string) || dir_exists(g->string);
+        if (!game || (exists && !here)) game = g;
+        here |= exists;
+    }
+    const char *platform = game ? jget_str(game, "platform_dir", "") : "";
+    const char *profile = game ? jget_str(game, "profile", "") : "";
+    const char *emulator = "";
+    for (int i = 0; i < nmaps; i++)
+        if (!strcmp(maps[i].profile_id, profile) && (!platform[0] || !strcmp(maps[i].platform_dir, platform)))
+            emulator = maps[i].profile_name;
+    /* A record from an older version names its profile differently: by platform. */
+    for (int i = 0; i < nmaps && !emulator[0] && platform[0]; i++)
+        if (!strcmp(maps[i].platform_dir, platform)) emulator = maps[i].profile_name;
+
+    char key[16];
+    snprintf(key, sizeof key, "%d", rom_id);
+    cJSON *entry = cJSON_GetObjectItemCaseSensitive(games, key);
+    if (!entry) {
+        entry = cJSON_AddObjectToObject(games, key);
+        cJSON_AddNumberToObject(entry, "rom_id", rom_id);
+        cJSON_AddStringToObject(entry, "name", game ? jget_str(game, "name", "") : "");
+        cJSON_AddStringToObject(entry, "platform", platform);
+        cJSON_AddStringToObject(entry, "emulator", emulator);
+        cJSON_AddArrayToObject(entry, "files");
+    }
+    const char *path = e->string;
+    const char *status = "synced";
+    if (cJSON_GetObjectItemCaseSensitive(conflicts, path)) {
+        status = "conflict";
+    } else if (!here) { /* the game isn't on this console any more */
+        status = "no_game";
+    } else if (strchr(path, '#')) { /* a save folder synced as a zip */
+        status = "synced";
+    } else if (!file_exists(path)) {
+        status = "missing";
+    } else {
+        char ns[24];
+        snprintf(ns, sizeof ns, "%lld", (long long)file_mtime_ns(path));
+        /* A newer time with the same content (emulators rewrite saves) is still in sync. */
+        char hash[33] = "";
+        if ((strcmp(ns, jget_str(e, "mtime_ns", "")) != 0 || file_size(path) != (int64_t)jget_num(e, "size", -1)) &&
+            (md5_file_hex(path, hash) != 0 || strcmp(hash, jget_str(e, "hash", "")) != 0))
+            status = "changed";
+    }
+    cJSON *f = cJSON_CreateObject();
+    cJSON_AddStringToObject(f, "kind", kind);
+    cJSON_AddStringToObject(f, "path", path);
+    cJSON_AddStringToObject(f, "status", status);
+    cJSON_AddNumberToObject(f, "synced_at", jget_num(e, "synced_at", 0));
+    cJSON_AddNumberToObject(f, "size", jget_num(e, "size", 0));
+    if (!strcmp(kind, "save")) {
+        cJSON_AddStringToObject(f, "slot", jget_str(e, "slot", ""));
+        cJSON_AddNumberToObject(f, "server_id", jget_num(e, "save_id", 0));
+    } else {
+        cJSON_AddNumberToObject(f, "server_id", jget_num(e, "state_id", 0));
+        cJSON_AddBoolToObject(f, "from_here", jget_num(e, "mine", 0) != 0);
+    }
+    cJSON_AddItemToArray(cJSON_GetObjectItemCaseSensitive(entry, "files"), f);
+}
+
+cJSON *sync_tracked(int only_rom) {
+    profile_map *maps = NULL;
+    config_lock();
+    int nmaps = profiles_expand(g_cfg.profiles, &maps);
+    config_unlock();
+    cJSON *games = cJSON_CreateObject();
+    state_lock();
+    const cJSON *roms = state_section("roms"), *conflicts = state_section("conflicts"), *e;
+    static const char *const kinds[][2] = {{"saves", "save"}, {"states", "state"}};
+    for (int k = 0; k < 2; k++)
+        cJSON_ArrayForEach(e, state_section(kinds[k][0])) {
+            if (only_rom && (int)jget_num(e, "rom_id", 0) != only_rom) continue;
+            tracked_file(games, roms, maps, nmaps, kinds[k][1], e, conflicts);
+        }
+    state_unlock();
+    free(maps);
+
+    /* {"platforms": [{"platform": "gba", "games": [...]}], "saves": n, "states": n, "conflicts": n} */
+    cJSON *out = cJSON_CreateObject(), *plats = cJSON_AddArrayToObject(out, "platforms"), *gm;
+    int n[3] = {0, 0, 0};
+    while ((gm = games->child)) {
+        cJSON_DetachItemViaPointer(games, gm);
+        const char *pl = jget_str(gm, "platform", "");
+        cJSON *p = NULL, *x;
+        cJSON_ArrayForEach(x, plats) if (!strcmp(jget_str(x, "platform", ""), pl)) p = x;
+        if (!p) {
+            p = cJSON_CreateObject();
+            cJSON_AddStringToObject(p, "platform", pl);
+            cJSON_AddArrayToObject(p, "games");
+            cJSON_AddItemToArray(plats, p);
+        }
+        cJSON_ArrayForEach(x, cJSON_GetObjectItemCaseSensitive(gm, "files")) {
+            n[!strcmp(jget_str(x, "kind", ""), "state")]++;
+            if (!strcmp(jget_str(x, "status", ""), "conflict")) n[2]++;
+        }
+        cJSON_AddItemToArray(cJSON_GetObjectItemCaseSensitive(p, "games"), gm);
+    }
+    cJSON_Delete(games);
+    cJSON_AddNumberToObject(out, "saves", n[0]);
+    cJSON_AddNumberToObject(out, "states", n[1]);
+    cJSON_AddNumberToObject(out, "conflicts", n[2]);
+    return out;
 }

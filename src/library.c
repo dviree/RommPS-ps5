@@ -22,7 +22,7 @@
 #define MAX_JOBS    50
 
 typedef enum { JOB_ROM, JOB_FIRMWARE } job_type;
-typedef enum { JOB_QUEUED, JOB_RUNNING, JOB_DONE, JOB_ERROR, JOB_CANCELLED } job_status;
+typedef enum { JOB_QUEUED, JOB_RUNNING, JOB_DONE, JOB_ERROR, JOB_CANCELLED, JOB_SYNCING } job_status;
 
 typedef struct job {
     int id;
@@ -36,6 +36,8 @@ typedef struct job {
     int64_t done, total;
     int64_t base; /* bytes from files already finished (multi-file games) */
     double speed; /* bytes/s, smoothed */
+    char note[80]; /* Running job updates this after a download. */
+    sync_game_result saves; /* what the sync after the download brought */
     double sample_t;
     int64_t sample_bytes;
     struct job *next;
@@ -253,8 +255,12 @@ static void run_rom_job(job *j) {
 
     const char *fs_name = jget_str(rom, "fs_name", "");
     const cJSON *files = cJSON_GetObjectItemCaseSensitive(rom, "files");
-    int multi = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(rom, "has_multiple_files")) &&
-                cJSON_GetArraySize(files) > 1;
+    /* fs_name is one of files[] only for a plain single-file rom; otherwise
+     * it's the folder's name (no extension) and the rom is fetched per file. */
+    int multi = cJSON_GetArraySize(files) > 0;
+    const cJSON *f;
+    cJSON_ArrayForEach(f, files)
+        if (strcmp(jget_str(f, "file_name", ""), fs_name) == 0) { multi = 0; break; }
     if (library_not_game(fs_name)) {
         job_end(j, JOB_ERROR, "%s isn't a game", fs_name);
         free(maps);
@@ -320,13 +326,36 @@ static void run_rom_job(job *j) {
             path_join(other, sizeof other, x->rom_dir, fs_name);
             if (!strcmp(other, dest)) continue;
             mkdir_p(x->rom_dir);
-            if (link_or_copy(dest, other) == 0) {
+            pthread_mutex_lock(&g_q_lock);
+            snprintf(j->note, sizeof j->note, "Copying to %s", x->profile_name);
+            j->base = j->done = j->total = 0;
+            j->speed = 0;
+            j->sample_t = 0;
+            pthread_mutex_unlock(&g_q_lock);
+            if (link_or_copy_progress(dest, other, progress_cb, j) == 0) {
                 record_rom(j, rom, x, other, multi);
                 LOGI("also for %s: %s", x->profile_name, other);
             } else {
                 LOGW("could not put %s in %s", j->name, x->rom_dir);
             }
         }
+        /* The game's saves land before it shows as ready, so it isn't
+         * started without them. */
+        pthread_mutex_lock(&g_q_lock);
+        j->status = JOB_SYNCING;
+        pthread_mutex_unlock(&g_q_lock);
+        char name[256];
+        str_copy(name, sizeof name, j->name);
+        sync_game_result saves;
+        if (sync_game(j->target_id, name, &saves) != 0) { /* save sync off: just the game */
+            config_lock();
+            const int notify = g_cfg.notify;
+            config_unlock();
+            if (notify) plat_notify("RommPS: %s downloaded", name);
+        }
+        pthread_mutex_lock(&g_q_lock);
+        j->saves = saves;
+        pthread_mutex_unlock(&g_q_lock);
         job_end(j, JOB_DONE, NULL, NULL);
     } else {
         if (cancelled(j) && !(multi && had)) discard_partial(dest, multi);
@@ -427,7 +456,8 @@ void library_init(void) {
 int library_busy(void) {
     int busy = 0;
     pthread_mutex_lock(&g_q_lock);
-    for (job *j = g_jobs; j && !busy; j = j->next) busy = j->status == JOB_QUEUED || j->status == JOB_RUNNING;
+    for (job *j = g_jobs; j && !busy; j = j->next)
+        busy = j->status == JOB_QUEUED || j->status == JOB_RUNNING || j->status == JOB_SYNCING;
     pthread_mutex_unlock(&g_q_lock);
     return busy;
 }
@@ -457,7 +487,7 @@ static void trim_jobs(void) {
 static int enqueue(job_type type, int id, const char *name, char *err, int en) {
     pthread_mutex_lock(&g_q_lock);
     for (job *p = g_jobs; p; p = p->next) {
-        if (p->type == type && p->target_id == id && (p->status == JOB_QUEUED || p->status == JOB_RUNNING)) {
+        if (p->type == type && p->target_id == id && !finished(p)) {
             pthread_mutex_unlock(&g_q_lock);
             snprintf(err, (size_t)en, "already downloading");
             return -1;
@@ -504,6 +534,8 @@ int library_cancel(int id, char *err, int en) {
         } else if (j->status == JOB_RUNNING) {
             j->cancel = 1; /* the progress callback aborts the transfer */
             rc = 0;
+        } else if (j->status == JOB_SYNCING) {
+            snprintf(err, (size_t)en, "the game is downloaded, its saves are syncing");
         } else {
             snprintf(err, (size_t)en, "download already finished");
         }
@@ -548,12 +580,26 @@ int library_delete_rom(int rom_id, char *err, int en) {
     }
     state_save();
     state_unlock();
+    if (removed) {
+        /* Can't leave a finished download in the downloads page if we removed that title. */
+        pthread_mutex_lock(&g_q_lock);
+        for (job **pp = &g_jobs; *pp;) {
+            job *dead = *pp;
+            if (dead->type == JOB_ROM && dead->target_id == rom_id && finished(dead)) {
+                *pp = dead->next;
+                free(dead);
+            } else {
+                pp = &dead->next;
+            }
+        }
+        pthread_mutex_unlock(&g_q_lock);
+    }
     if (!removed) snprintf(err, (size_t)en, "game is not on this console");
     return removed ? 0 : -1;
 }
 
 cJSON *library_downloads(void) {
-    static const char *names[] = {"queued", "downloading", "done", "error", "cancelled"};
+    static const char *names[] = {"queued", "downloading", "done", "error", "cancelled", "syncing"};
     cJSON *arr = cJSON_CreateArray();
     pthread_mutex_lock(&g_q_lock);
     for (job *j = g_jobs; j; j = j->next) {
@@ -568,6 +614,13 @@ cJSON *library_downloads(void) {
         cJSON_AddNumberToObject(o, "done", (double)j->done);
         cJSON_AddNumberToObject(o, "total", (double)j->total);
         cJSON_AddNumberToObject(o, "speed", j->status == JOB_RUNNING ? j->speed : 0);
+        cJSON_AddStringToObject(o, "note", j->status == JOB_RUNNING ? j->note : "");
+        if (j->status == JOB_DONE && j->type == JOB_ROM) {
+            cJSON_AddNumberToObject(o, "saves", j->saves.saves);
+            cJSON_AddNumberToObject(o, "states", j->saves.states);
+            cJSON_AddNumberToObject(o, "save_conflicts", j->saves.conflicts);
+            cJSON_AddBoolToObject(o, "saves_failed", j->saves.failed);
+        }
         cJSON_AddItemToArray(arr, o);
     }
     pthread_mutex_unlock(&g_q_lock);
@@ -654,6 +707,10 @@ again:;
         if (comma) *comma = 0;
         const profile_map *m = profile_find_for_platform(maps, n, first, NULL);
         if (!m || m == x || m->extra || !strcmp(m->rom_dir, x->rom_dir)) continue;
+        /* A folder several of the main emulator's systems share (Porpoise's
+         * games: GameCube and Wii): only the games matched for this system. */
+        int shared = 0;
+        for (int k = 0; k < n; k++) shared |= &maps[k] != m && !strcmp(maps[k].rom_dir, m->rom_dir);
         DIR *d = opendir(m->rom_dir);
         struct dirent *de;
         int here = 0;
@@ -663,6 +720,13 @@ again:;
                 continue;
             char from[PATH_MAX_LEN], to[PATH_MAX_LEN];
             path_join(from, sizeof from, m->rom_dir, de->d_name);
+            if (shared) {
+                state_lock();
+                const cJSON *rec = cJSON_GetObjectItemCaseSensitive(state_section("roms"), from);
+                const int ours = rec && jget_num(rec, "rom_id", 0) > 0 && !strcmp(jget_str(rec, "platform_dir", ""), m->platform_dir);
+                state_unlock();
+                if (!ours) continue;
+            }
             path_join(to, sizeof to, x->rom_dir, de->d_name);
             if (file_exists(to) || dir_exists(to) || (dir_exists(from) && still_downloading(from))) continue;
             mkdir_p(x->rom_dir);
@@ -679,7 +743,7 @@ again:;
             str_copy(sys, sizeof sys, x->platform_dir);
             for (char *c = sys; *c; c++)
                 if (*c >= 'a' && *c <= 'z') *c -= 32;
-            plat_notify("RomM Sync: %d %s game%s now also sync with %s", here, sys, here == 1 ? "" : "s",
+            plat_notify("RommPS: %d %s game%s now also sync with %s", here, sys, here == 1 ? "" : "s",
                         x->profile_name);
             linked += here;
         }
@@ -871,6 +935,27 @@ static void backfill_installed(void) {
     }
 }
 
+/* A game's size here: its file, or everything in its folder. */
+static double local_size(const char *path, int depth) {
+    if (!dir_exists(path)) return (double)(file_size(path) > 0 ? file_size(path) : 0);
+    double total = 0;
+    DIR *d = depth < 3 ? opendir(path) : NULL;
+    struct dirent *de;
+    while (d && (de = readdir(d))) {
+        if (de->d_name[0] == '.') continue;
+        char p[PATH_MAX_LEN];
+        path_join(p, sizeof p, path, de->d_name);
+        total += local_size(p, depth + 1);
+    }
+    if (d) closedir(d);
+    return total;
+}
+
+static int newest_first(const void *a, const void *b) {
+    double x = jget_num(*(cJSON *const *)a, "played", 0), y = jget_num(*(cJSON *const *)b, "played", 0);
+    return x < y ? 1 : x > y ? -1 : 0;
+}
+
 cJSON *library_installed(int limit) {
     backfill_installed();
     cJSON *out = cJSON_CreateArray();
@@ -896,22 +981,31 @@ cJSON *library_installed(int limit) {
         cJSON_AddStringToObject(o, "cover", jget_str(e, "cover", ""));
         cJSON_AddStringToObject(o, "profile", jget_str(e, "profile", ""));
         cJSON_AddNumberToObject(o, "played", played);
+        cJSON_AddStringToObject(o, "path", e->string); /* sized below, off the lock */
         cJSON_AddItemToArray(out, o);
     }
     state_unlock();
-    /* Newest first (a handful of games: a simple selection sort will do). */
-    int n = cJSON_GetArraySize(out);
+    /* Newest first. */
+    int n = cJSON_GetArraySize(out), k = 0;
+    cJSON **all = malloc(sizeof *all * (size_t)(n ? n : 1)), *o;
     cJSON *sorted = cJSON_CreateArray();
-    for (int k = 0; k < n && k < limit; k++) {
-        int best = -1;
-        double top = -1;
-        for (int i = 0; i < cJSON_GetArraySize(out); i++) {
-            double t = jget_num(cJSON_GetArrayItem(out, i), "played", 0);
-            if (t > top) top = t, best = i;
-        }
-        cJSON_AddItemToArray(sorted, cJSON_DetachItemFromArray(out, best));
+    if (!all) {
+        cJSON_Delete(out);
+        return sorted;
     }
+    while ((o = cJSON_DetachItemFromArray(out, 0))) all[k++] = o;
     cJSON_Delete(out);
+    qsort(all, (size_t)n, sizeof *all, newest_first);
+    for (k = 0; k < n; k++) {
+        if (k < limit) {
+            cJSON_AddNumberToObject(all[k], "size", local_size(jget_str(all[k], "path", ""), 0));
+            cJSON_DeleteItemFromObjectCaseSensitive(all[k], "path");
+            cJSON_AddItemToArray(sorted, all[k]);
+        } else {
+            cJSON_Delete(all[k]);
+        }
+    }
+    free(all);
     return sorted;
 }
 
