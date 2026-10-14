@@ -43,6 +43,15 @@ A [RomM](https://romm.app) companion client for jailbroken PS5 consoles (etaHEN 
 
 To give some meaning to the table above. **Full support** means RommPS can detect and properly set game/save directories for that emulator. **Manual Support** means you can use it to sync games and/or saves, but you'll need to point it to the directories yourself. This typically means that full support is coming shortly. Broken or N/A means there was a problem keeping us from sync games and saves, or the emulator just fall out doesn't work or crashes. **Researching** means I am seeing what is possible when it comes to that sync type for the given emulator or game system.
 
+### Important: Save States
+Some users have recently reported issues with being able to pull down save states from their servers. They don't see them on the destination save folder for that emulator, or if they do, they don't work. Save states typically cannot be used across different emulators (cores), and even within the same core, the definition of a save state may different with file version, and version of the app. 
+
+**Simply put**:
+- Emulator core must be the same.
+- Different schema versions of save states are sometimes incompatible with each other.
+
+For the 1.2.0 release I will be including some fixes as well as some conversion logic to try and convert save state formats for max compatibility whenever possible. This is also why we have an upload only or upload and download option for save states. Maybe you don't care about syncing, but want to back them up, in case something happens. That's a good use case. I want to be blunt with you: Save states are kind of useless. Yes, they're great for recovering your progress after you feel asleep and forgot to save, but you truly should be saving progress with the in-game saves, not save status.
+
 ### PS4 (experimental) ###
 
 | Emulator | Systems |
