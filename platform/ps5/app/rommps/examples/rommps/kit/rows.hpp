@@ -74,7 +74,7 @@ struct Named
 };
 inline constexpr Named kPolicies[] = {
     {"ask", "Ask me"}, {"newest", "Keep the newest"}, {"local", "Keep this console's"}, {"server", "Keep RomM's"}};
-inline constexpr Named kStates[] = {{"off", "Off"}, {"upload", "Upload only"}, {"sync", "Upload and download"}};
+inline constexpr Named kStates[] = {{"off", "Off"}, {"upload", "Back up to RomM"}, {"sync", "Back up and restore"}};
 inline constexpr int kIntervals[] = {0, 15, 30, 60, 120, 360};
 
 const char *label_of(std::span<const Named> options, const std::string &id);

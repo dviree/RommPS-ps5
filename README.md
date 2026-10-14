@@ -4,8 +4,14 @@
 
 A [RomM](https://romm.app) companion client for jailbroken PS5 consoles (etaHEN or onionHEN, with kstuff) and PS4 consoles (GoldHEN). Through my insatiable need to mod everything electronic I encounter, I had my 12.70 PS5 jailbroken the minute that P2JB was out. I maintain a RomM server to centralize all my _legal_ ROMs, saves, and savestates, which all my devices sync with, and the PS5 needs similar treatment.
 
-- **Save and sate sync**
+- **Save and state sync**
   - Monitors save file changes in the background, and uploads them as soon as they've changed. Periodic syncs also ensure that your PS4/5 always has the latest saves and save states.
+  - A game's saves come down the moment it finishes downloading, so it's ready to play.
+  - Save states only come down to an emulator that can load them (see [Save states](#save-states)).
+  - Optional: turn save sync off in setup or Settings to use RomM just for games.
+- **See what synced**
+  - An activity log and every save and state kept in sync, by platform, in the app and the Web UI. Settle conflicts and restore older versions from either.
+  - Settings > Diagnostic bundle saves the logs for a bug report, with your server, names and addresses left out.
 - **Interactive library**
   - Browse your RomM library from the RommPS app (or some other device via the Web UI), download games and BIOS files into the right emulator folders, and resolve save conflicts.
 - **Pluggable emulator profiles and multiple emulators per platform**
@@ -32,11 +38,11 @@ A [RomM](https://romm.app) companion client for jailbroken PS5 consoles (etaHEN 
 | Emulator | Systems | Game Downloads | Saves | Comments |
 | --- | --- | --- | --- | --- |
 | [RetroArch](https://github.com/mihawk-99/PS5_RetroArch) | NES, Famicom Disk System, SNES, Game Boy, Game Boy Color, Game Boy Advance, Genesis/Mega Drive, Master System, Game Gear, Sega CD, SG-1000, arcade (FinalBurn Neo), PS2 (LRPS2), PSP (PPSSPP), GameCube and Wii (Dolphin) | Full Support | Full Support | - |
-| [PSXS5](https://github.com/SynoPiia/PSXS5) | PS1 | Full Support | One memory card per game, and states | - |
-| [SwanStationPS5](https://github.com/darkxex/SwanStationPS5) | PS1 | Full Support | One memory card per game, and states | - |
+| [PSXS5](https://github.com/SynoPiia/PSXS5) | PS1 | Full Support | One memory card per game, and states | States work with RomM's web player (PCSX-ReARMed or Beetle, whichever PSXS5 is set to) |
+| [SwanStationPS5](https://github.com/darkxex/SwanStationPS5) | PS1 | Full Support | One memory card per game, and states | Plays PSXS5's games, keeps its own saves in `/data/SwanStationPS5`. Its states only load in SwanStationPS5 |
 | [PS5SX2](https://github.com/Swordpdf/PS5SX2) | PS2 | Full Support | Its two shared memory cards, backed up to RomM (5.3 or newer) | - |
 | [PS5N64](https://github.com/Globaleliteee/PS5N64) | N64 | Full Support | Full Support | - |
-| [PS5NES](https://github.com/Globaleliteee/PS5NES) | NES | Broken | Broken | Broken, tried to report issue, but GH page gone |
+| [PS5NES](https://github.com/Globaleliteee/PS5NES) | NES | Untested | Untested | Preset uses `/data/PS5NES/games` and `/data/PS5NES/saves`. GH page gone |
 | [Porpoise](https://github.com/elripalda/Porpoise-Dolphin-Emulator-for-PS5) | Wii/GameCube | Full Support | N/A | Couldn't exit sandbox w/o crash. [Issue](https://github.com/elripalda/Porpoise-Dolphin-Emulator-for-PS5/issues/18) reported. Downloading games should work if the emulator is actually working for you.|
 | [ProsperoEden](https://github.com/blackbearreloaded/ProsperoEden) | Switch | Manual Support | Researching | - |
 | [PS5X360](https://github.com/BrinooTk/PS5X360) | Xbox 360 | Manual Support | Researching | - |
@@ -51,6 +57,14 @@ To give some meaning to the table above. **Full support** means RommPS can detec
 | pSNES, pNES, pGEN, pGBA, pFBN | SNES; NES; Genesis, Master System, Game Gear, Sega CD, SG-1000; GBA, GBC, GB; arcade |
 
 Only RetroArch has been tested on the PS4 so far.
+
+### Save states
+Save states only load in the emulator core that made them, sometimes only in the same version of it. RommPS backs every state up to RomM, and with **Save states: Back up and restore** in Settings it brings one down only to an emulator that can load it:
+- **RetroArch:** states from the same core, from RomM's web player or another RetroArch.
+- **PSXS5:** PCSX-ReARMed or Beetle states, whichever core PSXS5 is set to. They're converted to and from the web player's format.
+- **SwanStationPS5, PS5N64:** only their own states.
+
+A state from elsewhere never replaces one of yours: it goes into the next free slot.
 
 ## PS4/PS5 Games
 

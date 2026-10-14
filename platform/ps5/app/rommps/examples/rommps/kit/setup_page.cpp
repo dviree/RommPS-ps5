@@ -357,6 +357,12 @@ void SetupPage::load_emulators(App &app)
             const cJSON *core;
             cJSON_ArrayForEach(core, cJSON_GetObjectItemCaseSensitive(c, "cores")) if (cJSON_IsString(core))
                 e.cores.push_back(core->valuestring);
+            const cJSON *d;
+            cJSON_ArrayForEach(d, cJSON_GetObjectItemCaseSensitive(c, "dirs"))
+                e.dirs[d->string] = {str(d, "rom_dir"), str(d, "save_dir"), str(d, "state_dir")};
+            const cJSON *fx;
+            cJSON_ArrayForEach(fx, cJSON_GetObjectItemCaseSensitive(c, "fixed")) if (cJSON_IsString(fx))
+                e.fixed.insert(fx->valuestring);
             const cJSON *p;
             cJSON_ArrayForEach(p, cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(c, "profile"), "platforms"))
             {
@@ -400,6 +406,7 @@ void SetupPage::load_emulators(App &app)
                 return;
             choices_.clear();
             also_.clear();
+            custom_dirs_.clear();
             // Folders picked before: custom-<slug> profiles for systems, and
             // custom-<emulator>-<system> for emulators with no preset.
             cJSON_ArrayForEach(p, profiles)
@@ -424,10 +431,10 @@ void SetupPage::load_emulators(App &app)
                 cJSON_ArrayForEach(p, profiles) if (e.root == str(p, "root") &&
                                                     !cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(p, "enabled")))
                     mine = p;
-                e.fresh = e.ready && !mine;
                 e.on = e.ready && mine != nullptr;
                 if (!mine)
                     continue;
+                e.sync = *str(mine, "sync") ? str(mine, "sync") : "all";
                 auto listed = [&](const char *list, const std::string &key) {
                     const cJSON *x;
                     cJSON_ArrayForEach(x, cJSON_GetObjectItemCaseSensitive(mine, list)) if (cJSON_IsString(x) &&
@@ -441,12 +448,37 @@ void SetupPage::load_emulators(App &app)
                     else if (!listed("exclude", sy.key))
                         choices_[sy.key] = e.root;
                 }
+                // Folders picked for a system: set on its platform entry.
+                const cJSON *pe;
+                cJSON_ArrayForEach(pe, cJSON_GetObjectItemCaseSensitive(mine, "platforms"))
+                {
+                    const cJSON *key = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(pe, "romm"), 0);
+                    if (!cJSON_IsString(key))
+                        continue;
+                    static const char *const kDirs[] = {"rom_dir", "save_dir", "state_dir"};
+                    std::array<std::string, 3> picked;
+                    bool any = false;
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        picked[static_cast<std::size_t>(k)] = str(pe, kDirs[k]);
+                        any = any || !picked[static_cast<std::size_t>(k)].empty();
+                    }
+                    if (any)
+                        custom_dirs_[key->valuestring][e.root] = picked;
+                }
             }
         });
     });
 }
 
 std::vector<SetupPage::Conflict> SetupPage::conflicts() const
+{
+    std::vector<Conflict> out = systems();
+    out.erase(std::remove_if(out.begin(), out.end(), [](const Conflict &c) { return c.options.size() < 2; }), out.end());
+    return out;
+}
+
+std::vector<SetupPage::Conflict> SetupPage::systems() const
 {
     std::vector<Conflict> out;
     for (const Emulator &e : emulators_)
@@ -467,7 +499,8 @@ std::vector<SetupPage::Conflict> SetupPage::conflicts() const
                 it->options.push_back({e.root, s.label, e.kind == "retroarch"});
         }
     }
-    out.erase(std::remove_if(out.begin(), out.end(), [](const Conflict &c) { return c.options.size() < 2; }), out.end());
+    std::stable_sort(out.begin(), out.end(),
+                     [](const Conflict &a, const Conflict &b) { return system_name(a.key) < system_name(b.key); });
     return out;
 }
 
@@ -510,14 +543,28 @@ std::vector<std::string> SetupPage::uncovered() const
     return out;
 }
 
-void SetupPage::open_picker(App &app, const std::string &key, int which)
+void SetupPage::open_picker(App &app, const std::string &key, int which, const std::string &root)
 {
     picking_ = true;
     pick_key_ = key;
     pick_which_ = which;
-    const Own &o = own_[key];
+    pick_root_ = root;
     // Start where the folder is, or where the games are, or at the drives.
-    std::string start = !o.folder[which].empty() ? o.folder[which] : o.folder[0];
+    std::string start;
+    if (root.empty())
+    {
+        const Own &o = own_[key];
+        start = !o.folder[which].empty() ? o.folder[which] : o.folder[0];
+    }
+    else
+    {
+        const std::array<std::string, 3> &d = custom_dirs_[key][root];
+        start = !d[static_cast<std::size_t>(which)].empty() ? d[static_cast<std::size_t>(which)] : d[0];
+        if (start.empty())
+            for (const Emulator &e : emulators_)
+                if (e.root == root && e.dirs.count(key))
+                    start = e.dirs.at(key)[static_cast<std::size_t>(which)];
+    }
     browse(app, start);
 }
 
@@ -588,7 +635,10 @@ void SetupPage::update_picker(App &app, const hui::InputFrame &input, float dt, 
     {
         if (i == 0)
         {
-            own_[pick_key_].folder[pick_which_] = fs_path_;
+            if (pick_root_.empty())
+                own_[pick_key_].folder[pick_which_] = fs_path_;
+            else
+                custom_dirs_[pick_key_][pick_root_][static_cast<std::size_t>(pick_which_)] = fs_path_;
             picking_ = false;
             return;
         }
@@ -608,7 +658,10 @@ void SetupPage::draw_picker(hui::gfx::DrawList &list, const hui::ui::Fonts &font
 {
     static const char *const kWhat[] = {"games", "saves", "save states"};
     const auto it = own_.find(pick_key_);
-    const std::string name = it != own_.end() ? it->second.name : pick_key_;
+    std::string name = it != own_.end() ? it->second.name : system_name(pick_key_);
+    for (const Emulator &e : emulators_)
+        if (!pick_root_.empty() && e.root == pick_root_)
+            name = system_name(pick_key_) + " in " + e.name;
     char title[160];
     std::snprintf(title, sizeof title, "Choose the %s folder", kWhat[pick_which_]);
     draw_heading(list, fonts, look, title,
@@ -629,10 +682,17 @@ void SetupPage::draw_picker(hui::gfx::DrawList &list, const hui::ui::Fonts &font
 std::vector<Row> SetupPage::emulator_rows(const App &app, std::vector<RowRef> *refs) const
 {
     std::vector<Row> rows;
+    // Save sync off: only the games folders matter. In the first setup it's on until the question is answered.
+    const bool saves = editing_ ? app.config().save_sync : save_sync_;
     auto add = [&](Row row, RowRef ref) {
         rows.push_back(std::move(row));
         if (refs)
             refs->push_back(std::move(ref));
+    };
+    auto shorten = [](std::string value) {
+        if (value.size() > 34)
+            value = "\xE2\x80\xA6" + value.substr(value.size() - 33);
+        return value;
     };
     // Something set up by its folders: a switch, then its three folders when on.
     auto add_own = [&](const std::string &key, const std::string &detail) {
@@ -646,9 +706,7 @@ std::vector<Row> SetupPage::emulator_rows(const App &app, std::vector<RowRef> *r
         static const char *const kLabels[] = {"   Games folder", "   Saves folder", "   States folder"};
         for (int k = 0; k < 3; ++k)
         {
-            std::string value = o.folder[k];
-            if (value.size() > 34)
-                value = "\xE2\x80\xA6" + value.substr(value.size() - 33);
+            std::string value = shorten(o.folder[k]);
             if (value.empty())
                 value = k == 0 ? "Choose" : "Same as games";
             add({RowKind::action, kLabels[k], value, ""}, {RowRef::kOwnFolder, k, key});
@@ -663,9 +721,10 @@ std::vector<Row> SetupPage::emulator_rows(const App &app, std::vector<RowRef> *r
         add({RowKind::info, "Couldn't look for emulators", "", error_}, {});
     else if (emulators_.empty())
         add({RowKind::info, "No emulators found", "",
-             "Continue with RetroArch's usual folders. You can change them later."},
+             "RetroArch's usual folders. You can change them later."},
             {});
-            add({RowKind::header, "Emulators"}, {} );
+    else
+        add({RowKind::header, "Emulators on this console"}, {});
     for (std::size_t i = 0; i < emulators_.size(); ++i)
     {
         const Emulator &e = emulators_[i];
@@ -678,8 +737,6 @@ std::vector<Row> SetupPage::emulator_rows(const App &app, std::vector<RowRef> *r
             continue;
         }
         std::string detail = e.kind == "retroarch" ? "RetroArch" : e.kind == "mednafen" ? "Mednafen" : "Standalone";
-        if (e.fresh)
-            detail = "New  \xC2\xB7  " + detail;
         std::vector<std::string> names;
         for (const System &sy : e.systems)
         {
@@ -698,29 +755,83 @@ std::vector<Row> SetupPage::emulator_rows(const App &app, std::vector<RowRef> *r
             detail += more;
         }
         add({RowKind::toggle, e.name, "", detail, e.on}, {RowRef::kEmulator, static_cast<int>(i)});
+        if (e.on && saves)
+            add({RowKind::choice, "   Save sync", e.sync == "off" ? "Off" : e.sync == "saves" ? "Saves" : "Saves and states", ""},
+                {RowRef::kEmuSync, static_cast<int>(i)});
     }
-    for (const Conflict &c : conflicts())
+    // Then each system they play: which one plays it, and its folders.
+    for (const Conflict &c : systems())
     {
+        add({RowKind::header, system_name(c.key)}, {});
         const std::string main = chosen(c);
         std::string label;
         for (const Option &o : c.options)
             if (o.root == main)
                 label = o.label;
-        add({RowKind::choice, system_name(c.key), label, "Games download here first"},
-            {RowRef::kMain, -1, c.key});
+        if (c.options.size() > 1)
+            add({RowKind::choice, "Emulator", label, "Games download here first"}, {RowRef::kMain, -1, c.key});
+        else
+            add({RowKind::info, "Emulator", label, ""}, {});
+        std::vector<const Option *> on = {};
+        for (const Option &o : c.options)
+            if (o.root == main)
+                on.push_back(&o);
         // The others can play it too: the games linked in, one save where they keep the same kind.
         for (const Option &o : c.options)
         {
             if (o.root == main)
                 continue;
             const auto set = also_.find(c.key);
-            const bool on = set != also_.end() && set->second.count(o.root);
-            add({RowKind::toggle, "   Also in " + o.label, "", "Gets the same games too", on},
+            const bool also = set != also_.end() && set->second.count(o.root);
+            add({RowKind::toggle, "Also in " + o.label, "", "Gets the same games too", also},
                 {RowRef::kAlso, -1, c.key, o.root});
+            if (also)
+                on.push_back(&o);
+        }
+        // Its folders in each emulator that plays it: the ones found, or picked.
+        for (const Option *o : on)
+        {
+            const Emulator *em = nullptr;
+            for (const Emulator &e : emulators_)
+                if (e.root == o->root)
+                    em = &e;
+            if (!em)
+                continue;
+            const std::string who = on.size() > 1 ? "Folders in " + em->name : std::string("Folders");
+            if (em->fixed.size() >= 3)
+            {
+                add({RowKind::info, who, "Set by the emulator", ""}, {});
+                continue;
+            }
+            const auto found = em->dirs.find(c.key);
+            const auto sys = custom_dirs_.find(c.key);
+            const bool custom = sys != custom_dirs_.end() && sys->second.count(o->root);
+            std::string detail = found != em->dirs.end() && !found->second[0].empty() ? "Games in " + found->second[0] : "";
+            add({RowKind::choice, who, custom ? "My own" : "As found", custom ? "Pick each folder below" : detail},
+                {RowRef::kFolders, -1, c.key, o->root});
+            if (!custom)
+                continue;
+            static const char *const kLabels[] = {"   Games folder", "   Saves folder", "   States folder"};
+            static const char *const kKeys[] = {"rom_dir", "save_dir", "state_dir"};
+            for (int k = 0; k < (saves ? 3 : 1); ++k)
+            {
+                const std::string picked = sys->second.at(o->root)[static_cast<std::size_t>(k)];
+                const std::string def = found != em->dirs.end() ? found->second[static_cast<std::size_t>(k)] : "";
+                if (em->fixed.count(kKeys[k]))
+                {
+                    add({RowKind::info, kLabels[k], "Set by the emulator", shorten(def)}, {});
+                    continue;
+                }
+                add({RowKind::action, kLabels[k], picked.empty() ? "As found" : shorten(picked), picked.empty() ? shorten(def) : ""},
+                    {RowRef::kSysFolder, k, c.key, o->root});
+            }
         }
     }
     // Systems on the server no emulator here plays: off, or folders picked for them.
-    for (const std::string &key : uncovered())
+    const std::vector<std::string> left = uncovered();
+    if (!left.empty())
+        add({RowKind::header, "On RomM, with no emulator here"}, {});
+    for (const std::string &key : left)
     {
         const Own &o = own_.at(key);
         char detail[96];
@@ -728,8 +839,9 @@ std::vector<Row> SetupPage::emulator_rows(const App &app, std::vector<RowRef> *r
                       o.games, o.games == 1 ? "" : "s");
         add_own(key, detail);
     }
-    if (has_ps2())
+    if (saves && has_ps2())
     {
+        add({RowKind::header, "PS2 and saving"}, {});
         const bool backup_ok = at_least(app.status().server_version, 5, 3, 0);
         Row r{RowKind::choice, "PS2 memory cards", ps2_cards_ == "backup" ? "One card, backed up" : "One card per game",
               backup_ok ? "How RetroArch's PS2 core keeps its saves" : "Your RomM is older than 5.3: one card per game"};
@@ -769,6 +881,17 @@ void SetupPage::update_emulators(App &app, const hui::InputFrame &input, float d
             em.on = !em.on;
         return;
     }
+    case RowRef::kEmuSync:
+    {
+        static const char *const kModes[] = {"all", "saves", "off"};
+        Emulator &em = emulators_[static_cast<std::size_t>(ref.emulator)];
+        int at = 0;
+        for (int i = 0; i < 3; ++i)
+            if (em.sync == kModes[i])
+                at = i;
+        em.sync = kModes[((at + e.step) % 3 + 3) % 3];
+        return;
+    }
     case RowRef::kMain:
         for (const Conflict &c : list)
         {
@@ -802,6 +925,18 @@ void SetupPage::update_emulators(App &app, const hui::InputFrame &input, float d
         return;
     case RowRef::kOwnFolder:
         open_picker(app, ref.key, ref.emulator);
+        return;
+    case RowRef::kFolders:
+    {
+        auto &sys = custom_dirs_[ref.key];
+        if (sys.count(ref.root))
+            sys.erase(ref.root); // back to the folders found
+        else
+            sys[ref.root] = {};
+        return;
+    }
+    case RowRef::kSysFolder:
+        open_picker(app, ref.key, ref.emulator, ref.root);
         return;
     case RowRef::kContinue:
         break;
@@ -837,6 +972,36 @@ void SetupPage::update_emulators(App &app, const hui::InputFrame &input, float d
         for (const Option &o : c.options)
             if (o.root != main && set != also_.end() && set->second.count(o.root))
                 cJSON_AddItemToArray(extras, cJSON_CreateString(o.root.c_str()));
+    }
+    // Each system: its main emulator, the ones on, and folders picked (the
+    // payload's "systems", which wins over "choices" and "also").
+    cJSON *systems_json = cJSON_AddObjectToObject(body.get(), "systems");
+    cJSON *sync_json = cJSON_AddObjectToObject(body.get(), "sync"); // each emulator's save sync
+    for (const Emulator &em : emulators_)
+        if (em.on)
+            cJSON_AddStringToObject(sync_json, em.root.c_str(), em.sync.c_str());
+    for (const Conflict &c : systems())
+    {
+        const std::string main = chosen(c);
+        cJSON *sy = cJSON_AddObjectToObject(systems_json, c.key.c_str());
+        cJSON_AddStringToObject(sy, "main", main.c_str());
+        cJSON *on = cJSON_AddArrayToObject(sy, "on");
+        cJSON *folders = cJSON_AddObjectToObject(sy, "folders");
+        const auto set = also_.find(c.key);
+        const auto picked = custom_dirs_.find(c.key);
+        for (const Option &o : c.options)
+        {
+            if (o.root != main && (set == also_.end() || !set->second.count(o.root)))
+                continue;
+            cJSON_AddItemToArray(on, cJSON_CreateString(o.root.c_str()));
+            if (picked == custom_dirs_.end() || !picked->second.count(o.root))
+                continue;
+            const std::array<std::string, 3> &d = picked->second.at(o.root);
+            cJSON *f = cJSON_AddObjectToObject(folders, o.root.c_str());
+            cJSON_AddStringToObject(f, "rom_dir", d[0].c_str());
+            cJSON_AddStringToObject(f, "save_dir", d[1].c_str());
+            cJSON_AddStringToObject(f, "state_dir", d[2].c_str());
+        }
     }
     cJSON *custom = cJSON_AddArrayToObject(body.get(), "custom");
     for (const std::string &key : by_folders)
@@ -904,32 +1069,49 @@ void SetupPage::load_preview(App &app)
     });
 }
 
-std::vector<Row> SetupPage::preview_rows() const
+// Preview rows: 0 save sync, 1 backed up, 2 continue, 3 check again.
+std::vector<Row> SetupPage::preview_rows(std::vector<int> *ids) const
 {
     std::vector<Row> rows;
-    rows.push_back({RowKind::toggle, "My saves are backed up", "",
-                    "The first sync can replace saves here or on RomM. Keep a copy of any that matter", backed_up_});
+    auto add = [&](Row r, int id) {
+        rows.push_back(std::move(r));
+        if (ids)
+            ids->push_back(id);
+    };
+    add({RowKind::toggle, "Sync saves with RomM", "", save_sync_ ? "Saves and states" : "Off: RomM is only for games",
+         save_sync_},
+        0);
+    if (!save_sync_)
+    {
+        add({RowKind::action, "Continue", "", ""}, 2);
+        return rows;
+    }
+    add({RowKind::toggle, "My saves are backed up", "", "The first sync can replace saves", backed_up_}, 1);
     Row next{RowKind::action, "Continue", "", backed_up_ ? "" : "Once your saves are backed up"};
     next.enabled = backed_up_;
-    rows.push_back(next);
+    add(next, 2);
     Row again{RowKind::action, "Check again", "", ""};
     again.enabled = !preview_.loading;
-    rows.push_back(again);
+    add(again, 3);
     return rows;
 }
 
 void SetupPage::update_preview(App &app, const hui::InputFrame &input, float dt, hui::ui::Feedback &feedback)
 {
-    if (!preview_.loaded && !preview_.loading)
+    if (save_sync_ && !preview_.loaded && !preview_.loading)
         load_preview(app);
-    const std::vector<Row> rows = preview_rows();
+    std::vector<int> ids;
+    const std::vector<Row> rows = preview_rows(&ids);
     const RowEvent e = rows_.handle(rows, input, feedback);
     rows_.update(dt, static_cast<int>(rows.size()), kRows.h);
-    if (e.row == 0)
+    const int id = e.row >= 0 ? ids[static_cast<std::size_t>(e.row)] : -1;
+    if (id == 0)
+        save_sync_ = !save_sync_;
+    else if (id == 1)
         backed_up_ = !backed_up_;
-    else if (e.row == 1)
+    else if (id == 2)
         go(kFinish);
-    else if (e.row == 2)
+    else if (id == 3)
         preview_ = Preview{};
     if (input.is_pressed(Action::back))
     {
@@ -958,24 +1140,32 @@ void SetupPage::load_autostart(App &app)
     });
 }
 
-std::vector<Row> SetupPage::finish_rows() const
+// Finish rows: 0 policy, 1 on change, 2 on exit, 3 on start, 4 notify,
+// 5 interval, 6 autostart, 7 finish. The sync ones only with save sync on.
+std::vector<Row> SetupPage::finish_rows(std::vector<int> *ids) const
 {
     const Config &c = finish_;
     std::vector<Row> rows;
-    rows.push_back({RowKind::choice, "A save changed in both places", label_of(kPolicies, c.conflict_policy),
-                    "On this console and on RomM since the last sync"});
-    rows.push_back({RowKind::toggle, "Upload saves as they change", "", "While you play", c.sync_on_change});
-    rows.push_back({RowKind::toggle, "Sync when a game closes", "", "Uploads what the game saved", c.sync_on_game_exit});
-    rows.push_back({RowKind::toggle, "Sync when a game starts", "", "Fetches newer saves before you play",
-                    c.sync_on_game_start});
-    rows.push_back({RowKind::toggle, "Notifications", "", "On the console when a sync ends or fails", c.notify});
-    rows.push_back({RowKind::choice, "Sync every", interval_label(c.sync_interval_min), "Besides the syncs above"});
+    auto add = [&](Row r, int id) {
+        rows.push_back(std::move(r));
+        if (ids)
+            ids->push_back(id);
+    };
+    if (save_sync_)
+    {
+        add({RowKind::choice, "A save changed in both places", label_of(kPolicies, c.conflict_policy), ""}, 0);
+        add({RowKind::toggle, "Upload saves as they change", "", "While you play", c.sync_on_change}, 1);
+        add({RowKind::toggle, "Sync when a game closes", "", "", c.sync_on_game_exit}, 2);
+        add({RowKind::toggle, "Sync when a game starts", "", "", c.sync_on_game_start}, 3);
+    }
+    add({RowKind::toggle, "Notifications", "", "", c.notify}, 4);
+    if (save_sync_)
+        add({RowKind::choice, "Sync every", interval_label(c.sync_interval_min), ""}, 5);
     if (autostart_supported_)
-        rows.push_back({RowKind::toggle, "Start RomM Sync with the console", "", "With your HEN's payload autostart",
-                        autostart_on_});
-    Row done{RowKind::action, "Finish and sync", "", ""};
+        add({RowKind::toggle, "Start RommPS with the console", "", "With your HEN's autostart", autostart_on_}, 6);
+    Row done{RowKind::action, save_sync_ ? "Finish and sync" : "Finish", "", ""};
     done.enabled = !busy_;
-    rows.push_back(done);
+    add(done, 7);
     return rows;
 }
 
@@ -987,7 +1177,8 @@ void SetupPage::update_finish(App &app, const hui::InputFrame &input, float dt, 
         finish_known_ = true;
         load_autostart(app);
     }
-    const std::vector<Row> rows = finish_rows();
+    std::vector<int> ids;
+    const std::vector<Row> rows = finish_rows(&ids);
     const RowEvent e = rows_.handle(rows, input, feedback);
     rows_.update(dt, static_cast<int>(rows.size()), kRows.h);
     if (input.is_pressed(Action::back))
@@ -997,7 +1188,7 @@ void SetupPage::update_finish(App &app, const hui::InputFrame &input, float dt, 
         return;
     }
     const bool autostart_row = autostart_supported_;
-    switch (e.row)
+    switch (e.row >= 0 ? ids[static_cast<std::size_t>(e.row)] : -1)
     {
     case 0:
         finish_.conflict_policy = step_option(kPolicies, finish_.conflict_policy, e.step);
@@ -1042,6 +1233,7 @@ void SetupPage::update_finish(App &app, const hui::InputFrame &input, float dt, 
         if (e.row < 0)
             break;
         Json body(cJSON_CreateObject(), cJSON_Delete);
+        cJSON_AddBoolToObject(body.get(), "save_sync", save_sync_);
         cJSON_AddStringToObject(body.get(), "conflict_policy", finish_.conflict_policy.c_str());
         cJSON_AddBoolToObject(body.get(), "sync_on_change", finish_.sync_on_change);
         cJSON_AddBoolToObject(body.get(), "sync_on_game_exit", finish_.sync_on_game_exit);
@@ -1057,7 +1249,7 @@ void SetupPage::update_finish(App &app, const hui::InputFrame &input, float dt, 
                 a->say("Couldn't finish the setup: " + r.message());
                 return;
             }
-            a->say("All set. The first sync has started");
+            a->say(save_sync_ ? "All set. Let the first sync finish before you play" : "All set");
             a->refresh_config();
             a->refresh_now();
         });
@@ -1223,7 +1415,7 @@ void SetupPage::draw(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, cons
     if (step_ == kEmulators)
     {
         draw_heading(list, fonts, look, editing_ ? "Emulators" : "Your emulators",
-                     "Saves sync for the emulators you leave on, and games download to their folders.");
+                     "Pick the emulators to use.");
         rows = emulator_rows(app);
         // Beside the list: the focused emulator's systems.
         const int focus = rows_.focus() - lead();
@@ -1241,7 +1433,8 @@ void SetupPage::draw(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, cons
                 if (std::find(seen.begin(), seen.end(), n) != seen.end())
                     continue;
                 seen.push_back(n);
-                if (y > kSide.y + kSide.h - 30)
+                // The last line that fits says there are more.
+                if (y + 34 > kSide.y + kSide.h - 24)
                 {
                     ui::text(list, fonts.regular, "\xE2\x80\xA6", kSide.x + 36, y, 22, look.panel_muted);
                     break;
@@ -1257,11 +1450,11 @@ void SetupPage::draw(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, cons
     }
     else if (step_ == kPreview)
     {
-        draw_heading(list, fonts, look, "Before the first sync",
-                     preview_.loading ? "Comparing the saves on this console with RomM's"
-                     : preview_.error.empty()
-                         ? "What the first sync will do. Nothing has changed yet."
-                         : "Couldn't compare: " + preview_.error);
+        draw_heading(list, fonts, look, save_sync_ ? "Before the first sync" : "Games only",
+                     !save_sync_          ? "Turn save sync on any time in Settings."
+                     : preview_.loading     ? "Comparing your saves with RomM's"
+                     : preview_.error.empty() ? "What the first sync will do."
+                                              : "Couldn't compare: " + preview_.error);
         rows = preview_rows();
         struct Tile
         {
@@ -1271,7 +1464,7 @@ void SetupPage::draw(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, cons
         } tiles[] = {{"GAMES HERE", preview_.games, false},   {"SAVES HERE", preview_.saves, false},
                      {"TO UPLOAD", preview_.up, false},       {"TO DOWNLOAD", preview_.down, false},
                      {"CHANGED ON BOTH", preview_.both, true}, {"IN SYNC", preview_.in_sync, false}};
-        for (int i = 0; i < 6; ++i)
+        for (int i = 0; i < 6 && save_sync_; ++i)
         {
             const float appear = tween::stagger(step_age_, 2 + i, 0.06f, 0.5f);
             const Rect r{kMargin + static_cast<float>(i) * 292, 372 + 20 * (1.0f - appear), 270, 150};

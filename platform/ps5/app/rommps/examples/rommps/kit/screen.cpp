@@ -8,7 +8,8 @@
 // what the pad asks for.
 //
 //   - L1 / R1 move between Home, Library and Downloads.
-//   - Home: the sync at a glance; Cross syncs now.
+//   - Home: the sync at a glance; Cross syncs now. Beside it: the conflicts
+//     to settle, the sync log and the saves kept in sync (sync_views.hpp).
 //   - Library (library_page.hpp): the games on this console and RomM's
 //     platforms; a platform's games in a grid with an A to Z bar; search. The
 //     backdrop eases toward the focused cover's colours; Cross opens a frosted
@@ -29,6 +30,7 @@
 #include "library_page.hpp"
 #include "settings_page.hpp"
 #include "setup_page.hpp"
+#include "sync_views.hpp"
 #include "ui/glyphs.hpp"
 #include "ui/motion.hpp"
 
@@ -127,7 +129,7 @@ class RommPS final : public app::Concept
         const bool calling = settings_.call().active();
         if (calling)
             settings_.call().update(input, dt, feedback);
-        if (ready && !sheet_open_ && !calling && !setup_.editing())
+        if (ready && !sheet_open_ && !calling && !setup_.editing() && !view_.active())
         {
             if (input.is_pressed(Action::page_prev) || input.is_pressed(Action::page_next))
             {
@@ -164,6 +166,8 @@ class RommPS final : public app::Concept
                 feedback.play(audio::Cue::focus);
             }
         }
+        else if (view_.active())
+            view_.update(app_, input, dt, feedback);
         else if (tab_ == kHome)
             update_home(input, feedback);
         else if (tab_ == kLibrary)
@@ -228,6 +232,8 @@ class RommPS final : public app::Concept
             setup_.draw(list, context_.fonts, L, app_, clock_);
         else if (!ready)
             draw_not_ready(list);
+        else if (view_.active())
+            view_.draw(list, context_.fonts, L, app_, clock_);
         else if (tab_ == kHome)
             draw_home(list);
         else if (tab_ == kLibrary)
@@ -306,9 +312,27 @@ class RommPS final : public app::Concept
         nudge_.trigger();
     }
 
+    // Home's buttons: Sync now, then the lists beside it.
+    static constexpr int kHomeButtons = 4;
+
     void update_home(const InputFrame &input, app::Feedback &feedback)
     {
-        if (input.is_pressed(Action::confirm))
+        if (!app_.config().save_sync)
+            return; // nothing to sync: Settings turns it back on
+        if (input.nav == Direction::left || input.nav == Direction::right)
+        {
+            const int next = home_focus_ + (input.nav == Direction::right ? 1 : -1);
+            if (next >= 0 && next < kHomeButtons)
+            {
+                home_focus_ = next;
+                feedback.play(audio::Cue::focus);
+            }
+            else if (!input.nav_repeat)
+                refuse(feedback, input.nav == Direction::right ? 1.0f : -1.0f);
+        }
+        if (!input.is_pressed(Action::confirm))
+            return;
+        if (home_focus_ == 0)
         {
             if (app_.status().syncing)
             {
@@ -318,7 +342,12 @@ class RommPS final : public app::Concept
             app_.sync_now();
             feedback.play(audio::Cue::launch);
             feedback.rumble(0.5f, 0.12f);
+            return;
         }
+        static const rommps::SyncView::Kind kinds[] = {rommps::SyncView::kConflicts, rommps::SyncView::kActivity,
+                                                       rommps::SyncView::kTracked};
+        view_.open(app_, kinds[home_focus_ - 1]);
+        feedback.play(audio::Cue::select);
     }
 
     void open_sheet()
@@ -337,7 +366,7 @@ class RommPS final : public app::Concept
     {
         std::string label;
         bool enabled;
-        int kind; // 0 download, 1 cancel, 2 close, 3 remove
+        int kind; // 0 download, 1 cancel, 2 close, 3 remove, 4 saves and states
     };
 
     std::vector<SheetAction> sheet_actions() const
@@ -351,7 +380,10 @@ class RommPS final : public app::Concept
         else if (d && d->active())
             actions.push_back({"Hold to cancel download", true, 1});
         else if (g && g->installed)
+        {
+            actions.push_back({"Saves and states", true, 4});
             actions.push_back({"Hold to delete this game", true, 3});
+        }
         else if (p && p->profile.empty())
             actions.push_back({"No emulator for this platform", false, 0});
         else
@@ -467,6 +499,12 @@ class RommPS final : public app::Concept
                 feedback.play(audio::Cue::launch);
                 feedback.rumble(0.7f, 0.18f);
                 sheet_open_ = false;
+            }
+            else if (a.kind == 4 && g)
+            {
+                feedback.play(audio::Cue::select);
+                sheet_open_ = false;
+                view_.open(app_, rommps::SyncView::kGame, g->id, g->name);
             }
             else
             {
@@ -602,6 +640,13 @@ class RommPS final : public app::Concept
         list.push_opacity(in);
         const float x = kMargin + 30.0f * (1.0f - in);
         ui::text(list, fonts.semibold, "SAVE SYNC", x, 212, 20, accent(), gfx::Align::left, 4.0f);
+        if (!app_.config().save_sync)
+        {
+            ui::text(list, fonts.display, "Save sync is off", x - 4, 304, 80, L.text);
+            ui::text(list, fonts.regular, "RomM is only for games. Turn it on in Settings.", x, 360, 28, L.muted);
+            list.pop_opacity();
+            return;
+        }
         // The headline only says synced when the last sync went through.
         std::string headline = s.syncing                         ? "Syncing"
                                : !s.sync_count                   ? "Not synced yet"
@@ -610,23 +655,39 @@ class RommPS final : public app::Concept
                                : s.conflicts > 1                 ? std::to_string(s.conflicts) + " saves need you"
                                                                  : "Your saves are synced";
         ui::text(list, fonts.display, headline, x - 4, 304, 80, L.text);
-        // Saves changed in both places are settled in the web UI, for now.
-        char web[96];
-        std::snprintf(web, sizeof web, "http://%s:%d", s.ip.c_str(), s.port);
-        std::string line = s.syncing                         ? (s.phase.empty() ? "Working" : s.phase)
-                           : s.conflicts > 0 && !s.ip.empty() ? std::string("Choose which copy to keep at ") + web
-                           : s.sync_count                    ? "Last sync " + ago(std::difftime(std::time(nullptr), s.last_run)) +
-                                                                "  \xC2\xB7  " + s.last_result
-                                                             : "No sync yet";
+        std::string line = s.syncing         ? (s.phase.empty() ? "Working" : s.phase)
+                           : s.conflicts > 0 ? std::string("Open Conflicts to choose which copy to keep")
+                           : s.sync_count    ? "Last sync " + ago(std::difftime(std::time(nullptr), s.last_run)) +
+                                                "  \xC2\xB7  " + s.last_result
+                                             : "No sync yet";
         ui::text(list, fonts.regular, context_.fonts.regular.font->fit(line, 28, 1500), x, 360, 28, L.muted);
 
-        // Sync now
-        const Rect button{x, 410, 260, 68};
-        list.glow(button, 34, 18, accent().with_alpha(0.35f));
-        list.rounded_rect(button, 34, s.syncing ? L.button.with_alpha(0.4f) : L.button);
-        ui::draw_button(list, fonts, L.covers ? ui::GlyphStyle::light() : ui::GlyphStyle::dark(), ui::Button::cross,
-                        button.x + 24, button.cy(), 34);
-        ui::text(list, fonts.semibold, "Sync now", button.x + 76, button.cy() + 10, 28, L.on_button);
+        // Sync now, and the lists beside it; the focused one is lit.
+        std::string labels[kHomeButtons] = {"Sync now", "Conflicts", "Activity", "Tracked saves"};
+        if (s.conflicts > 0)
+            labels[1] += " (" + std::to_string(s.conflicts) + ")";
+        float bx = x;
+        for (int i = 0; i < kHomeButtons; ++i)
+        {
+            const bool focused = i == home_focus_;
+            const float w = fonts.semibold.font->measure(labels[i], 28) + (focused ? 104.0f : 64.0f);
+            const Rect button{bx, 410, w, 68};
+            if (focused)
+            {
+                list.glow(button, 34, 18, accent().with_alpha(0.35f));
+                list.rounded_rect(button, 34, i == 0 && s.syncing ? L.button.with_alpha(0.4f) : L.button);
+                ui::draw_button(list, fonts, L.covers ? ui::GlyphStyle::light() : ui::GlyphStyle::dark(), ui::Button::cross,
+                                button.x + 24, button.cy(), 34);
+                ui::text(list, fonts.semibold, labels[i], button.x + 76, button.cy() + 10, 28, L.on_button);
+            }
+            else
+            {
+                draw_panel(list, button, 34);
+                ui::text(list, fonts.semibold, labels[i], button.x + 32, button.cy() + 10, 28,
+                         i == 1 && s.conflicts ? L.warning : L.panel_text);
+            }
+            bx += w + 20;
+        }
 
         // Tiles
         char value[64];
@@ -641,7 +702,7 @@ class RommPS final : public app::Concept
         tiles[1] = {"CONFLICTS", value};
         std::snprintf(value, sizeof value, "%d up \xC2\xB7 %d down", s.last_up, s.last_down);
         tiles[2] = {"LAST SYNC", s.sync_count ? value : "-"};
-        tiles[3] = {"ROMM SYNC", "v" + s.version};
+        tiles[3] = {"ROMMPS", "v" + s.version};
         for (int i = 0; i < 4; ++i)
         {
             const float appear = tween::stagger(tab_age_, 2 + i, 0.07f, 0.5f);
@@ -654,8 +715,6 @@ class RommPS final : public app::Concept
                      46, i == 1 && s.conflicts ? L.warning : L.panel_text);
             list.pop_opacity();
         }
-        ui::text(list, fonts.regular, context_.fonts.regular.font->fit(s.server, 22, 1700), kMargin, 850, 22,
-                 L.muted.with_alpha(0.7f * L.muted.a));
         list.pop_opacity();
     }
 
@@ -701,7 +760,7 @@ class RommPS final : public app::Concept
         }
         if (downloads.empty())
         {
-            ui::text(list, fonts.regular, "Nothing downloading. Pick a game in Library to download it.", kMargin, 310, 28,
+            ui::text(list, fonts.regular, "Nothing downloading.", kMargin, 310, 28,
                      L.muted);
             list.pop_opacity();
             return;
@@ -901,12 +960,21 @@ class RommPS final : public app::Concept
             ui::draw_hints(list, fonts, style, hints, 2, 1824, true);
             return;
         }
+        if (view_.active())
+        {
+            const std::vector<ui::Hint> hints = view_.hints();
+            ui::draw_hints(list, fonts, style, hints.data(), static_cast<int>(hints.size()), 1824, true);
+            return;
+        }
         list.push_opacity(tween::stagger(age_, 8, 0.08f, 0.5f) * (1.0f - sheet_.value));
         const ui::Hint pages{ui::Button::l1, "Pages", ui::Button::r1};
+        const ui::Hint close{ui::Button::options, "Hold to close"}; // rommps.cpp's HoldToLeave
         if (tab_ == kHome)
         {
-            const ui::Hint hints[] = {pages, {ui::Button::cross, "Sync now"}};
-            ui::draw_hints(list, fonts, style, hints, 2, 1824, true);
+            std::vector<ui::Hint> hints{close, pages};
+            if (app_.config().save_sync)
+                hints.push_back({ui::Button::cross, home_focus_ == 0 ? "Sync now" : "Open"});
+            ui::draw_hints(list, fonts, style, hints.data(), static_cast<int>(hints.size()), 1824, true);
         }
         else if (tab_ == kLibrary)
         {
@@ -931,8 +999,8 @@ class RommPS final : public app::Concept
         }
         else
         {
-            const ui::Hint hints[] = {pages, {ui::Button::cross, settings_.cross_hint(app_)}};
-            ui::draw_hints(list, fonts, style, hints, 2, 1824, true);
+            const ui::Hint hints[] = {close, pages, {ui::Button::cross, settings_.cross_hint(app_)}};
+            ui::draw_hints(list, fonts, style, hints, 3, 1824, true);
         }
         list.pop_opacity();
     }
@@ -940,6 +1008,8 @@ class RommPS final : public app::Concept
     app::Context &context_;
     App &app_;
     int tab_ = kLibrary;
+    int home_focus_ = 0;     // Home's button with the focus
+    rommps::SyncView view_;  // a list opened from Home or a game's sheet
     float tab_age_ = 0.0f;
     tween::Spring tab_position_;
     float age_ = 0.0f;

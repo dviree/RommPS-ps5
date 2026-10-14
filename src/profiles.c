@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "detect.h"
 #include "platform.h"
 
 /* Platforms are matched on RomM's slug or fs_slug. The roots are the PS5's;
@@ -87,6 +88,26 @@ cJSON *profiles_default(void) {
         if (root) cJSON_ReplaceItemInObjectCaseSensitive(p, "root", cJSON_CreateString(root));
     }
     return defs;
+}
+
+/* A save state setting: the profile's own, else the built-in catalog's for
+ * the same emulator and system (profiles saved before these settings existed). */
+static const cJSON *state_setting(const cJSON *p, const cJSON *e, const char *key) {
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(e, key);
+    if (!v) v = cJSON_GetObjectItemCaseSensitive(p, key);
+    if (v) return v;
+    const cJSON *cat = cJSON_GetObjectItemCaseSensitive(detect_catalog_entry(jstr(p, NULL, "id", "")), "profile"), *ce;
+    if (!cat) return NULL;
+    cJSON_ArrayForEach(ce, cJSON_GetObjectItemCaseSensitive(cat, "platforms")) {
+        if (strcmp(profiles_system_key(ce), profiles_system_key(e)) != 0) continue;
+        if ((v = cJSON_GetObjectItemCaseSensitive(ce, key))) return v;
+    }
+    return cJSON_GetObjectItemCaseSensitive(cat, key);
+}
+
+static const char *state_str(const cJSON *p, const cJSON *e, const char *key, const char *def) {
+    const cJSON *v = state_setting(p, e, key);
+    return cJSON_IsString(v) ? v->valuestring : def;
 }
 
 static int jbool(const cJSON *a, const cJSON *b, const char *key, int def) {
@@ -192,6 +213,7 @@ static void check_requirement(const profile_map *m, const char *game, const char
                               size_t nn) {
     *sync = m->base_sync_saves;
     note[0] = 0;
+    if (m->sync_off) str_copy(note, nn, "save sync is off for this emulator");
     if (!m->req_key[0] || !m->base_sync_saves) return;
     char val[64];
     if (!m->ra_cfg_dir[0] || !core_option(m, game, cdir, val, sizeof val)) str_copy(val, sizeof val, m->req_default);
@@ -340,9 +362,39 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
             str_copy(m->state_stems, sizeof m->state_stems, jstr(p, e, "state_stems", ""));
             str_copy(m->state_name, sizeof m->state_name, jstr(p, e, "state_name", "{rom_stem}{ext}"));
             str_copy(m->save_format, sizeof m->save_format, jstr(p, e, "save_format", ""));
+            str_copy(m->state_cores, sizeof m->state_cores, state_str(p, e, "state_cores", m->emulator));
+            str_copy(m->state_format, sizeof m->state_format, state_str(p, e, "state_format", "retroarch"));
+            str_copy(m->state_slot0, sizeof m->state_slot0, state_str(p, e, "state_slot0", ".state"));
+            const cJSON *nbc = state_setting(p, e, "save_name_by_core"), *nv;
+            size_t no = 0;
+            cJSON_ArrayForEach(nv, nbc) {
+                if (!cJSON_IsString(nv)) continue;
+                int w = snprintf(m->save_names_by_core + no, sizeof m->save_names_by_core - no, "%s%s=%s", no ? ";" : "",
+                                 nv->string, nv->valuestring);
+                if (w < 0 || (size_t)w >= sizeof m->save_names_by_core - no) break;
+                no += (size_t)w;
+            }
+            const cJSON *cs = state_setting(p, e, "state_core_setting");
+            if (cJSON_IsObject(cs)) {
+                str_template(m->core_file, sizeof m->core_file, jstr(cs, NULL, "file", ""), vars);
+                str_copy(m->core_key, sizeof m->core_key, jstr(cs, NULL, "key", ""));
+                const cJSON *v;
+                size_t o = 0;
+                cJSON_ArrayForEach(v, cJSON_GetObjectItemCaseSensitive(cs, "values")) {
+                    if (!cJSON_IsString(v)) continue;
+                    int w = snprintf(m->core_values + o, sizeof m->core_values - o, "%s%s=%s", o ? "," : "", v->string,
+                                     v->valuestring);
+                    if (w < 0 || (size_t)w >= sizeof m->core_values - o) break;
+                    o += (size_t)w;
+                }
+            }
             str_template(m->memcards, sizeof m->memcards, jstr(p, e, "memcards", ""), vars);
             m->extra = profile_lists(p, "extra", profiles_system_key(e));
             m->sync_saves = m->base_sync_saves = jbool(p, e, "sync_saves", 1);
+            const char *mode = jstr(p, NULL, "sync", "all");
+            m->sync_off = !strcmp(mode, "off");
+            m->sync_states = !m->sync_off && strcmp(mode, "saves") != 0;
+            if (m->sync_off) m->sync_saves = m->base_sync_saves = 0;
             str_copy(m->root, sizeof m->root, root);
             str_copy(m->ra_cfg_dir, sizeof m->ra_cfg_dir, ra_cfg_dir);
             const cJSON *req = cJSON_GetObjectItemCaseSensitive(e, "sync_requires_option");
@@ -354,6 +406,7 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
             }
             /* Platform-wide answer, for the UI; games can override it. */
             check_requirement(m, NULL, NULL, &m->sync_saves, m->sync_note, sizeof m->sync_note);
+            if (m->sync_off) str_copy(m->sync_note, sizeof m->sync_note, "save sync is off for this emulator");
             cnt++;
         }
     }

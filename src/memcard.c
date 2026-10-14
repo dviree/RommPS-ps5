@@ -1,5 +1,7 @@
 #include "memcard.h"
 
+#include "events.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,6 +41,7 @@ static int cards_list(card *out, int max) {
     int n = 0;
     for (int i = 0; i < cnt && n < max; i++) {
         const profile_map *m = &maps[i];
+        if (m->sync_off) continue;
         if (!strcmp(mode, "backup") && profile_map_handles(m, "ps2", NULL) && str_ieq(m->core_name, "LRPS2")) {
             for (int s = 1; s <= 2 && n < max; s++) {
                 card *c = &out[n++];
@@ -155,6 +158,7 @@ static int upload_slot(const card *cd, const char *hash) {
             state_unlock();
             cJSON_Delete(v);
             LOGI("backed up memory card %s", path_basename(path));
+            events_add("card", "backed up", 0, path, "", NULL);
             return 0;
         }
         cJSON_Delete(v);
@@ -243,6 +247,8 @@ int memcard_restore(int slot, char *err, int en) {
     state_save();
     state_unlock();
     LOGI("restored memory card %s from RomM", path_basename(path));
+    events_add("card", "restored", 0, path, "", "Older version");
+    events_save();
     return 0;
 }
 

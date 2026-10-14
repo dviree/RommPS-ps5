@@ -13,6 +13,7 @@
 #include "detect.h"
 
 #include <dirent.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -323,6 +324,18 @@ static cJSON *emulator_catalog(void) {
     return plat_info()->emulator_catalog ? cJSON_Parse(plat_info()->emulator_catalog) : NULL;
 }
 
+static cJSON *g_catalog;
+static void load_catalog(void) { g_catalog = emulator_catalog(); }
+
+const cJSON *detect_catalog_entry(const char *id) {
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, load_catalog);
+    const cJSON *e;
+    cJSON_ArrayForEach(e, g_catalog)
+        if (!strcmp(jget_str(e, "id", ""), id)) return e;
+    return NULL;
+}
+
 static void add_standalone(cJSON *out) {
     cJSON *catalog = emulator_catalog();
     const cJSON *e, *x;
@@ -444,6 +457,8 @@ int detect_refresh_profiles(cJSON *profiles) {
             /* The user's choice of emulator per system survives a refresh. */
             const cJSON *ex = cJSON_GetObjectItemCaseSensitive(p, "exclude");
             if (ex) cJSON_AddItemToObject(fresh, "exclude", cJSON_Duplicate(ex, 1));
+            const cJSON *mode = cJSON_GetObjectItemCaseSensitive(p, "sync");
+            if (cJSON_IsString(mode)) cJSON_AddStringToObject(fresh, "sync", mode->valuestring);
             LOGI("updated the %s profile for %s", jget_str(fresh, "name", ""), jget_str(p, "root", ""));
             cJSON_ReplaceItemInArray(profiles, i, fresh);
             changed++;

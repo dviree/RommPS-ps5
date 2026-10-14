@@ -43,6 +43,10 @@ cJSON *sync_history(int rom_id, char *err, int en);
 /* Restores a save version or a state ("save" or "state") into place. */
 int sync_restore(const char *kind, int id, char *err, int en);
 
+/* The saves and states this console keeps in sync, by platform and game, each
+ * with its status (synced, changed, conflict, missing); only_rom 0 for all. */
+cJSON *sync_tracked(int only_rom);
+
 /* Save folders the last sync looked in, for the watcher. any_file marks
  * bundle folders, where every file counts. */
 int sync_scanned_dirs(char dirs[][1024], int *any_file, int max);

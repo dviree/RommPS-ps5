@@ -248,6 +248,12 @@ class H(BaseHTTPRequestHandler):
                 raw = base64.b64decode(b["content_b64"]) if "content_b64" in b else b["content"].encode()
                 s = new_save(b["rom_id"], b.get("slot"), b.get("emulator", "other-emu"), b.get("file_name", "x.srm"), raw)
                 return self.reply(200, save_public(s))
+            if p == "/_admin/rom" and method == "POST":  # e.g. a game RomM keeps as a folder holding one file
+                b = self.json_body()
+                for f in b.get("files", []):
+                    f["content"] = f["content"].encode()
+                DB["roms"][b["id"]] = b
+                return self.reply(200, rom_public(b))
             if p == "/_admin/state" and method == "POST":
                 b = self.json_body()
                 sid = next_id()

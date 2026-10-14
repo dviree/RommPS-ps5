@@ -140,7 +140,7 @@ static void *check_thread(void *arg) {
         LOGI("update check: latest release %s, running %s", g_latest, APP_VERSION);
         if (notify && available && strcmp(g_notified, g_latest) != 0) {
             str_copy(g_notified, sizeof g_notified, g_latest);
-            if (plat_info()->self_update) plat_notify("RomM Sync %s is available. Update it from Settings.", g_latest);
+            if (plat_info()->self_update) plat_notify("RommPS %s is available. Update it from Settings.", g_latest);
             else plat_notify("RommPS %s is available. Update it from ProsperoStore.", g_latest);
         }
     }
@@ -278,7 +278,7 @@ static void *install_thread(void *arg) {
         }
         free(elf);
         LOGI("update: %s installed, starts with the next jailbreak", want);
-        plat_notify("RomM Sync %s is installed and starts with the next jailbreak", want);
+        plat_notify("RommPS %s is installed and starts with the next jailbreak", want);
         pthread_mutex_lock(&g_lock);
         g_state = U_PENDING;
         str_copy(g_pending, sizeof g_pending, want);
@@ -288,7 +288,7 @@ static void *install_thread(void *arg) {
     }
 
     set_message(U_RESTARTING, persisted ? "Restarting" : "Restarting (until the next reboot, autostart isn't set up)");
-    plat_notify("Updating RomM Sync to %s", want);
+    plat_notify("Updating RommPS to %s", want);
     sleep(1); /* lets the UI see the restart coming */
     if (plat_launch_elf(elf, elf_len) != 0) {
         snprintf(err, sizeof err, "couldn't start the new version (%s).%s", strerror(errno),

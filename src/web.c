@@ -3,6 +3,7 @@
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -18,6 +19,7 @@
 #include "config.h"
 #include "covers.h"
 #include "detect.h"
+#include "events.h"
 #include "http.h"
 #include "library.h"
 #include "memcard.h"
@@ -29,6 +31,7 @@
 #include "ui_index.h" /* generated from ui/index.html */
 #include "update.h"
 #include "util.h"
+#include "zip.h"
 
 #define MAX_HEADER (16 * 1024)
 #define MAX_BODY   (2 * 1024 * 1024)
@@ -264,6 +267,7 @@ static cJSON *status_json(void) {
     config_lock();
     cJSON_AddBoolToObject(j, "paired", config_is_paired());
     cJSON_AddBoolToObject(j, "setup_complete", g_cfg.setup_complete);
+    cJSON_AddBoolToObject(j, "save_sync", g_cfg.save_sync);
     cJSON_AddStringToObject(j, "server_url", g_cfg.server_url);
     cJSON_AddStringToObject(j, "username", g_cfg.username);
     cJSON_AddStringToObject(j, "server_version", g_cfg.server_version);
@@ -413,7 +417,7 @@ static char *diagnostics_text(void) {
     char line[512], about[256], now_iso[40], path[PATH_MAX_LEN];
     plat_describe(about, sizeof about);
     iso8601_utc(time(NULL), now_iso, sizeof now_iso);
-    snprintf(line, sizeof line, "RomM Sync diagnostics\nversion %s, build %s, %s\n%s\nclock %s, up %lds\n",
+    snprintf(line, sizeof line, "RommPS diagnostics\nversion %s, build %s, %s\n%s\nclock %s, up %lds\n",
              APP_VERSION, APP_BUILD, plat_name(), about, now_iso, (long)(time(NULL) - g_started));
     tb_str(&b, line);
     tb_json(&b, "status", status_json());
@@ -432,6 +436,286 @@ static char *diagnostics_text(void) {
     path_join(path, sizeof path, plat_data_dir(), "romm-sync.log");
     tb_file_tail(&b, "romm-sync.log", path, 256 * 1024);
     return b.s;
+}
+
+/* Diagnostic bundle: a zip with the report, the logs, the sync log, the
+ * settings and emulators found, the emulators' own logs and the kernel log
+ * when it can be read. Nothing in it names the person: the server, user
+ * name, device name and ids, tokens, IP and MAC addresses, emails and
+ * console user ids are replaced before anything is written. */
+typedef struct { char from[600]; const char *to; } redaction;
+
+static size_t redactions(redaction *r, size_t max) {
+    size_t n = 0;
+    config_lock();
+    const struct { const char *v; const char *to; } src[] = {
+        {g_cfg.token, "<token>"}, {g_cfg.server_url, "<server>"}, {g_cfg.username, "<user>"},
+        {g_cfg.device_name, "<device>"}, {g_cfg.device_id, "<device-id>"},
+        {g_cfg.client_device_identifier, "<device-id>"}};
+    for (size_t i = 0; i < sizeof src / sizeof src[0] && n < max; i++)
+        if (strlen(src[i].v) >= 3 && strcmp(src[i].v, "PlayStation 5")) {
+            str_copy(r[n].from, sizeof r[n].from, src[i].v);
+            r[n++].to = src[i].to;
+        }
+    /* The server's host alone, as it shows in errors. */
+    const char *h = strstr(g_cfg.server_url, "://");
+    if (h && n < max) {
+        h += 3;
+        size_t l = strcspn(h, ":/");
+        if (l >= 3 && l < sizeof r[n].from) {
+            memcpy(r[n].from, h, l);
+            r[n].from[l] = 0;
+            r[n++].to = "<server>";
+        }
+    }
+    config_unlock();
+    return n;
+}
+
+static int is_hex(char c) { return (c >= '0' && c <= '9') || ((c | 32) >= 'a' && (c | 32) <= 'f'); }
+static int is_digit(char c) { return c >= '0' && c <= '9'; }
+static int is_alnum(char c) { return is_digit(c) || ((c | 32) >= 'a' && (c | 32) <= 'z'); }
+static int is_word(char c) { return is_hex(c) || ((c | 32) >= 'a' && (c | 32) <= 'z') || c == '_' || c == '.' || c == '-' || c == '+'; }
+
+/* Length of a dotted IPv4 address at s, or 0. */
+static size_t ipv4_at(const char *s) {
+    size_t i = 0;
+    for (int part = 0; part < 4; part++) {
+        size_t d = 0;
+        while (is_digit(s[i + d]) && d < 4) d++;
+        if (!d || d > 3) return 0;
+        i += d;
+        if (part < 3) {
+            if (s[i] != '.') return 0;
+            i++;
+        }
+    }
+    return is_digit(s[i]) || (s[i] == '.' && is_digit(s[i + 1])) ? 0 : i;
+}
+
+/* Length of a MAC address (aa:bb:cc:dd:ee:ff or with -) at s, or 0. */
+static size_t mac_at(const char *s) {
+    for (int i = 0; i < 6; i++) {
+        if (!is_hex(s[i * 3]) || !is_hex(s[i * 3 + 1])) return 0;
+        if (i < 5 && s[i * 3 + 2] != ':' && s[i * 3 + 2] != '-') return 0;
+    }
+    return is_hex(s[17]) ? 0 : 17;
+}
+
+/* A copy of txt with everything that could name the person replaced. */
+static char *redact(const char *txt, const redaction *r, size_t nr) {
+    textbuf b = {0};
+    tb_str(&b, "");
+    for (const char *p = txt; *p;) {
+        size_t m = 0;
+        const char *to = NULL;
+        const int start = p == txt || !is_word(p[-1]);
+        for (size_t i = 0; i < nr && !m; i++) { /* whole words only */
+            size_t l = strlen(r[i].from);
+            if ((p == txt || !is_alnum(p[-1])) && !strncasecmp(p, r[i].from, l) && !is_alnum(p[l])) m = l, to = r[i].to;
+        }
+        if (!m && start && (m = ipv4_at(p)) && (!strncmp(p, "127.", 4) || !strncmp(p, "0.0.0.0", 7))) m = 0;
+        if (m && !to) to = "<ip>";
+        if (!m && start && (m = mac_at(p))) to = "<mac>";
+        if (!m && !strncmp(p, "/user/home/", 11)) { /* a console user's id */
+            size_t l = 0;
+            while (is_hex(p[11 + l])) l++;
+            if (l) m = 11 + l, to = "/user/home/<user>";
+        }
+        static const char *const keys[] = {"onlineid", "online_id", "accountid", "account_id", "npid", "userid", "user_id", "username", "user_name", "email"};
+        for (size_t i = 0; !m && start && i < sizeof keys / sizeof keys[0]; i++) { /* key=value, key: "value" */
+            size_t l = strlen(keys[i]);
+            if (strncasecmp(p, keys[i], l) || is_alnum(p[l])) continue;
+            size_t v = l;
+            while (p[v] == ' ' || p[v] == '=' || p[v] == ':' || p[v] == '"' || p[v] == '\'' || p[v] == '\t') v++;
+            if (v == l || !is_word(p[v])) continue;
+            tb_add(&b, p, v);
+            m = v;
+            while (is_word(p[m])) m++;
+            m -= v;
+            p += v;
+            to = "<id>";
+        }
+        if (!m && *p == '@' && p > txt && is_word(p[-1]) && is_word(p[1])) { /* an email: drop both sides */
+            while (b.len && is_word(b.s[b.len - 1])) b.s[--b.len] = 0;
+            m = 1;
+            while (is_word(p[m])) m++;
+            to = "<email>";
+        }
+        if (m) {
+            tb_str(&b, to);
+            p += m;
+        } else tb_add(&b, p++, 1);
+    }
+    return b.s;
+}
+
+/* Writes name into dir with its text redacted; adds it to the members. */
+static void bundle_add(const char *dir, const char *name, const char *txt, const redaction *r, size_t nr,
+                       zip_member *mem, char (*paths)[PATH_MAX_LEN], int *n, int max) {
+    if (!txt || *n >= max) return;
+    char *clean = redact(txt, r, nr);
+    path_join(paths[*n], PATH_MAX_LEN, dir, name);
+    if (clean && !write_file_atomic(paths[*n], clean, strlen(clean))) {
+        mem[*n].path = paths[*n];
+        mem[*n].name = strrchr(paths[*n], '/') + 1;
+        (*n)++;
+    }
+    free(clean);
+}
+
+/* The last max bytes of a file, from the start of a line, or NULL. */
+static char *file_tail(const char *path, size_t max) {
+    size_t len = 0;
+    char *txt = read_file(path, &len);
+    if (!txt || len <= max) return txt;
+    const char *start = txt + len - max, *nl = strchr(start, '\n');
+    if (nl) start = nl + 1;
+    memmove(txt, start, strlen(start) + 1);
+    return txt;
+}
+
+/* What the kernel log holds right now, without waiting for more. */
+static char *kernel_log(void) {
+    int fd = open("/dev/klog", O_RDONLY | O_NONBLOCK);
+    if (fd < 0) return NULL;
+    textbuf b = {0};
+    char buf[4096];
+    time_t until = time(NULL) + 2;
+    while (b.len < 512 * 1024 && time(NULL) <= until) {
+        ssize_t got = read(fd, buf, sizeof buf);
+        if (got <= 0) break;
+        tb_add(&b, buf, (size_t)got);
+    }
+    close(fd);
+    return b.s;
+}
+
+/* The emulators' own logs: *.log files in each emulator's folder. */
+static void emulator_logs(const char *dir, const redaction *r, size_t nr, zip_member *mem,
+                          char (*paths)[PATH_MAX_LEN], int *n, int max) {
+    cJSON *found = detect_emulators(), *c;
+    char seen[16][PATH_MAX_LEN];
+    int nseen = 0;
+    cJSON_ArrayForEach(c, found) {
+        char roots[2][PATH_MAX_LEN] = {"", ""};
+        str_copy(roots[0], PATH_MAX_LEN, jget_str(c, "root", ""));
+        const char *tid = jget_str(c, "title_id", "");
+        if (tid[0]) snprintf(roots[1], PATH_MAX_LEN, "/data/homebrew/%s", tid);
+        for (int k = 0; k < 2; k++) {
+            int dup = !roots[k][0];
+            for (int i = 0; i < nseen && !dup; i++) dup = !strcmp(seen[i], roots[k]);
+            if (dup || nseen >= 16) continue;
+            str_copy(seen[nseen++], PATH_MAX_LEN, roots[k]);
+            DIR *d = opendir(roots[k]);
+            struct dirent *de;
+            while (d && (de = readdir(d))) {
+                if (de->d_name[0] == '.' || !str_ends_with_ci(de->d_name, ".log")) continue;
+                char path[PATH_MAX_LEN], name[256];
+                path_join(path, sizeof path, roots[k], de->d_name);
+                if (dir_exists(path)) continue;
+                const char *base = strrchr(roots[k], '/');
+                snprintf(name, sizeof name, "emulators-%s-%s", base ? base + 1 : roots[k], de->d_name);
+                char *txt = file_tail(path, 256 * 1024);
+                bundle_add(dir, name, txt, r, nr, mem, paths, n, max);
+                free(txt);
+            }
+            if (d) closedir(d);
+        }
+    }
+    cJSON_Delete(found);
+}
+
+/* Builds the bundle at zip_path. 0 on success. */
+static int diagnostics_bundle(const char *zip_path) {
+    enum { kMax = 48 };
+    redaction r[8];
+    size_t nr = redactions(r, 8);
+    char dir[PATH_MAX_LEN], path[PATH_MAX_LEN];
+    path_join(dir, sizeof dir, plat_data_dir(), "diagnostics.tmp");
+    remove_tree(dir);
+    mkdir_p(dir);
+    zip_member mem[kMax];
+    char (*paths)[PATH_MAX_LEN] = malloc(kMax * sizeof *paths); /* console threads have small stacks */
+    int n = 0;
+    if (!paths) return -1;
+
+    char *txt = diagnostics_text();
+    bundle_add(dir, "report.txt", txt, r, nr, mem, paths, &n, kMax);
+    free(txt);
+    const char *logs[][2] = {{"romm-sync.log", "romm-sync.log"}, {"romm-sync.log.1", "romm-sync.previous.log"},
+                             {"events.json", "sync-log.json"}, {"boot.log", "boot.log"}, {"launcher.log", "launcher.log"}};
+    for (size_t i = 0; i < sizeof logs / sizeof logs[0]; i++) {
+        path_join(path, sizeof path, plat_data_dir(), logs[i][0]);
+        txt = read_file(path, NULL);
+        bundle_add(dir, logs[i][1], txt, r, nr, mem, paths, &n, kMax);
+        free(txt);
+    }
+    cJSON *j = detect_emulators();
+    txt = cJSON_Print(j);
+    cJSON_Delete(j);
+    bundle_add(dir, "emulators-found.json", txt, r, nr, mem, paths, &n, kMax);
+    free(txt);
+    config_lock();
+    txt = cJSON_Print(g_cfg.profiles);
+    config_unlock();
+    bundle_add(dir, "emulator-settings.json", txt, r, nr, mem, paths, &n, kMax);
+    free(txt);
+    emulator_logs(dir, r, nr, mem, paths, &n, kMax);
+    txt = kernel_log();
+    bundle_add(dir, "kernel.log", txt ? txt : "The kernel log couldn't be read (another tool may be reading it).\n", r,
+               nr, mem, paths, &n, kMax);
+    free(txt);
+
+    int rc = zip_write(zip_path, mem, n);
+    remove_tree(dir);
+    free(paths);
+    LOGI("diagnostic bundle %s: %d files%s", zip_path, n, rc ? ", failed" : "");
+    return rc;
+}
+
+/* Saves a bundle where the person can get at it: a USB drive when one is in,
+ * and the payload's folder. The newest three are kept there. */
+static cJSON *diagnostics_save(void) {
+    char stamp[32], name[64], path[PATH_MAX_LEN], dir[PATH_MAX_LEN];
+    time_t now = time(NULL);
+    struct tm tm;
+    localtime_r(&now, &tm);
+    strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &tm);
+    snprintf(name, sizeof name, "rommps-diagnostics-%s.zip", stamp);
+    path_join(dir, sizeof dir, plat_data_dir(), "diagnostics");
+    mkdir_p(dir);
+    path_join(path, sizeof path, dir, name);
+    if (diagnostics_bundle(path)) return NULL;
+    /* Older ones go: names sort by time. */
+    DIR *d = opendir(dir);
+    struct dirent *de;
+    char (*old)[64] = malloc(64 * sizeof *old);
+    int n = 0;
+    while (old && d && (de = readdir(d)) && n < 64)
+        if (!strncmp(de->d_name, "rommps-diagnostics-", 19)) str_copy(old[n++], sizeof old[0], de->d_name);
+    if (d) closedir(d);
+    if (old) {
+        qsort(old, (size_t)n, sizeof old[0], (int (*)(const void *, const void *))strcmp);
+        for (int i = 0; i + 3 < n; i++) {
+            char p[PATH_MAX_LEN];
+            path_join(p, sizeof p, dir, old[i]);
+            unlink(p);
+        }
+        free(old);
+    }
+    cJSON *j = cJSON_CreateObject();
+    cJSON_AddStringToObject(j, "path", path);
+    const char *usb[] = {"/mnt/usb0", "/mnt/usb1", "/mnt/usb2", "/mnt/usb3"};
+    for (size_t i = 0; i < sizeof usb / sizeof usb[0]; i++) {
+        char to[PATH_MAX_LEN];
+        path_join(to, sizeof to, usb[i], name);
+        if (dir_exists(usb[i]) && !copy_file(path, to)) {
+            cJSON_AddStringToObject(j, "usb", to);
+            break;
+        }
+    }
+    return j;
 }
 
 /* Covers and platform icons, from the console's cache or RomM (covers.h). */
@@ -570,10 +854,20 @@ static void route(request *r) {
         return;
     }
     if (is_get && !strcmp(r->path, "/api/diagnostics")) {
-        char *txt = diagnostics_text();
-        send_response(fd, 200, "text/plain; charset=utf-8", txt ? txt : "", txt ? strlen(txt) : 0,
-                      "Content-Disposition: attachment; filename=\"romm-sync-diagnostics.txt\"\r\n");
-        free(txt);
+        cJSON *j = diagnostics_save();
+        size_t len = 0;
+        char *zip = j ? read_file(jget_str(j, "path", ""), &len) : NULL;
+        if (zip) send_response(fd, 200, "application/zip", zip, len,
+                               "Content-Disposition: attachment; filename=\"rommps-diagnostics.zip\"\r\n");
+        else send_error(fd, 500, "couldn't make the bundle");
+        free(zip);
+        cJSON_Delete(j);
+        return;
+    }
+    if (is_post && !strcmp(r->path, "/api/diagnostics")) {
+        cJSON *j = diagnostics_save();
+        if (j) send_json(fd, 200, j);
+        else send_error(fd, 500, "couldn't make the bundle");
         return;
     }
     if (is_get && !strcmp(r->path, "/api/config")) {
@@ -785,6 +1079,24 @@ static void route(request *r) {
             }
             cJSON_AddItemToArray(profiles, p);
         }
+        /* Each emulator's save sync ("sync": {root: "off" | "saves" | "all"}),
+         * or what it was before. */
+        const cJSON *modes = cJSON_GetObjectItemCaseSensitive(j, "sync");
+        config_lock();
+        cJSON *pr;
+        cJSON_ArrayForEach(pr, profiles) {
+            const char *at = jget_str(pr, "root", "");
+            const char *mode = jget_str(modes, at, NULL);
+            const cJSON *old;
+            cJSON_ArrayForEach(old, g_cfg.profiles) if (!mode && !strcmp(jget_str(old, "root", ""), at) &&
+                                                        !strcmp(jget_str(old, "id", ""), jget_str(pr, "id", "")))
+                mode = jget_str(old, "sync", NULL);
+            char keep[8] = "";
+            if (mode && (!strcmp(mode, "off") || !strcmp(mode, "saves"))) str_copy(keep, sizeof keep, mode);
+            cJSON_DeleteItemFromObjectCaseSensitive(pr, "sync");
+            if (keep[0]) cJSON_AddStringToObject(pr, "sync", keep);
+        }
+        config_unlock();
         cJSON_Delete(found);
         cJSON_Delete(j);
         cJSON *cfg = cJSON_CreateObject();
@@ -802,6 +1114,34 @@ static void route(request *r) {
         if (rc) send_error(fd, 500, "could not save config");
         else {
             library_link_extras(); /* extras get the games already there */
+            send_ok(fd);
+        }
+        return;
+    }
+    if (is_post && !strcmp(r->path, "/api/emulators/sync")) {
+        /* One emulator's save sync: {"root", "sync": "off" | "saves" | "all"}. */
+        cJSON *j = body_json(r), *p;
+        const char *at = jget_str(j, "root", ""), *mode = jget_str(j, "sync", "");
+        int found = 0, rc = -1;
+        if (at[0] && (!strcmp(mode, "off") || !strcmp(mode, "saves") || !strcmp(mode, "all"))) {
+            config_lock();
+            cJSON_ArrayForEach(p, g_cfg.profiles) {
+                if (strcmp(jget_str(p, "root", ""), at) != 0) continue;
+                found = 1;
+                cJSON_DeleteItemFromObjectCaseSensitive(p, "sync");
+                if (strcmp(mode, "all") != 0) cJSON_AddStringToObject(p, "sync", mode);
+            }
+            if (found) {
+                g_cfg.profiles_custom = 1;
+                rc = config_save();
+            }
+            config_unlock();
+        }
+        cJSON_Delete(j);
+        if (!found) send_error(fd, 400, "unknown emulator or choice");
+        else if (rc) send_error(fd, 500, "could not save config");
+        else {
+            LOGI("save sync for %s: %s", at, mode);
             send_ok(fd);
         }
         return;
@@ -859,6 +1199,14 @@ static void route(request *r) {
         cJSON_Delete(j);
         if (rc) send_error(fd, 400, err);
         else send_ok(fd);
+        return;
+    }
+    if (is_get && !strcmp(r->path, "/api/events")) {
+        send_json(fd, 200, events_json(qint(r, "rom_id", 0), qint(r, "limit", 200)));
+        return;
+    }
+    if (is_get && !strcmp(r->path, "/api/tracked")) {
+        send_json(fd, 200, sync_tracked(qint(r, "rom_id", 0)));
         return;
     }
     if (is_get && !strcmp(r->path, "/api/history")) {
@@ -956,8 +1304,9 @@ static void route(request *r) {
             cJSON_AddStringToObject(o, "platforms", maps[i].romm_slugs);
             cJSON_AddStringToObject(o, "emulator", maps[i].emulator);
             cJSON_AddStringToObject(o, "rom_dir", maps[i].rom_dir);
+            cJSON_AddStringToObject(o, "root", maps[i].root);
             cJSON_AddStringToObject(o, "save_dir", maps[i].sync_saves ? maps[i].save_dir : "");
-            cJSON_AddStringToObject(o, "state_dir", maps[i].sync_saves ? maps[i].state_dir : "");
+            cJSON_AddStringToObject(o, "state_dir", maps[i].sync_saves && maps[i].sync_states ? maps[i].state_dir : "");
             cJSON_AddStringToObject(o, "bios_dir", maps[i].bios_dir);
             cJSON_AddStringToObject(o, "sync_note", maps[i].sync_note);
             cJSON_AddStringToObject(o, "save_layout", maps[i].save_layout);

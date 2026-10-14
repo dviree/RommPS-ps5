@@ -347,7 +347,12 @@ static void run_rom_job(job *j) {
         char name[256];
         str_copy(name, sizeof name, j->name);
         sync_game_result saves;
-        sync_game(j->target_id, name, &saves);
+        if (sync_game(j->target_id, name, &saves) != 0) { /* save sync off: just the game */
+            config_lock();
+            const int notify = g_cfg.notify;
+            config_unlock();
+            if (notify) plat_notify("RommPS: %s downloaded", name);
+        }
         pthread_mutex_lock(&g_q_lock);
         j->saves = saves;
         pthread_mutex_unlock(&g_q_lock);
@@ -727,7 +732,7 @@ again:;
             str_copy(sys, sizeof sys, x->platform_dir);
             for (char *c = sys; *c; c++)
                 if (*c >= 'a' && *c <= 'z') *c -= 32;
-            plat_notify("RomM Sync: %d %s game%s now also sync with %s", here, sys, here == 1 ? "" : "s",
+            plat_notify("RommPS: %d %s game%s now also sync with %s", here, sys, here == 1 ? "" : "s",
                         x->profile_name);
             linked += here;
         }

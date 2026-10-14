@@ -1,4 +1,4 @@
-/* RomM Sync web UI: layout and components. Colours, shapes and effects come
+/* RommPS web UI: layout and components. Colours, shapes and effects come
  * from the theme tokens in ui/themes/ (classic.css lists them all). */
 * { box-sizing: border-box; }
 body { margin: 0; background-color: var(--page); background-image: var(--backdrop); background-attachment: fixed; color: var(--text); font: 18px/1.45 var(--font); }
@@ -103,3 +103,8 @@ a { color: var(--accent-text); }
 .ribbon button:disabled { opacity: .3; }
 .ribbon, [data-rom] { scroll-margin-top: 90px; } /* clear of the sticky header */
 #updBody details { margin-top: 14px; }
+.tplat { border-top: var(--hairline); padding: 8px 0; }
+.tplat summary { cursor: pointer; padding: 4px 0; }
+.tgame { margin: 10px 0 10px 14px; }
+.tfile { margin: 4px 0 0 10px; word-break: break-all; }
+.noSaves .syncCol { display: none; }

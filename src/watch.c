@@ -1,6 +1,8 @@
 /* Polls the save and state folders once a second and asks for a sync when a
  * changed file has been left alone for SETTLE_SEC. Files that changed before
- * startup are left to the startup sync. */
+ * startup are left to the startup sync. While a game runs, a file goes up at
+ * most every PLAYING_GAP_SEC: some emulators rewrite the save every few
+ * seconds, and the sync after the game closes sends the last version. */
 #include "watch.h"
 
 #include <dirent.h>
@@ -21,6 +23,7 @@
 
 #define POLL_SEC        1
 #define SETTLE_SEC      2
+#define PLAYING_GAP_SEC 300
 #define RELOAD_DIRS_SEC 60
 #define MAX_DEPTH       3
 
@@ -31,6 +34,7 @@ typedef struct {
     int64_t synced_mtime; /* last version handed to a sync */
     off_t synced_size;
     time_t changed_at;   /* when an unsynced change was seen, 0 if none */
+    time_t sent_at;      /* when it last asked for a sync */
     int seen;
 } watched;
 
@@ -190,7 +194,7 @@ static void *watch_thread(void *arg) {
         time_t now = time(NULL);
         int enabled;
         config_lock();
-        enabled = g_cfg.sync_on_change && g_cfg.setup_complete;
+        enabled = g_cfg.sync_on_change && g_cfg.setup_complete && g_cfg.save_sync;
         config_unlock();
         if (!config_is_paired() || !enabled) {
             baseline = 1;
@@ -218,11 +222,13 @@ static void *watch_thread(void *arg) {
         for (int i = 0; i < g_nfiles; i++) {
             watched *w = &g_files[i];
             if (!w->changed_at || now - w->changed_at < SETTLE_SEC) continue;
+            if (sync_game_running() && w->sent_at && now - w->sent_at < PLAYING_GAP_SEC) continue; /* later */
             w->changed_at = 0;
             if (w->mtime == w->synced_mtime && w->size == w->synced_size) continue;
             w->synced_mtime = w->mtime;
             w->synced_size = w->size;
             if (written_by_sync(w)) continue;
+            w->sent_at = now;
             if (!first) first = w->path;
             ready++;
         }

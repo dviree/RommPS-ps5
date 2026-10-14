@@ -19,6 +19,7 @@ typedef struct {
     int sync_interval_min;    /* periodic sync, 0 = off */
     int sync_on_game_exit;
     int sync_on_game_start;
+    int save_sync;            /* 0: RomM only as a game source, no save or state sync */
     int sync_on_change;       /* upload saves as soon as they change */
     int exit_delay_sec;
     int sync_states;          /* 0 off, 1 upload, 2 upload and download */

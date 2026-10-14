@@ -180,6 +180,7 @@ struct Config
     std::string server_url;
     bool tls_verify = true;
     int sync_interval_min = 0;
+    bool save_sync = true; // false: RomM only as a game source
     bool sync_on_game_exit = true, sync_on_game_start = false, sync_on_change = false;
     bool notify = true, update_check = true;
     std::string states = "off";          // off, upload, sync
@@ -355,6 +356,10 @@ class App
 
 // The program's one App, created on first use.
 App &app();
+
+// Text for the kit's fonts, which are baked for ASCII: accented letters fold
+// to plain ones ("Pokémon" reads "Pokemon").
+std::string plain_text(const char *text);
 
 } // namespace rommps
 

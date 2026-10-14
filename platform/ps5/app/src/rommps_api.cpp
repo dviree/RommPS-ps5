@@ -9,6 +9,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -21,7 +22,7 @@ namespace rommps {
 cJSON *Response::json() const { return body.empty() ? nullptr : cJSON_ParseWithLength(body.data(), body.size()); }
 
 std::string Response::message() const {
-    if (status == 0) return error.empty() ? "RomM Sync isn't answering" : error;
+    if (status == 0) return error.empty() ? "RommPS's background service isn't answering" : error;
     std::string out;
     if (cJSON *j = json()) {
         const cJSON *e = cJSON_GetObjectItemCaseSensitive(j, "error");
@@ -42,6 +43,20 @@ static bool send_all(int fd, const char *p, size_t n) {
     return true;
 }
 
+namespace {
+// The request on the wire, so closing the app needn't wait for its answer.
+std::atomic<int> g_open_fd{-1};
+
+struct OpenSocket {
+    int fd;
+    explicit OpenSocket(int f) : fd(f) { g_open_fd = f; }
+    ~OpenSocket() {
+        int expected = fd;
+        g_open_fd.compare_exchange_strong(expected, -1);
+    }
+};
+}  // namespace
+
 Response http_request(const std::string &host, int port, const std::string &method, const std::string &path,
                       const std::string &body, int timeout_ms) {
     Response r;
@@ -50,6 +65,7 @@ Response http_request(const std::string &host, int port, const std::string &meth
         r.error = std::string("socket: ") + std::strerror(errno);
         return r;
     }
+    const OpenSocket open(fd);
     timeval tv{timeout_ms / 1000, (timeout_ms % 1000) * 1000};
     ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
     ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
@@ -57,8 +73,7 @@ Response http_request(const std::string &host, int port, const std::string &meth
     sa.sin_family = AF_INET;
     sa.sin_port = htons((uint16_t)port);
     if (::inet_pton(AF_INET, host.c_str(), &sa.sin_addr) != 1 || ::connect(fd, (sockaddr *)&sa, sizeof sa) != 0) {
-        r.error = "RomM Sync isn't running (" + std::string(std::strerror(errno)) + ")";
-        ::close(fd);
+        r.error = "RommPS's background service isn't running (" + std::string(std::strerror(errno)) + ")";
         return r;
     }
     char head[1024];
@@ -68,7 +83,6 @@ Response http_request(const std::string &host, int port, const std::string &meth
                            method.c_str(), path.c_str(), host.c_str(), body.size());
     if (hn <= 0 || hn >= (int)sizeof head || !send_all(fd, head, (size_t)hn) || !send_all(fd, body.data(), body.size())) {
         r.error = "couldn't send the request";
-        ::close(fd);
         return r;
     }
     std::string in;
@@ -77,18 +91,16 @@ Response http_request(const std::string &host, int port, const std::string &meth
         ssize_t n = ::recv(fd, buf, sizeof buf, 0);
         if (n < 0 && errno == EINTR) continue;
         if (n < 0) {
-            r.error = errno == EAGAIN || errno == EWOULDBLOCK ? "RomM Sync took too long to answer" : std::strerror(errno);
-            ::close(fd);
+            r.error = errno == EAGAIN || errno == EWOULDBLOCK ? "RommPS's background service took too long to answer" : std::strerror(errno);
             return r;
         }
         if (n == 0) break;
         in.append(buf, (size_t)n);
     }
-    ::close(fd);
     size_t split = in.find("\r\n\r\n");
     int status = 0;
     if (split == std::string::npos || std::sscanf(in.c_str(), "HTTP/%*d.%*d %d", &status) != 1) {
-        r.error = "RomM Sync sent a reply the app can't read";
+        r.error = "RommPS's background service sent a reply the app can't read";
         return r;
     }
     r.status = status;
@@ -127,6 +139,9 @@ Api::~Api() {
         stopping_ = true;
     }
     wake_.notify_all();
+    // A request still waiting for its answer ends now.
+    const int fd = g_open_fd.exchange(-1);
+    if (fd >= 0) ::shutdown(fd, SHUT_RDWR);
     thread_.join();
 }
 

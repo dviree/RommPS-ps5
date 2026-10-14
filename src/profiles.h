@@ -22,6 +22,10 @@
  * {serial} (a PS1 disc's, "SCUS-94194"), {rom_fnv64} (FNV-1a 64 of the game
  * file, in hex) and {rom_stem_safe} (the file name, non-alphanumerics as "_").
  *
+ * "state_cores", "state_format", "state_slot0" and "state_core_setting" say
+ * which save states an emulator can load (see profile_map); profiles saved
+ * before they existed take them from the built-in catalog, by profile id.
+ *
  * "save_layout" (psp, gci or wii) syncs a game's save folder or files as one zip;
  * "bundle_dirs" lists where to look, with {save_path}, {save_root} and {bios}.
  * A platform entry can override any profile key. "sync_requires_option"
@@ -32,7 +36,10 @@
  * the first slugs of detect.c's DB_MAP). When several emulators play one, the
  * user picks one and the others list it in "exclude": ["psx"], which drops
  * that platform entry from them, or in "extra": ["psx"], which keeps it as
- * an extra emulator for the system (see profile_map.extra). */
+ * an extra emulator for the system (see profile_map.extra).
+ *
+ * "sync" is the user's choice for the emulator: "all" (saves and states, the
+ * default), "saves" (no states) or "off" (games only). */
 #ifndef ROMM_PROFILES_H
 #define ROMM_PROFILES_H
 
@@ -60,6 +67,24 @@ typedef struct {
     char save_stems[256];
     char state_stems[256];
     char state_name[128];
+    /* Save states from elsewhere come down only when the emulator can load
+     * them: state_cores lists the cores whose states it takes (RomM
+     * "emulator" names, default the platform's emulator). An emulator that
+     * switches cores in its own settings ("state_core_setting": {"file",
+     * "key", "values": {"0": "pcsx_rearmed", ...}}) takes only the current
+     * one's. state_format is "retroarch" (RetroArch's container, compressed
+     * or not) or "raw" (the core's bare state, PSXS5); state_slot0 is the
+     * extension of the first slot (".state", or ".state0"). */
+    char state_cores[256];
+    char state_format[16];
+    char state_slot0[16];
+    char core_file[PATH_MAX_LEN];
+    char core_key[32];
+    char core_values[256]; /* "0=pcsx_rearmed,2=mednafen_psx_hw" */
+    /* Saves named differently by some of those cores ("save_name_by_core":
+     * {"mednafen_psx_hw": "{rom_stem}_1{ext}"}): both names are the game's,
+     * downloads take the current core's. "core=template;core=template". */
+    char save_names_by_core[256];
     /* Several emulators for one system: the main one gets downloads first and
      * the extras ("extra": ["psx"] in their profile) a link to the same file.
      * Extras whose saves have the main one's format ("save_format": "psx-card")
@@ -71,6 +96,8 @@ typedef struct {
      * backed up to RomM's memory cards (memcard.h). */
     char memcards[512];
     int sync_saves;
+    int sync_states;   /* 0: the user turned states off for this emulator */
+    int sync_off;      /* 1: the user turned save sync off for this emulator */
     /* RetroArch folder rules, [0] for saves and [1] for states:
      * in_content = next to the game, by_content = <dir>/<game folder>/,
      * by_core = <dir>/<core_name>/. Both sort flags nest content then core. */

@@ -170,6 +170,11 @@ Palette palette_of(const unsigned char *rgba, int w, int h)
 
 } // namespace
 
+std::string plain_text(const char *text)
+{
+    return plain(text ? text : "");
+}
+
 App &app()
 {
     static App instance;
@@ -893,6 +898,7 @@ void App::refresh_config()
         c.sync_on_game_exit = flag(j.get(), "sync_on_game_exit");
         c.sync_on_game_start = flag(j.get(), "sync_on_game_start");
         c.sync_on_change = flag(j.get(), "sync_on_change");
+        c.save_sync = !cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(j.get(), "save_sync")); // older payloads: on
         c.notify = flag(j.get(), "notify");
         c.update_check = flag(j.get(), "update_check");
         c.states = str(j.get(), "states", "off");

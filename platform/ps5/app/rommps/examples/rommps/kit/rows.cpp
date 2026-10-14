@@ -36,15 +36,17 @@ RowEvent RowList::handle(const std::vector<Row> &rows, const hui::InputFrame &in
     if (count == 0)
         return event;
     focus_ = std::clamp(focus_, 0, count - 1);
+    // A section's name can't hold the focus: the first row after it does
+    // (or, at the end of the list, the last one before it).
     if (rows[static_cast<std::size_t>(focus_)].kind == RowKind::header)
     {
         int at = focus_;
         while (at < count && rows[static_cast<std::size_t>(at)].kind == RowKind::header)
-            at++;
-        if (at == count) 
+            ++at;
+        if (at == count)
             for (at = focus_; at > 0 && rows[static_cast<std::size_t>(at)].kind == RowKind::header;)
                 --at;
-        focus_ at;
+        focus_ = at;
     }
     const Row &row = rows[static_cast<std::size_t>(focus_)];
     switch (input.nav)
@@ -52,7 +54,7 @@ RowEvent RowList::handle(const std::vector<Row> &rows, const hui::InputFrame &in
     case Direction::up:
     case Direction::down:
     {
-        const int next = focus_ + (input.nav == Direction::down ? 1 : -1);
+        const int step = input.nav == Direction::down ? 1 : -1;
         int next = focus_ + step;
         while (next >= 0 && next < count && rows[static_cast<std::size_t>(next)].kind == RowKind::header)
             next += step;
@@ -129,18 +131,17 @@ void RowList::draw(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, const 
     for (int i = 0; i < static_cast<int>(rows.size()); ++i)
     {
         const Row &row = rows[static_cast<std::size_t>(i)];
+        const float y = bounds.y + static_cast<float>(i) * kRowHeight - scroll_.value;
+        if (y + kRowHeight < bounds.y || y > bounds.y + bounds.h)
+            continue;
         if (row.kind == RowKind::header)
         {
             std::string caps = row.label;
             for (char &ch : caps)
                 ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
-            ui::text(list, font.semibold, caps, bounds.x + 32, y + kRowHeight - 20, 16, look.muted,
-                    hui::gfx::Align::left, 3.0f);
+            ui::text(list, fonts.semibold, caps, bounds.x + 32, y + kRowHeight - 20, 18, look.muted);
             continue;
         }
-        const float y = bounds.y + static_cast<float>(i) * kRowHeight - scroll_.value;
-        if (y + kRowHeight < bounds.y || y > bounds.y + bounds.h)
-            continue;
         const bool focused = i == focus_;
         const float dim = row.enabled ? 1.0f : 0.45f;
         const Color ink = focused ? look.on_highlight : row.danger ? look.danger : look.text;
