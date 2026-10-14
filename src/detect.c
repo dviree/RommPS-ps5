@@ -398,6 +398,30 @@ cJSON *detect_emulators(void) {
         closedir(d);
     }
     add_standalone(out);
+    /* The folders each emulator uses by default, for a given platform. */
+    cJSON *c;
+    cJSON_ArrayForEach(c, out) {
+        if (cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(c, "ready"))) continue; /* No preset, custom */
+        cJSON *profile = cJSON_GetObjectItemCaseSensitive(c, "profile"), *one = cJSON_CreateArray();
+        cJSON_AddItemReferenceToArray(one, profile);
+        profile_map *maps = NULL;
+        int n = profiles_expand(one, &maps);
+        cJSON *dirs = cJSON_AddObjectToObject(c, "dirs");
+        for (int i = 0; i < n; i++) {
+            char key[64];
+            str_copy(key, sizeof key, maps[i].romm_slugs);
+            char *comma = strchr(key, ',');
+            if (comma) *comma = 0;
+            cJSON *d = cJSON_AddObjectToObject(dirs, key);
+            cJSON_AddStringToObject(d, "rom_dir", maps[i].rom_dir);
+            cJSON_AddStringToObject(d, "save_dir", maps[i].save_dir);
+            cJSON_AddStringToObject(d, "state_dir", maps[i].state_dir);
+        }
+        free(maps);
+        cJSON_Delete(one);
+        const cJSON *fixed = cJSON_GetObjectItemCaseSensitive(profile, "fixed");
+        cJSON_AddItemToObject(c, "fixed", fixed ? cJSON_Duplicate(fixed, 1) : cJSON_CreateArray());
+    }
     return out;
 }
 

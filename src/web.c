@@ -318,6 +318,14 @@ static cJSON *systems_json(const cJSON *profiles) {
     return out;
 }
 
+/* Whether a list in obj ("on": [roots]) names root. */
+static int lists_root(const cJSON *obj, const char *list, const char *root) {
+    const cJSON *x;
+    cJSON_ArrayForEach(x, cJSON_GetObjectItemCaseSensitive(obj, list))
+        if (cJSON_IsString(x) && !strcmp(x->valuestring, root)) return 1;
+    return 0;
+}
+
 static int plays_system(const cJSON *profile, const char *key) {
     const cJSON *e;
     cJSON_ArrayForEach(e, cJSON_GetObjectItemCaseSensitive(profile, "platforms"))
@@ -682,25 +690,45 @@ static void route(request *r) {
          * system several of them play to the root of its main emulator;
          * "also" lists, per system, the other emulators that keep it as
          * extras (downloads linked in, a save shared where the format is the
-         * same); the rest exclude it. */
+         * same); the rest exclude it. "systems" does the same per system,
+         * and wins over both: {"ps2": {"main": root, "on": [roots],
+         * "folders": {root: {"rom_dir", "save_dir", "state_dir"}}}}. An
+         * emulator not "on" excludes it; folders go on that system's entry. */
         cJSON *j = body_json(r), *found = detect_emulators(), *profiles = cJSON_CreateArray();
         const cJSON *root, *c, *choices = cJSON_GetObjectItemCaseSensitive(j, "choices");
         const cJSON *also = cJSON_GetObjectItemCaseSensitive(j, "also");
+        const cJSON *systems = cJSON_GetObjectItemCaseSensitive(j, "systems");
         cJSON_ArrayForEach(root, cJSON_GetObjectItemCaseSensitive(j, "roots")) {
             cJSON_ArrayForEach(c, found) {
                 if (!cJSON_IsString(root) || strcmp(jget_str(c, "root", ""), root->valuestring) != 0) continue;
                 if (cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(c, "ready"))) continue; /* no preset: "custom" below */
                 cJSON *p = cJSON_Duplicate(cJSON_GetObjectItemCaseSensitive(c, "profile"), 1), *ex = cJSON_CreateArray(),
                       *extra = cJSON_CreateArray();
-                const cJSON *e, *x;
+                cJSON *e;
                 cJSON_ArrayForEach(e, cJSON_GetObjectItemCaseSensitive(p, "platforms")) {
                     const char *key = profiles_system_key(e), *keeper = jget_str(choices, key, NULL);
+                    const cJSON *sys = cJSON_GetObjectItemCaseSensitive(systems, key);
+                    if (sys) {
+                        if (!lists_root(sys, "on", root->valuestring)) {
+                            cJSON_AddItemToArray(ex, cJSON_CreateString(key));
+                            continue;
+                        }
+                        if (strcmp(jget_str(sys, "main", ""), root->valuestring) != 0) /* on, not the main one */
+                            cJSON_AddItemToArray(extra, cJSON_CreateString(key));
+                        const cJSON *f = cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(sys, "folders"),
+                                                                          root->valuestring);
+                        static const char *const dirs[] = {"rom_dir", "save_dir", "state_dir"};
+                        for (int k = 0; f && k < 3; k++) {
+                            const char *d = jget_str(f, dirs[k], "");
+                            if (d[0] != '/') continue; /* empty: the default */
+                            cJSON_DeleteItemFromObjectCaseSensitive(e, dirs[k]);
+                            cJSON_AddStringToObject(e, dirs[k], d);
+                        }
+                        continue;
+                    }
                     if (!keeper || !strcmp(keeper, root->valuestring)) continue;
                     /* "also": {"psx": [roots]} keeps the system on those as extras. */
-                    int kept = 0;
-                    cJSON_ArrayForEach(x, cJSON_GetObjectItemCaseSensitive(also, key))
-                        if (cJSON_IsString(x) && !strcmp(x->valuestring, root->valuestring)) kept = 1;
-                    cJSON_AddItemToArray(kept ? extra : ex, cJSON_CreateString(key));
+                    cJSON_AddItemToArray(lists_root(also, key, root->valuestring) ? extra : ex, cJSON_CreateString(key));
                 }
                 if (cJSON_GetArraySize(ex)) cJSON_AddItemToObject(p, "exclude", ex);
                 else cJSON_Delete(ex);

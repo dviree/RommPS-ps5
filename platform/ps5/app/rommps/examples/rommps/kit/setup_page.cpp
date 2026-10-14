@@ -665,6 +665,7 @@ std::vector<Row> SetupPage::emulator_rows(const App &app, std::vector<RowRef> *r
         add({RowKind::info, "No emulators found", "",
              "Continue with RetroArch's usual folders. You can change them later."},
             {});
+            add({RowKind::header, "Emulators"}, {} );
     for (std::size_t i = 0; i < emulators_.size(); ++i)
     {
         const Emulator &e = emulators_[i];

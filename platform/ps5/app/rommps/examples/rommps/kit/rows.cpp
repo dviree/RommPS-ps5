@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cctype>
 
 namespace rommps
 {
@@ -35,6 +36,16 @@ RowEvent RowList::handle(const std::vector<Row> &rows, const hui::InputFrame &in
     if (count == 0)
         return event;
     focus_ = std::clamp(focus_, 0, count - 1);
+    if (rows[static_cast<std::size_t>(focus_)].kind == RowKind::header)
+    {
+        int at = focus_;
+        while (at < count && rows[static_cast<std::size_t>(at)].kind == RowKind::header)
+            at++;
+        if (at == count) 
+            for (at = focus_; at > 0 && rows[static_cast<std::size_t>(at)].kind == RowKind::header;)
+                --at;
+        focus_ at;
+    }
     const Row &row = rows[static_cast<std::size_t>(focus_)];
     switch (input.nav)
     {
@@ -42,6 +53,9 @@ RowEvent RowList::handle(const std::vector<Row> &rows, const hui::InputFrame &in
     case Direction::down:
     {
         const int next = focus_ + (input.nav == Direction::down ? 1 : -1);
+        int next = focus_ + step;
+        while (next >= 0 && next < count && rows[static_cast<std::size_t>(next)].kind == RowKind::header)
+            next += step;
         if (next >= 0 && next < count)
         {
             focus_ = next;
@@ -115,6 +129,15 @@ void RowList::draw(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, const 
     for (int i = 0; i < static_cast<int>(rows.size()); ++i)
     {
         const Row &row = rows[static_cast<std::size_t>(i)];
+        if (row.kind == RowKind::header)
+        {
+            std::string caps = row.label;
+            for (char &ch : caps)
+                ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+            ui::text(list, font.semibold, caps, bounds.x + 32, y + kRowHeight - 20, 16, look.muted,
+                    hui::gfx::Align::left, 3.0f);
+            continue;
+        }
         const float y = bounds.y + static_cast<float>(i) * kRowHeight - scroll_.value;
         if (y + kRowHeight < bounds.y || y > bounds.y + bounds.h)
             continue;

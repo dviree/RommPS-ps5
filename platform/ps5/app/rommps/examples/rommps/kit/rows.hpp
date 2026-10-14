@@ -25,6 +25,7 @@ enum class RowKind
     choice, // left and right step through its options
     action, // Cross does it
     info,   // only shows something
+    header // a section's name
 };
 
 struct Row
