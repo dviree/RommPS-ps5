@@ -737,6 +737,8 @@ void LibraryPage::draw_grid(hui::gfx::DrawList &list, const hui::ui::Fonts &font
             const Rect bar{kMargin, 336, 420, 8};
             list.rounded_rect(bar, 4, look.muted.with_alpha(0.25f));
             list.rounded_rect({bar.x, bar.y, std::max(8.0f, bar.w * d->progress()), bar.h}, 4, accent);
+            if (d->syncing())
+                ui::text(list, fonts.semibold, "Syncing saves", bar.x + bar.w + 20, 344, 20, look.muted);
         }
         else
         {

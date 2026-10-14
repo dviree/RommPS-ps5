@@ -27,6 +27,14 @@ void sync_add_play_session(time_t start, time_t end, const char *title_id);
 void sync_set_game_running(int running);
 int sync_game_running(void);
 
+/* Syncs one game's saves and states now, e.g. once it's downloaded, and
+ * notifies what came down. Waits for a sync already running. -1 when
+ * syncing isn't set up yet. */
+typedef struct {
+    int saves, states, conflicts, failed;
+} sync_game_result;
+int sync_game(int rom_id, const char *name, sync_game_result *out);
+
 /* What a sync would do, without transferring anything. */
 cJSON *sync_preview(char *err, int en);
 

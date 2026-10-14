@@ -770,6 +770,10 @@ void App::refresh_downloads()
             dl.done = num(d, "done");
             dl.total = num(d, "total");
             dl.speed = num(d, "speed");
+            dl.saves = static_cast<int>(num(d, "saves"));
+            dl.states = static_cast<int>(num(d, "states"));
+            dl.save_conflicts = static_cast<int>(num(d, "save_conflicts"));
+            dl.saves_failed = flag(d, "saves_failed");
             active += dl.active();
             // A game that just finished shows as downloaded on its shelf.
             for (const Download &old : downloads_)
@@ -786,6 +790,21 @@ void App::refresh_downloads()
             refresh_installed();
         }
     });
+}
+
+std::string Download::saves_note() const
+{
+    if (saves_failed)
+        return "Saves couldn't sync";
+    if (save_conflicts)
+        return "Save conflict to resolve";
+    auto count = [](int n, const char *what) { return std::to_string(n) + " " + what + (n == 1 ? "" : "s"); };
+    std::string got;
+    if (saves)
+        got = count(saves, "save");
+    if (states)
+        got += (got.empty() ? "" : " and ") + count(states, "state");
+    return got.empty() ? "" : got + " synced";
 }
 
 const Download *App::download_for(int rom_id) const

@@ -810,18 +810,29 @@ $("viewGrid").onclick = function () { setView("grid"); };
 $("viewTable").onclick = function () { setView("table"); };
 
 var CLOCK_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>';
-function romJob(g) { var j = state.dl[g.id]; return j && (j.status === "queued" || j.status === "downloading") ? j : null; }
+function romJob(g) { var j = state.dl[g.id]; return j && (j.status === "queued" || j.status === "downloading" || j.status === "syncing") ? j : null; }
 function jobPct(j) { return j.total ? Math.min(100, Math.floor(j.done * 100 / j.total)) : 0; }
+function jobLabel(j) { return j.status === "queued" ? "Queued" : j.status === "syncing" ? "Syncing saves" : jobPct(j) + "%"; }
+function plural(n, what) { return n + " " + what + (n === 1 ? "" : "s"); }
+/* What the sync after a download brought. */
+function jobSaves(d) {
+  if (d.saves_failed) return '<span class="err">saves could not sync</span>';
+  if (d.save_conflicts) return '<span class="warn">save conflict to resolve</span>';
+  var got = [];
+  if (d.saves) got.push(plural(d.saves, "save"));
+  if (d.states) got.push(plural(d.states, "state"));
+  return got.length ? got.join(" and ") + " synced" : "";
+}
 function romButton(g) {
   if (!state.platform.profile) return "";
   var j = romJob(g);
-  if (j) return "<button disabled>" + (j.status === "queued" ? "Queued" : jobPct(j) + "%") + "</button>";
+  if (j) return "<button disabled>" + jobLabel(j) + "</button>";
   return g.installed ? '<button class="icon" data-hist="' + g.id + '" title="History" aria-label="History">' + CLOCK_ICON + '</button> <button class="danger" data-del="' + g.id + '">Remove</button>'
     : '<button class="primary" data-dl="' + g.id + '" data-name="' + esc(g.name || "") + '">Download</button>';
 }
 function romStatus(g) {
   var j = romJob(g);
-  if (j) return pill(j.status === "queued" ? "Queued" : jobPct(j) + "%", "warn");
+  if (j) return pill(jobLabel(j), "warn");
   return g.installed ? pill("Downloaded", "ok") : "";
 }
 // Updates the open platform as downloads progress, keeping focus on the same game.
@@ -854,7 +865,7 @@ function renderRoms() {
   $("roms").innerHTML = '<div class="grid">' + items.map(function (g) {
     var cover = g.cover ? 'style="background-image:url(\'' + coverUrl(g) + '\')"' : "";
     var j = romJob(g);
-    var badge = j ? '<span class="badge dl">' + (j.status === "queued" ? "Queued" : jobPct(j) + "%") + "</span>" : g.installed ? '<span class="badge">Downloaded</span>' : "";
+    var badge = j ? '<span class="badge dl">' + jobLabel(j) + "</span>" : g.installed ? '<span class="badge">Downloaded</span>' : "";
     return '<div class="rom" data-rom="' + g.id + '"><div class="cover" ' + cover + ">" + badge + '</div><div class="t">' + esc(g.name) + '</div><div class="s">' + (g.version ? esc(g.version) + " · " : "") + fmtSize(g.size) + "</div>" + (g.installed && !romJob(g) ? '<div class="btns">' + romButton(g) + "</div>" : romButton(g)) + "</div>";
   }).join("") + "</div>";
 }
@@ -963,14 +974,15 @@ function downloadRow(d) {
   var pct = d.total ? Math.min(100, Math.round(d.done * 100 / d.total)) : (d.status === "done" ? 100 : 0);
   var meta;
   if (d.status === "error") meta = '<span class="err">' + esc(d.error) + "</span>";
-  else if (d.status === "done") meta = '<span class="ok">Done</span> ' + fmtSize(d.total);
+  else if (d.status === "done") meta = '<span class="ok">Done</span> ' + fmtSize(d.total) + (jobSaves(d) ? ", " + jobSaves(d) : "");
+  else if (d.status === "syncing") meta = "Syncing saves";
   else if (d.status === "cancelled") meta = '<span class="muted">Cancelled</span>';
   else if (d.status === "cancelling") meta = "Cancelling";
   else if (d.status === "queued") meta = "Queued";
   else meta = (d.note ? esc(d.note) + ": " : "") + fmtSize(d.done) + (d.total ? " of " + fmtSize(d.total) : "") + (d.speed > 0 ? ", " + fmtSize(d.speed) + "/s" + (d.total ? ", " + fmtEta((d.total - d.done) / d.speed) : "") : "");
   return '<div class="dl-item"><div class="row"><div>' + (d.platform ? pill(d.platform) : "") + (d.type === "firmware" ? pill("BIOS", "off") : "") + "<b>" + esc(d.name) + "</b>" +
     '<div class="meta">' + meta + "</div></div>" + (active ? '<button class="small" data-cancel="' + d.id + '">Cancel</button>' : "") + "</div>" +
-    (active || d.status === "cancelling" ? '<div class="bar"><i style="width:' + pct + '%"></i></div>' : "") + "</div>";
+    (active || d.status === "cancelling" || d.status === "syncing" ? '<div class="bar"><i style="width:' + pct + '%"></i></div>' : "") + "</div>";
 }
 function loadDownloads() {
   api("GET", "/api/downloads").then(function (list) {

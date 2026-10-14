@@ -1060,10 +1060,11 @@ static void record_conflict(const local_file *f, const cJSON *op) {
 }
 
 
-static int sync_states_up(scan_ctx *c) {
+static int sync_states_up(scan_ctx *c, int only_rom) {
     int uploaded = 0;
     for (int i = 0; i < c->nstates; i++) {
         local_file *f = &c->states[i];
+        if (only_rom && f->rom_id != only_rom) continue;
         if (file_mtime_ns(f->path) != f->mtime_ns) { /* replaced by the download pass */
             f->mtime = file_mtime(f->path);
             f->mtime_ns = file_mtime_ns(f->path);
@@ -1165,12 +1166,13 @@ static int fetch_state(const scan_ctx *c, const cJSON *s, const char *path, int 
 
 /* Pulls states that changed on the server since we last saw them. A state
  * that also changed here is kept; the upload pass sends it. */
-static int sync_states_down(scan_ctx *c) {
+static int sync_states_down(scan_ctx *c, int only_rom) {
     long st = 0;
     cJSON *list = romm_call("GET", "/api/states", NULL, &st);
     int n = 0;
     const cJSON *s;
     cJSON_ArrayForEach(s, list) {
+        if (only_rom && (int)jget_num(s, "rom_id", 0) != only_rom) continue;
         const local_rom *r = find_rom(c, (int)jget_num(s, "rom_id", 0), jget_str(s, "emulator", NULL));
         char dir[PATH_MAX_LEN], name[256], path[PATH_MAX_LEN];
         if (!r || !expected_dir(r, 1, dir, sizeof dir)) continue;
@@ -1296,7 +1298,8 @@ static void forget_other_server(void) {
     state_unlock();
 }
 
-static void run_sync(const char *reason, sync_result *res) {
+/* only_rom limits the transfers to one game; the rest wait for the next sync. */
+static void run_sync(const char *reason, int only_rom, sync_result *res) {
     memset(res, 0, sizeof *res);
     forget_other_server();
     scan_ctx c;
@@ -1342,7 +1345,7 @@ static void run_sync(const char *reason, sync_result *res) {
     int session_id = (int)jget_num(neg, "session_id", 0);
     /* A running game would overwrite a downloaded save, so downloads wait until
      * it closes. The sync right after launch still downloads. */
-    int upload_only = g_game_running && strcmp(reason, "game started") != 0;
+    int upload_only = g_game_running && strcmp(reason, "game started") != 0 && !only_rom;
 
     const cJSON *op;
     int nops = cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(neg, "operations")), k = 0;
@@ -1355,6 +1358,7 @@ static void run_sync(const char *reason, sync_result *res) {
         int rom_id = (int)jget_num(op, "rom_id", 0);
         int save_id = (int)jget_num(op, "save_id", 0);
         const char *slot = jget_str(op, "slot", "");
+        if (only_rom && rom_id != only_rom) continue;
         const local_file *f = find_save(&c, rom_id, slot);
 
         const char *server_hash = jget_str(op, "server_content_hash", "");
@@ -1467,8 +1471,8 @@ static void run_sync(const char *reason, sync_result *res) {
     cJSON_AddNumberToObject(done, "operations_completed", res->uploaded + res->downloaded + res->noop);
     cJSON_AddNumberToObject(done, "operations_failed", res->failed);
     pthread_mutex_lock(&g_req_lock);
-    cJSON *ps = g_play_sessions;
-    g_play_sessions = NULL;
+    cJSON *ps = only_rom ? NULL : g_play_sessions;
+    if (!only_rom) g_play_sessions = NULL;
     pthread_mutex_unlock(&g_req_lock);
     if (ps) {
         /* If one game's save changed, that's the game that was played. */
@@ -1493,11 +1497,11 @@ static void run_sync(const char *reason, sync_result *res) {
     config_unlock();
     if (do_states) {
         set_phase("syncing save states");
-        if (do_states == 2 && !upload_only) res->states_down = sync_states_down(&c);
-        res->states_up = sync_states_up(&c);
+        if (do_states == 2 && !upload_only) res->states_down = sync_states_down(&c, only_rom);
+        res->states_up = sync_states_up(&c, only_rom);
     }
 
-    res->cards = memcard_backup();
+    if (!only_rom) res->cards = memcard_backup();
     /* A save that just came down reaches the other emulators that share it. */
     share_saves(&c);
 
@@ -1505,6 +1509,43 @@ static void run_sync(const char *reason, sync_result *res) {
     state_save();
     state_unlock();
     scan_free(&c);
+}
+
+/* Runs a sync and adds it to the history. */
+static void run_and_record(const char *reason, int only_rom, sync_result *r) {
+    pthread_mutex_lock(&g_run_lock);
+    g_running = 1;
+    run_sync(reason, only_rom, r);
+    g_running = 0;
+    g_last_run = time(NULL);
+    set_phase("idle");
+    pthread_mutex_unlock(&g_run_lock);
+
+    cJSON *h = cJSON_CreateObject();
+    g_sync_count++;
+    cJSON_AddNumberToObject(h, "time", (double)g_last_run);
+    cJSON_AddStringToObject(h, "reason", reason);
+    cJSON_AddNumberToObject(h, "uploaded", r->uploaded);
+    cJSON_AddNumberToObject(h, "downloaded", r->downloaded);
+    cJSON_AddNumberToObject(h, "conflicts", r->conflicts);
+    cJSON_AddNumberToObject(h, "skipped", r->skipped);
+    cJSON_AddNumberToObject(h, "failed", r->failed);
+    cJSON_AddNumberToObject(h, "states_uploaded", r->states_up);
+    cJSON_AddNumberToObject(h, "states_downloaded", r->states_down);
+    cJSON_AddNumberToObject(h, "deferred", r->deferred);
+    cJSON_AddNumberToObject(h, "cards_uploaded", r->cards);
+    if (r->error[0]) cJSON_AddStringToObject(h, "error", r->error);
+    state_lock();
+    state_history_add(h);
+    state_save();
+    state_unlock();
+}
+
+static int notify_on(void) {
+    config_lock();
+    int notify = g_cfg.notify;
+    config_unlock();
+    return notify;
 }
 
 static void *worker(void *arg) {
@@ -1527,38 +1568,10 @@ static void *worker(void *arg) {
             LOGI("sync (%s) skipped: setup not finished", reason);
             continue;
         }
-        pthread_mutex_lock(&g_run_lock);
-        g_running = 1;
         sync_result r;
-        run_sync(reason, &r);
-        g_running = 0;
-        g_last_run = time(NULL);
-        set_phase("idle");
-        pthread_mutex_unlock(&g_run_lock);
+        run_and_record(reason, 0, &r);
 
-        cJSON *h = cJSON_CreateObject();
-        g_sync_count++;
-        cJSON_AddNumberToObject(h, "time", (double)g_last_run);
-        cJSON_AddStringToObject(h, "reason", reason);
-        cJSON_AddNumberToObject(h, "uploaded", r.uploaded);
-        cJSON_AddNumberToObject(h, "downloaded", r.downloaded);
-        cJSON_AddNumberToObject(h, "conflicts", r.conflicts);
-        cJSON_AddNumberToObject(h, "skipped", r.skipped);
-        cJSON_AddNumberToObject(h, "failed", r.failed);
-        cJSON_AddNumberToObject(h, "states_uploaded", r.states_up);
-        cJSON_AddNumberToObject(h, "states_downloaded", r.states_down);
-        cJSON_AddNumberToObject(h, "deferred", r.deferred);
-        cJSON_AddNumberToObject(h, "cards_uploaded", r.cards);
-        if (r.error[0]) cJSON_AddStringToObject(h, "error", r.error);
-        state_lock();
-        state_history_add(h);
-        state_save();
-        state_unlock();
-
-        int notify;
-        config_lock();
-        notify = g_cfg.notify;
-        config_unlock();
+        int notify = notify_on();
         if (r.error[0]) {
             LOGE("sync failed: %s", r.error);
             if (notify) plat_notify("RomM Sync: sync failed: %s", r.error);
@@ -1579,6 +1592,39 @@ static void *worker(void *arg) {
 
 void sync_init(void) {
     thread_start(worker, NULL);
+}
+
+static void plural(char *out, size_t n, int count, const char *what) {
+    snprintf(out, n, "%d %s%s", count, what, count == 1 ? "" : "s");
+}
+
+int sync_game(int rom_id, const char *name, sync_game_result *out) {
+    memset(out, 0, sizeof *out);
+    config_lock();
+    int ready = g_cfg.setup_complete;
+    config_unlock();
+    if (!config_is_paired() || !ready) return -1;
+
+    sync_result r;
+    run_and_record("game downloaded", rom_id, &r);
+    out->saves = r.uploaded + r.downloaded;
+    out->states = r.states_up + r.states_down;
+    out->conflicts = r.conflicts;
+    out->failed = r.failed || r.error[0];
+    LOGI("saves for %s: %d saves, %d states, %d conflicts%s", name, out->saves, out->states, out->conflicts,
+         out->failed ? ", some failed" : "");
+    if (!notify_on()) return 0;
+    if (out->failed) {
+        plat_notify("RomM Sync: %s: saves could not sync", name);
+    } else if (out->conflicts) {
+        plat_notify("RomM Sync: %s: save conflict to resolve", name);
+    } else if (out->saves || out->states) {
+        char saves[32] = "", states[32] = "";
+        if (out->saves) plural(saves, sizeof saves, out->saves, "save");
+        if (out->states) plural(states, sizeof states, out->states, "state");
+        plat_notify("RomM Sync: %s: %s%s%s synced", name, saves, out->saves && out->states ? " and " : "", states);
+    }
+    return 0;
 }
 
 void sync_request(const char *reason) {

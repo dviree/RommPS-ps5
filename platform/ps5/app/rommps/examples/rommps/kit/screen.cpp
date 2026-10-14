@@ -346,7 +346,9 @@ class RommPS final : public app::Concept
         const rommps::Game *g = &sheet_game_;
         const rommps::Platform *p = app_.platform_by_id(sheet_game_.platform_id);
         const rommps::Download *d = g ? app_.download_for(g->id) : nullptr;
-        if (d && d->active())
+        if (d && d->syncing())
+            actions.push_back({"Syncing saves", false, 0});
+        else if (d && d->active())
             actions.push_back({"Hold to cancel download", true, 1});
         else if (g && g->installed)
             actions.push_back({"Hold to delete this game", true, 3});
@@ -366,7 +368,7 @@ class RommPS final : public app::Concept
     bool hold_to_cancel(const InputFrame &input, float dt, const rommps::Download *d, app::Feedback &feedback)
     {
         cancel_seen_ = true;
-        if (!d || !d->active() || !input.is_held(Action::confirm))
+        if (!d || !d->cancellable() || !input.is_held(Action::confirm))
         {
             cancel_hold_ = 0;
             cancel_job_ = 0;
@@ -510,7 +512,7 @@ class RommPS final : public app::Concept
         if (count > 0 && download_row_ < static_cast<int>(app_.downloads().size()))
         {
             const rommps::Download &d = app_.downloads()[static_cast<std::size_t>(download_row_)];
-            if (d.active())
+            if (d.cancellable())
                 hold_to_cancel(input, dt, &d, feedback);
             else if (input.is_pressed(Action::confirm))
                 refuse(feedback, 0.0f);
@@ -724,6 +726,10 @@ class RommPS final : public app::Concept
             }
             else if (d.status == "error")
                 meta += d.error;
+            else if (d.syncing())
+                meta += "Syncing saves";
+            else if (d.status == "done" && !d.saves_note().empty())
+                meta += "Downloaded  \xC2\xB7  " + d.saves_note();
             else
             {
                 static const char *const kStates[][2] = {{"queued", "Waiting"},
@@ -913,7 +919,7 @@ class RommPS final : public app::Concept
             // came so far; Square takes the finished ones off the list.
             const auto &downloads = app_.downloads();
             const bool on_active = download_row_ < static_cast<int>(downloads.size()) &&
-                                   downloads[static_cast<std::size_t>(download_row_)].active();
+                                   downloads[static_cast<std::size_t>(download_row_)].cancellable();
             const bool any_finished = std::any_of(downloads.begin(), downloads.end(),
                                                   [](const rommps::Download &d) { return d.finished(); });
             std::vector<ui::Hint> hints{pages};

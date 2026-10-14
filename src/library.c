@@ -22,7 +22,7 @@
 #define MAX_JOBS    50
 
 typedef enum { JOB_ROM, JOB_FIRMWARE } job_type;
-typedef enum { JOB_QUEUED, JOB_RUNNING, JOB_DONE, JOB_ERROR, JOB_CANCELLED } job_status;
+typedef enum { JOB_QUEUED, JOB_RUNNING, JOB_DONE, JOB_ERROR, JOB_CANCELLED, JOB_SYNCING } job_status;
 
 typedef struct job {
     int id;
@@ -37,6 +37,7 @@ typedef struct job {
     int64_t base; /* bytes from files already finished (multi-file games) */
     double speed; /* bytes/s, smoothed */
     char note[80]; /* Running job updates this after a download. */
+    sync_game_result saves; /* what the sync after the download brought */
     double sample_t;
     int64_t sample_bytes;
     struct job *next;
@@ -334,6 +335,18 @@ static void run_rom_job(job *j) {
                 LOGW("could not put %s in %s", j->name, x->rom_dir);
             }
         }
+        /* The game's saves land before it shows as ready, so it isn't
+         * started without them. */
+        pthread_mutex_lock(&g_q_lock);
+        j->status = JOB_SYNCING;
+        pthread_mutex_unlock(&g_q_lock);
+        char name[256];
+        str_copy(name, sizeof name, j->name);
+        sync_game_result saves;
+        sync_game(j->target_id, name, &saves);
+        pthread_mutex_lock(&g_q_lock);
+        j->saves = saves;
+        pthread_mutex_unlock(&g_q_lock);
         job_end(j, JOB_DONE, NULL, NULL);
     } else {
         if (cancelled(j) && !(multi && had)) discard_partial(dest, multi);
@@ -434,7 +447,8 @@ void library_init(void) {
 int library_busy(void) {
     int busy = 0;
     pthread_mutex_lock(&g_q_lock);
-    for (job *j = g_jobs; j && !busy; j = j->next) busy = j->status == JOB_QUEUED || j->status == JOB_RUNNING;
+    for (job *j = g_jobs; j && !busy; j = j->next)
+        busy = j->status == JOB_QUEUED || j->status == JOB_RUNNING || j->status == JOB_SYNCING;
     pthread_mutex_unlock(&g_q_lock);
     return busy;
 }
@@ -464,7 +478,7 @@ static void trim_jobs(void) {
 static int enqueue(job_type type, int id, const char *name, char *err, int en) {
     pthread_mutex_lock(&g_q_lock);
     for (job *p = g_jobs; p; p = p->next) {
-        if (p->type == type && p->target_id == id && (p->status == JOB_QUEUED || p->status == JOB_RUNNING)) {
+        if (p->type == type && p->target_id == id && !finished(p)) {
             pthread_mutex_unlock(&g_q_lock);
             snprintf(err, (size_t)en, "already downloading");
             return -1;
@@ -511,6 +525,8 @@ int library_cancel(int id, char *err, int en) {
         } else if (j->status == JOB_RUNNING) {
             j->cancel = 1; /* the progress callback aborts the transfer */
             rc = 0;
+        } else if (j->status == JOB_SYNCING) {
+            snprintf(err, (size_t)en, "the game is downloaded, its saves are syncing");
         } else {
             snprintf(err, (size_t)en, "download already finished");
         }
@@ -574,7 +590,7 @@ int library_delete_rom(int rom_id, char *err, int en) {
 }
 
 cJSON *library_downloads(void) {
-    static const char *names[] = {"queued", "downloading", "done", "error", "cancelled"};
+    static const char *names[] = {"queued", "downloading", "done", "error", "cancelled", "syncing"};
     cJSON *arr = cJSON_CreateArray();
     pthread_mutex_lock(&g_q_lock);
     for (job *j = g_jobs; j; j = j->next) {
@@ -590,6 +606,12 @@ cJSON *library_downloads(void) {
         cJSON_AddNumberToObject(o, "total", (double)j->total);
         cJSON_AddNumberToObject(o, "speed", j->status == JOB_RUNNING ? j->speed : 0);
         cJSON_AddStringToObject(o, "note", j->status == JOB_RUNNING ? j->note : "");
+        if (j->status == JOB_DONE && j->type == JOB_ROM) {
+            cJSON_AddNumberToObject(o, "saves", j->saves.saves);
+            cJSON_AddNumberToObject(o, "states", j->saves.states);
+            cJSON_AddNumberToObject(o, "save_conflicts", j->saves.conflicts);
+            cJSON_AddBoolToObject(o, "saves_failed", j->saves.failed);
+        }
         cJSON_AddItemToArray(arr, o);
     }
     pthread_mutex_unlock(&g_q_lock);

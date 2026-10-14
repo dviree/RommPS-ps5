@@ -86,15 +86,20 @@ post /api/setup/finish '{"conflict_policy":"ask"}' >/dev/null
 wait_sync 1
 [[ "$(last reason)" == "first sync" && "$(last uploaded)" == 1 ]] || fail "expected the first sync to upload the local save"
 
-echo "2. game download, then its server save"
+echo "2. game download brings its server save along"
+curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/_admin/save" -d '{"rom_id":11,"slot":"autosave","file_name":"Super Metroid (USA).srm","content":"server-save"}' >/dev/null
 post /api/download '{"rom_id":11,"name":"Super Metroid"}' >/dev/null
 [[ "$(curl -sf "$API/api/downloads" | python3 -c "import json,sys; print([d['name'] for d in json.load(sys.stdin) if d.get('rom_id') == 11][-1])")" == "Super Metroid" ]] \
   || fail "a download must show its name from the start"
-sleep 1
+wait_sync 2
 [[ -f "$RA/roms/snes/Super Metroid (USA).sfc" ]] || fail "ROM not downloaded"
-curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/_admin/save" -d '{"rom_id":11,"slot":"autosave","file_name":"Super Metroid (USA).srm","content":"server-save"}' >/dev/null
-post /api/sync >/dev/null; wait_sync 2
+[[ "$(last reason)" == "game downloaded" ]] || fail "a finished download must sync the game's saves"
 [[ "$(cat "$RA/saves/Snes9x/Super Metroid (USA).srm")" == "server-save" ]] || fail "server save not downloaded"
+for _ in $(seq 1 20); do
+  dl=$(curl -sf "$API/api/downloads" | python3 -c "import json,sys; d=[d for d in json.load(sys.stdin) if d.get('rom_id') == 11][-1]; print(d['status'], d.get('saves'))")
+  [[ "$dl" == "done 1" ]] && break; sleep 0.25
+done
+[[ "$dl" == "done 1" ]] || fail "the download must end done, with the save it synced: $dl"
 
 ci=$(curl -sf "$API/api/roms?platform_id=1" | python3 -c "import json,sys; print(sorted(json.load(sys.stdin)['char_index'].items()))")
 [[ "$ci" == "[('c', 0), ('e', 1), ('m', 2), ('s', 3)]" ]] || fail "library char_index for the A-Z ribbon: $ci"

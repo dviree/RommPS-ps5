@@ -136,11 +136,18 @@ struct Download
     int id = 0, rom_id = 0;
     std::string name, platform, status, error;
     double done = 0, total = 0, speed = 0;
+    // What the sync after the download brought.
+    int saves = 0, states = 0, save_conflicts = 0;
+    bool saves_failed = false;
     float progress() const { return total > 0 ? static_cast<float>(done / total) : 0.0f; }
-    // The payload's states: queued, downloading, cancelling, then done, error or cancelled.
+    // The payload's states: queued, downloading, cancelling, syncing (the
+    // game's saves, once it's downloaded), then done, error or cancelled.
     bool running() const { return status == "downloading"; }
-    bool active() const { return status == "queued" || running() || status == "cancelling"; }
+    bool syncing() const { return status == "syncing"; }
+    bool active() const { return status == "queued" || running() || status == "cancelling" || syncing(); }
+    bool cancellable() const { return active() && !syncing(); }
     bool finished() const { return !active(); }
+    std::string saves_note() const;
 };
 
 struct Status
