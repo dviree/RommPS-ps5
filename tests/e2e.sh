@@ -96,10 +96,26 @@ curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/_admin/save" -d '{"rom_id":11,"slo
 post /api/sync >/dev/null; wait_sync 2
 [[ "$(cat "$RA/saves/Snes9x/Super Metroid (USA).srm")" == "server-save" ]] || fail "server save not downloaded"
 
+echo "2b. folder roms: one iso per folder, and a cue+bin set"
+post /api/download '{"rom_id":22,"name":"Downhill Domination"}' >/dev/null
+post /api/download '{"rom_id":25,"name":"War of the Monsters"}' >/dev/null
+dl_wait() { # wait for a downloaded path to exist
+  for _ in $(seq 1 30); do [[ -e "$1" ]] && return 0; sleep 0.5; done; fail "not downloaded: $1"
+}
+D="$RA/roms/ps2/Downhill Domination (USA)"
+W="$RA/roms/ps2/War of the Monsters (USA)"
+dl_wait "$D/Downhill Domination (USA).iso"; dl_wait "$W/War of the Monsters (USA).cue"
+[[ -d "$D" && -d "$W" ]] || fail "a folder rom must land in a folder named after its fs_name"
+[[ "$(cat "$D/Downhill Domination (USA).iso")" == "ROM:Downhill Domination (USA).iso" ]] || fail "iso content wrong"
+[[ -f "$W/War of the Monsters (USA).bin" ]] || fail "cue's bin not downloaded"
+[[ "$(cat "$W/War of the Monsters (USA).bin")" == "ROM:War of the Monsters (USA).bin" ]] || fail "bin content wrong"
+[[ ! -f "$RA/roms/ps2/Downhill Domination (USA)" ]] || fail "folder rom written as a single extensionless file"
+
 ci=$(curl -sf "$API/api/roms?platform_id=1" | python3 -c "import json,sys; print(sorted(json.load(sys.stdin)['char_index'].items()))")
 [[ "$ci" == "[('c', 0), ('e', 1), ('m', 2), ('s', 3)]" ]] || fail "library char_index for the A-Z ribbon: $ci"
-inst=$(curl -sf "$API/api/installed" | python3 -c "import json,sys; print([(g['id'], g['name'], g['platform_id'] > 0) for g in json.load(sys.stdin)])")
-[[ "$inst" == "[(11, 'Super Metroid', True), (10, 'Chrono Trigger', True)]" ]] || fail "the games on this console, for the app: $inst"
+inst=$(curl -sf "$API/api/installed" | python3 -c "import json,sys; print(sorted([(g['id'], g['name'], g['platform_id'] > 0) for g in json.load(sys.stdin)]))")
+[[ "$inst" == "[(10, 'Chrono Trigger', True), (11, 'Super Metroid', True), (22, 'Downhill Domination', True), (25, 'War of the Monsters', True)]" ]] \
+  || fail "the games on this console, for the app: $inst"
 all=$(curl -sf "$API/api/roms?platform_id=0&search=metroid" | python3 -c "import json,sys; print([(g['name'], g['platform_id']) for g in json.load(sys.stdin)['items']])")
 [[ "$all" == "[('Super Metroid', 1)]" ]] || fail "a search across every platform: $all"
 

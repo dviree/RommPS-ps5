@@ -253,8 +253,12 @@ static void run_rom_job(job *j) {
 
     const char *fs_name = jget_str(rom, "fs_name", "");
     const cJSON *files = cJSON_GetObjectItemCaseSensitive(rom, "files");
-    int multi = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(rom, "has_multiple_files")) &&
-                cJSON_GetArraySize(files) > 1;
+    /* fs_name is one of files[] only for a plain single-file rom; otherwise
+     * it's the folder's name (no extension) and the rom is fetched per file. */
+    int multi = cJSON_GetArraySize(files) > 0;
+    const cJSON *f;
+    cJSON_ArrayForEach(f, files)
+        if (strcmp(jget_str(f, "file_name", ""), fs_name) == 0) { multi = 0; break; }
     if (library_not_game(fs_name)) {
         job_end(j, JOB_ERROR, "%s isn't a game", fs_name);
         free(maps);
