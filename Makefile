@@ -19,7 +19,7 @@
 CHDR_SRCS := $(filter-out %microflac.cpp,$(wildcard third_party/libchdr/src/*.c)) \
         third_party/libchdr/deps/lzma/src/LzmaDec.c third_party/libchdr/deps/zstd/zstddeclib.c
 SRCS := src/main.c src/util.c src/http.c src/romm.c src/config.c src/state.c \
-        src/profiles.c src/sync.c src/watch.c src/detect.c src/autostart.c src/memcard.c src/zip.c src/bundle.c src/statefmt.c src/events.c src/gameid.c src/covers.c src/library.c src/pair.c src/web.c src/update.c \
+        src/profiles.c src/sync.c src/watch.c src/detect.c src/autostart.c src/memcard.c src/zip.c src/bundle.c src/gcmem.c src/statefmt.c src/events.c src/gameid.c src/covers.c src/library.c src/pair.c src/web.c src/update.c \
         third_party/cJSON.c third_party/md5.c third_party/monocypher.c third_party/monocypher-ed25519.c \
         $(CHDR_SRCS)
 HDRS := $(wildcard src/*.h) third_party/cJSON.h third_party/md5.h third_party/monocypher.h third_party/monocypher-ed25519.h
@@ -37,7 +37,7 @@ COMMON_CFLAGS += -DAPP_BUILD='"$(BUILD_ID)"'
 endif
 COMMON_CFLAGS += $(EXTRA_CFLAGS)
 
-.PHONY: all host ps5 ps4 tools deploy install install-ps4 run clean
+.PHONY: unit all host ps5 ps4 tools deploy install install-ps4 run clean
 
 all: host
 
@@ -60,6 +60,14 @@ host: $(HOST_BIN)
 $(HOST_BIN): $(SRCS) platform/host/platform.c $(HDRS) $(UI_HEADER)
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(COMMON_CFLAGS) -DROMM_UPDATE_TEST_KEY -o $@ $(SRCS) platform/host/platform.c -lcurl -lz -lpthread
+
+# Unit tests for the parts with file formats of their own.
+unit: build/host/gcmem_test
+	build/host/gcmem_test
+
+build/host/gcmem_test: tests/gcmem_test.c src/gcmem.c src/gcmem.h
+	@mkdir -p $(dir $@)
+	$(HOST_CC) -std=gnu11 -g -Wall -Wextra -fsanitize=address,undefined -Isrc -o $@ tests/gcmem_test.c src/gcmem.c
 
 tools: build/host/release-sign
 

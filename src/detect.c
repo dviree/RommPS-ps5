@@ -457,6 +457,8 @@ int detect_refresh_profiles(cJSON *profiles) {
             /* The user's choice of emulator per system survives a refresh. */
             const cJSON *ex = cJSON_GetObjectItemCaseSensitive(p, "exclude");
             if (ex) cJSON_AddItemToObject(fresh, "exclude", cJSON_Duplicate(ex, 1));
+            const cJSON *extra = cJSON_GetObjectItemCaseSensitive(p, "extra");
+            if (extra) cJSON_AddItemToObject(fresh, "extra", cJSON_Duplicate(extra, 1));
             const cJSON *mode = cJSON_GetObjectItemCaseSensitive(p, "sync");
             if (cJSON_IsString(mode)) cJSON_AddStringToObject(fresh, "sync", mode->valuestring);
             LOGI("updated the %s profile for %s", jget_str(fresh, "name", ""), jget_str(p, "root", ""));

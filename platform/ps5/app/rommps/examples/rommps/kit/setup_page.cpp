@@ -157,6 +157,8 @@ SetupPage::SetupPage()
 void SetupPage::edit_emulators()
 {
     editing_ = true;
+    leaving_ = false;
+    saved_.clear();
     go(kEmulators);
 }
 
@@ -404,6 +406,7 @@ void SetupPage::load_emulators(App &app)
             const cJSON *profiles = cJSON_GetObjectItemCaseSensitive(cfg.get(), "profiles"), *p;
             if (!cJSON_IsArray(profiles))
                 return;
+            ps2_cards_ = std::string(str(cfg.get(), "ps2_cards")) == "backup" ? "backup" : "per_game";
             choices_.clear();
             also_.clear();
             custom_dirs_.clear();
@@ -467,6 +470,7 @@ void SetupPage::load_emulators(App &app)
                         custom_dirs_[key->valuestring][e.root] = picked;
                 }
             }
+            saved_ = save_body() + ps2_cards_;
         });
     });
 }
@@ -724,7 +728,7 @@ std::vector<Row> SetupPage::emulator_rows(const App &app, std::vector<RowRef> *r
              "RetroArch's usual folders. You can change them later."},
             {});
     else
-        add({RowKind::header, "Emulators on this console"}, {});
+        add({RowKind::header, "Emulators"}, {});
     for (std::size_t i = 0; i < emulators_.size(); ++i)
     {
         const Emulator &e = emulators_[i];
@@ -759,19 +763,22 @@ std::vector<Row> SetupPage::emulator_rows(const App &app, std::vector<RowRef> *r
             add({RowKind::choice, "   Save sync", e.sync == "off" ? "Off" : e.sync == "saves" ? "Saves" : "Saves and states", ""},
                 {RowRef::kEmuSync, static_cast<int>(i)});
     }
-    // Then each system they play: which one plays it, and its folders.
-    for (const Conflict &c : systems())
+    // Then each system they play, by name: which emulator plays it, the
+    // others that also do, and its folders.
+    const std::vector<Conflict> all_systems = systems();
+    if (!all_systems.empty())
+        add({RowKind::header, "Systems"}, {});
+    for (const Conflict &c : all_systems)
     {
-        add({RowKind::header, system_name(c.key)}, {});
         const std::string main = chosen(c);
         std::string label;
         for (const Option &o : c.options)
             if (o.root == main)
                 label = o.label;
         if (c.options.size() > 1)
-            add({RowKind::choice, "Emulator", label, "Games download here first"}, {RowRef::kMain, -1, c.key});
+            add({RowKind::choice, system_name(c.key), label, ""}, {RowRef::kMain, -1, c.key});
         else
-            add({RowKind::info, "Emulator", label, ""}, {});
+            add({RowKind::info, system_name(c.key), label, ""}, {});
         std::vector<const Option *> on = {};
         for (const Option &o : c.options)
             if (o.root == main)
@@ -783,7 +790,7 @@ std::vector<Row> SetupPage::emulator_rows(const App &app, std::vector<RowRef> *r
                 continue;
             const auto set = also_.find(c.key);
             const bool also = set != also_.end() && set->second.count(o.root);
-            add({RowKind::toggle, "Also in " + o.label, "", "Gets the same games too", also},
+            add({RowKind::toggle, "   Also in " + o.label, "", "", also},
                 {RowRef::kAlso, -1, c.key, o.root});
             if (also)
                 on.push_back(&o);
@@ -797,7 +804,7 @@ std::vector<Row> SetupPage::emulator_rows(const App &app, std::vector<RowRef> *r
                     em = &e;
             if (!em)
                 continue;
-            const std::string who = on.size() > 1 ? "Folders in " + em->name : std::string("Folders");
+            const std::string who = on.size() > 1 ? "   Folders in " + em->name : std::string("   Folders");
             if (em->fixed.size() >= 3)
             {
                 add({RowKind::info, who, "Set by the emulator", ""}, {});
@@ -806,12 +813,12 @@ std::vector<Row> SetupPage::emulator_rows(const App &app, std::vector<RowRef> *r
             const auto found = em->dirs.find(c.key);
             const auto sys = custom_dirs_.find(c.key);
             const bool custom = sys != custom_dirs_.end() && sys->second.count(o->root);
-            std::string detail = found != em->dirs.end() && !found->second[0].empty() ? "Games in " + found->second[0] : "";
-            add({RowKind::choice, who, custom ? "My own" : "As found", custom ? "Pick each folder below" : detail},
+            std::string detail = found != em->dirs.end() && !found->second[0].empty() ? "    Games in " + found->second[0] : "";
+            add({RowKind::choice, who, custom ? "My own" : "As found", custom ? "    Pick each folder below" : detail},
                 {RowRef::kFolders, -1, c.key, o->root});
             if (!custom)
                 continue;
-            static const char *const kLabels[] = {"   Games folder", "   Saves folder", "   States folder"};
+            static const char *const kLabels[] = {"      Games folder", "      Saves folder", "      States folder"};
             static const char *const kKeys[] = {"rom_dir", "save_dir", "state_dir"};
             for (int k = 0; k < (saves ? 3 : 1); ++k)
             {
@@ -858,14 +865,49 @@ void SetupPage::update_emulators(App &app, const hui::InputFrame &input, float d
 {
     if (!emulators_loaded_ && !busy_)
         load_emulators(app);
+    if (leaving_)
+    {
+        const std::vector<Row> choices = leave_rows();
+        const RowEvent pick = leave_list_.handle(choices, input, feedback);
+        leave_list_.update(dt, static_cast<int>(choices.size()), 3 * RowList::kRowHeight);
+        if (input.is_pressed(Action::back) || pick.row == 2)
+        {
+            feedback.play(Cue::back);
+            leaving_ = false; // keep editing
+        }
+        else if (pick.row == 0)
+        {
+            leaving_ = false;
+            save_emulators(app, feedback); // back to Settings once saved
+        }
+        else if (pick.row == 1)
+        {
+            feedback.play(Cue::back);
+            leaving_ = false;
+            editing_ = false; // discarded
+        }
+        return;
+    }
     std::vector<RowRef> refs;
     const std::vector<Row> rows = emulator_rows(app, &refs);
     const RowEvent e = rows_.handle(rows, input, feedback);
     rows_.update(dt, static_cast<int>(rows.size()), kRows.h);
-    if (editing_ && input.is_pressed(Action::back))
+    if (editing_ && input.is_pressed(Action::back) && !busy_)
     {
+        if (dirty())
+        {
+            feedback.play(Cue::modal_open);
+            leaving_ = true;
+            leave_list_.set_focus(0);
+            return;
+        }
         feedback.play(Cue::back);
         editing_ = false; // back to Settings, nothing changed
+        return;
+    }
+    if (editing_ && input.is_pressed(Action::north) && dirty())
+    {
+        save_emulators(app, feedback);
         return;
     }
     if (e.row < 0 || !emulators_loaded_ || e.row >= static_cast<int>(refs.size()))
@@ -939,23 +981,20 @@ void SetupPage::update_emulators(App &app, const hui::InputFrame &input, float d
         open_picker(app, ref.key, ref.emulator, ref.root);
         return;
     case RowRef::kContinue:
-        break;
+        save_emulators(app, feedback);
+        return;
     default:
         return;
     }
-    // Everything set up by its folders: the systems no emulator plays, and the
-    // systems of emulators with no preset.
+}
+
+// What Save sends: the profiles for the emulators kept (the PS2 cards go
+// apart). Also what tells a change from what was saved.
+std::string SetupPage::save_body() const
+{
+    const std::vector<Conflict> list = conflicts();
     std::vector<std::string> by_folders = uncovered();
     by_folders.insert(by_folders.end(), manual_.begin(), manual_.end());
-    // Each one turned on needs its games folder.
-    for (const std::string &key : by_folders)
-        if (own_[key].on && own_[key].folder[0].empty())
-        {
-            app.say("Choose a games folder for " + own_[key].name + ", or turn it off");
-            rows_.refuse(feedback);
-            return;
-        }
-    // Continue: the profiles for the emulators kept, then the PS2 cards.
     Json body(cJSON_CreateObject(), cJSON_Delete);
     cJSON *roots = cJSON_AddArrayToObject(body.get(), "roots");
     for (const Emulator &em : emulators_)
@@ -1006,7 +1045,7 @@ void SetupPage::update_emulators(App &app, const hui::InputFrame &input, float d
     cJSON *custom = cJSON_AddArrayToObject(body.get(), "custom");
     for (const std::string &key : by_folders)
     {
-        const Own &o = own_[key];
+        const Own &o = own_.at(key);
         if (!o.on)
             continue;
         cJSON *c = cJSON_CreateObject(), *slugs = cJSON_AddArrayToObject(c, "slugs");
@@ -1020,10 +1059,41 @@ void SetupPage::update_emulators(App &app, const hui::InputFrame &input, float d
             cJSON_AddStringToObject(c, "id", o.id.c_str());
         cJSON_AddItemToArray(custom, c);
     }
+    return print(body.get());
+}
+
+std::vector<Row> SetupPage::leave_rows() const
+{
+    return {{RowKind::action, "Save changes", "", ""},
+            {RowKind::action, "Discard changes", "", ""},
+            {RowKind::action, "Keep editing", "", ""}};
+}
+
+bool SetupPage::dirty() const
+{
+    return editing_ && emulators_loaded_ && !saved_.empty() && save_body() + ps2_cards_ != saved_;
+}
+
+void SetupPage::save_emulators(App &app, hui::ui::Feedback &feedback)
+{
+    if (busy_)
+        return;
+    // Everything set up by its folders: the systems no emulator plays, and the
+    // systems of emulators with no preset.
+    std::vector<std::string> by_folders = uncovered();
+    by_folders.insert(by_folders.end(), manual_.begin(), manual_.end());
+    // Each one turned on needs its games folder.
+    for (const std::string &key : by_folders)
+        if (own_[key].on && own_[key].folder[0].empty())
+        {
+            app.say("Choose a games folder for " + own_[key].name + ", or turn it off");
+            rows_.refuse(feedback);
+            return;
+        }
     busy_ = true;
     const std::string ps2 = "{\"ps2_cards\":\"" + (has_ps2() ? ps2_cards_ : std::string("per_game")) + "\"}";
     App *a = &app;
-    app.post("/api/setup/emulators", print(body.get()), [this, a, ps2](const Response &r) {
+    app.post("/api/setup/emulators", save_body(), [this, a, ps2](const Response &r) {
         if (!r.ok())
         {
             busy_ = false;
@@ -1033,6 +1103,7 @@ void SetupPage::update_emulators(App &app, const hui::InputFrame &input, float d
         a->post("/api/config", ps2, [this, a](const Response &) {
             if (editing_)
             {
+                saved_.clear();
                 editing_ = false;
                 busy_ = false;
                 a->say("Emulators saved");
@@ -1274,6 +1345,10 @@ std::vector<hui::ui::Hint> SetupPage::hints() const
     case kEmulators:
         if (picking_)
             return {{Button::cross, "Choose"}, {Button::circle, "Back"}};
+        if (leaving_)
+            return {{Button::cross, "Choose"}, {Button::circle, "Keep editing"}};
+        if (editing_ && dirty())
+            return {{Button::triangle, "Save"}, {Button::cross, "Choose"}, {Button::circle, "Back"}};
         if (editing_)
             return {{Button::cross, "Choose"}, {Button::circle, "Back"}};
         return {{Button::cross, "Choose"}};
@@ -1415,10 +1490,17 @@ void SetupPage::draw(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, cons
     if (step_ == kEmulators)
     {
         draw_heading(list, fonts, look, editing_ ? "Emulators" : "Your emulators",
-                     "Pick the emulators to use.");
-        rows = emulator_rows(app);
-        // Beside the list: the focused emulator's systems.
-        const int focus = rows_.focus() - lead();
+                     dirty() ? "Unsaved changes. Press Triangle to save them." : "Pick the emulators to use.");
+        std::vector<RowRef> refs;
+        rows = emulator_rows(app, &refs);
+        // Beside the list: the systems of the emulator focused (or of the one
+        // whose save sync is).
+        const int at = rows_.focus();
+        const int focus = at >= 0 && at < static_cast<int>(refs.size()) &&
+                                  (refs[static_cast<std::size_t>(at)].kind == RowRef::kEmulator ||
+                                   refs[static_cast<std::size_t>(at)].kind == RowRef::kEmuSync)
+                              ? refs[static_cast<std::size_t>(at)].emulator
+                              : -1;
         if (emulators_loaded_ && focus >= 0 && focus < static_cast<int>(emulators_.size()))
         {
             const Emulator &e = emulators_[static_cast<std::size_t>(focus)];
@@ -1444,7 +1526,7 @@ void SetupPage::draw(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, cons
                 y += 34;
             }
             if (e.systems.empty())
-                ui::text(list, fonts.regular, "None that RomM Sync knows of", kSide.x + 36, y, 22, look.panel_muted);
+                ui::text(list, fonts.regular, "None RommPS knows of", kSide.x + 36, y, 22, look.panel_muted);
             list.pop_opacity();
         }
     }
@@ -1490,6 +1572,19 @@ void SetupPage::draw(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, cons
     list.push_opacity(in);
     rows_.draw(list, fonts, look, rows, {kRows.x, kRows.y + 24 * (1.0f - in), kRows.w, kRows.h}, clock);
     list.pop_opacity();
+    if (step_ == kEmulators && leaving_)
+    {
+        // Over everything: save before going back?
+        list.rounded_rect({0, 0, 1920, 1080}, 0, hui::gfx::Color::rgb(0x000000, 0.55f));
+        const Rect box{560, 330, 800, 470};
+        hui::gfx::Color solid = look.page; // the page's colour under the panel, so nothing shows through
+        solid.a = 1.0f;
+        list.rounded_rect(box, look.radius, solid);
+        draw_panel(list, look, box);
+        ui::text(list, fonts.display, "Save your changes?", box.x + 48, box.y + 84, 40, look.panel_text);
+        leave_list_.draw(list, fonts, look, leave_rows(), {box.x + 16, box.y + 130, box.w - 32, 3 * RowList::kRowHeight},
+                         clock);
+    }
 }
 
 } // namespace rommps

@@ -707,6 +707,10 @@ again:;
         if (comma) *comma = 0;
         const profile_map *m = profile_find_for_platform(maps, n, first, NULL);
         if (!m || m == x || m->extra || !strcmp(m->rom_dir, x->rom_dir)) continue;
+        /* A folder several of the main emulator's systems share (Porpoise's
+         * games: GameCube and Wii): only the games matched for this system. */
+        int shared = 0;
+        for (int k = 0; k < n; k++) shared |= &maps[k] != m && !strcmp(maps[k].rom_dir, m->rom_dir);
         DIR *d = opendir(m->rom_dir);
         struct dirent *de;
         int here = 0;
@@ -716,6 +720,13 @@ again:;
                 continue;
             char from[PATH_MAX_LEN], to[PATH_MAX_LEN];
             path_join(from, sizeof from, m->rom_dir, de->d_name);
+            if (shared) {
+                state_lock();
+                const cJSON *rec = cJSON_GetObjectItemCaseSensitive(state_section("roms"), from);
+                const int ours = rec && jget_num(rec, "rom_id", 0) > 0 && !strcmp(jget_str(rec, "platform_dir", ""), m->platform_dir);
+                state_unlock();
+                if (!ours) continue;
+            }
             path_join(to, sizeof to, x->rom_dir, de->d_name);
             if (file_exists(to) || dir_exists(to) || (dir_exists(from) && still_downloading(from))) continue;
             mkdir_p(x->rom_dir);

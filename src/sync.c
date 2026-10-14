@@ -11,6 +11,7 @@
 
 #include "config.h"
 #include "bundle.h"
+#include "gcmem.h"
 #include "gameid.h"
 #include "http.h"
 #include "memcard.h"
@@ -53,6 +54,11 @@ typedef struct {
     int is_bundle;          /* several files synced as one zip, see bundle.h */
     char game_id[16];
     char upload_name[256];
+    /* GameCube saves in a GCI folder keep the form RomM has them in (gc_form):
+     * "zip" (the folder's files for the game), "gci" (one of them, gc_file)
+     * or "card" (a whole memory card with them on it). */
+    char gc_form[8];
+    char gc_file[PATH_MAX_LEN];
 } local_file;
 
 typedef struct {
@@ -272,6 +278,14 @@ static cJSON *resolve_rom_on_server(const scan_ctx *c, const profile_map *m, con
     return match.by_stem;
 }
 
+/* Whether a comma separated list has item. */
+static int list_has(const char *list, const char *item) {
+    size_t n = strlen(item);
+    for (const char *p = list; n && (p = strstr(p, item)); p += n)
+        if ((p == list || p[-1] == ',') && (p[n] == ',' || !p[n])) return 1;
+    return 0;
+}
+
 static void record_local_rom(const char *path, int rom_id, const profile_map *m, const cJSON *srv,
                              const char *md5, const local_rom *r) {
     const char *name = jget_str(srv, "name", ""), *fs_name = jget_str(srv, "fs_name", "");
@@ -292,6 +306,7 @@ static void record_local_rom(const char *path, int rom_id, const profile_map *m,
     else
         cJSON_AddItemToObject(e, "stems", stems);
     cJSON_DeleteItemFromObjectCaseSensitive(e, "miss_at");
+    cJSON_DeleteItemFromObjectCaseSensitive(e, "miss_dirs");
 }
 
 /* Renames files in dir (and its folders one level down, RetroArch's per-core
@@ -419,6 +434,17 @@ static void scan_rom_dir(scan_ctx *c, const profile_map *m) {
         cJSON *e = state_entry("roms", path);
         int rom_id = e ? (int)jget_num(e, "rom_id", 0) : 0;
         time_t miss_at = e ? (time_t)jget_num(e, "miss_at", 0) : 0;
+        /* A folder that holds several of the emulator's systems (Porpoise:
+         * GameCube and Wii): a game is the system's it matched for, and a
+         * miss for one system doesn't stop the others asking. */
+        const char *was_dir = e ? jget_str(e, "platform_dir", "") : "";
+        const int other_system = e && rom_id && was_dir[0] && !strcmp(jget_str(e, "profile", ""), m->profile_id) &&
+                                 strcmp(was_dir, m->platform_dir) != 0;
+        if (miss_at && !list_has(jget_str(e, "miss_dirs", ""), m->platform_dir)) miss_at = 0;
+        if (other_system) {
+            state_unlock();
+            continue;
+        }
         if (e) {
             const cJSON *s;
             cJSON_ArrayForEach(s, cJSON_GetObjectItemCaseSensitive(e, "stems"))
@@ -439,8 +465,13 @@ static void scan_rom_dir(scan_ctx *c, const profile_map *m) {
                 LOGI("matched %s -> RomM rom %d", path, rom_id);
             } else {
                 cJSON *ne = state_entry_ensure("roms", path);
+                char dirs[256];
+                const char *had = jget_str(ne, "miss_dirs", "");
+                if (list_has(had, m->platform_dir)) str_copy(dirs, sizeof dirs, had);
+                else snprintf(dirs, sizeof dirs, "%s%s%s", had, had[0] ? "," : "", m->platform_dir);
                 jset_num(ne, "rom_id", 0);
                 jset_num(ne, "miss_at", (double)now);
+                jset_str(ne, "miss_dirs", dirs);
                 jset_str(ne, "profile", m->profile_id);
             }
             state_unlock();
@@ -941,6 +972,202 @@ static int rom_game_id(const local_rom *r, char *out, size_t n) {
     return 0;
 }
 
+/* ---- GameCube: the form RomM keeps a game's saves in ----
+ * RomM is the authority: a game's saves go up in the form they're there in.
+ *   zip   the game's .gci files zipped (this app's own form, and the default)
+ *   gci   a single .gci, as other apps send it
+ *   card  a whole memory card (.raw), as Dolphin keeps one: this console's
+ *         saves for the game are put on a copy of RomM's card (kept in
+ *         gccards/<rom id>.raw), so the card's other saves stay as they are. */
+
+static const char *gc_form_of_name(const char *file_name) {
+    if (str_ends_with_ci(file_name, ".gci")) return "gci";
+    if (ext_in_list(file_name, ".raw,.gcp,.mcp")) return "card";
+    return "zip";
+}
+
+static void gc_card_cache(int rom_id, char *out, size_t n) {
+    char dir[PATH_MAX_LEN];
+    path_join(dir, sizeof dir, plat_data_dir(), "gccards");
+    snprintf(out, n, "%s/%d.raw", dir, rom_id);
+}
+
+static void gc_form_get(const local_rom *r, char *form, size_t n, char *name, size_t nn) {
+    state_lock();
+    cJSON *e = state_entry("roms", r->path);
+    str_copy(form, n, e ? jget_str(e, "gc_form", "zip") : "zip");
+    if (name) str_copy(name, nn, e ? jget_str(e, "gc_name", "") : "");
+    state_unlock();
+}
+
+static void gc_form_set(const local_rom *r, const char *form, const char *name) {
+    state_lock();
+    cJSON *e = state_entry("roms", r->path);
+    if (e) {
+        jset_str(e, "gc_form", form);
+        if (name && name[0]) jset_str(e, "gc_name", name);
+    }
+    state_unlock();
+}
+
+/* Fetches a save's content without telling RomM this console has it. */
+static int gc_fetch(int save_id, const char *dest) {
+    char api[64];
+    snprintf(api, sizeof api, "/api/saves/%d/content", save_id);
+    http_resp resp;
+    mkdir_parent(dest);
+    if (romm_download(api, dest, NULL, NULL, &resp) != 0) {
+        LOGW("save %d: %s", save_id, resp.error);
+        unlink(dest);
+        return -1;
+    }
+    return 0;
+}
+
+static int gc_is_card_file(const char *path) {
+    size_t len = 0;
+    char *data = read_file(path, &len);
+    gc_card card;
+    int ok = data && gc_card_open(&card, (const unsigned char *)data, len) == 0;
+    if (ok) gc_card_free(&card);
+    free(data);
+    return ok;
+}
+
+/* Which form RomM has the game's saves in: its newest one in this console's
+ * slot, or else its newest one anywhere. For a card, a copy of it is kept
+ * here so this console's saves can be put on it. */
+static void gc_learn_form(const scan_ctx *c, const local_rom *r) {
+    char api[64];
+    snprintf(api, sizeof api, "/api/saves?rom_id=%d", r->rom_id);
+    long st = 0;
+    cJSON *all = romm_call("GET", api, NULL, &st);
+    const cJSON *s, *mine = NULL, *any = NULL;
+    cJSON_ArrayForEach(s, (st == 200 ? all : NULL)) {
+        if ((int)jget_num(s, "rom_id", 0) != r->rom_id) continue;
+        const char *up = jget_str(s, "updated_at", "");
+        if (!any || strcmp(up, jget_str(any, "updated_at", "")) > 0) any = s;
+        if (!strcmp(jget_str(s, "slot", ""), c->slot) && (!mine || strcmp(up, jget_str(mine, "updated_at", "")) > 0))
+            mine = s;
+    }
+    const cJSON *pick = mine ? mine : any;
+    if (!pick && st == 200) { /* nothing on RomM: this app's own form, no card kept */
+        char cache[PATH_MAX_LEN];
+        gc_card_cache(r->rom_id, cache, sizeof cache);
+        unlink(cache);
+        gc_form_set(r, "zip", NULL);
+    }
+    if (pick) {
+        /* RomM stamps the names it keeps: "MemoryCardA.USA [2026-10-14_16-39-01].raw". */
+        char name[256];
+        str_copy(name, sizeof name, jget_str(pick, "file_name", ""));
+        char *open = strrchr(name, '['), *close = open ? strchr(open, ']') : NULL;
+        if (open && close && open > name && open[-1] == ' ') memmove(open - 1, close + 1, strlen(close + 1) + 1);
+        const char *form = gc_form_of_name(name);
+        char was[8];
+        gc_form_get(r, was, sizeof was, NULL, 0);
+        if (strcmp(was, form) != 0) LOGI("%s: RomM keeps its saves as %s (%s)", path_basename(r->path), form, name);
+        gc_form_set(r, form, name);
+        char cache[PATH_MAX_LEN];
+        gc_card_cache(r->rom_id, cache, sizeof cache);
+        if (!strcmp(form, "card") && !file_exists(cache) && gc_fetch((int)jget_num(pick, "id", 0), cache) == 0 &&
+            !gc_is_card_file(cache)) {
+            LOGW("%s: RomM's save %s isn't a GameCube memory card", path_basename(r->path), name);
+            unlink(cache);
+        }
+    }
+    cJSON_Delete(all);
+}
+
+/* .gci files taken off a card. */
+typedef struct {
+    unsigned char *g[32];
+    size_t n[32];
+    int count;
+} gc_list;
+
+static void gc_keep(const unsigned char *g, size_t n, void *ud) {
+    gc_list *l = ud;
+    if (l->count >= 32 || !(l->g[l->count] = malloc(n))) return;
+    memcpy(l->g[l->count], g, n);
+    l->n[l->count++] = n;
+}
+
+static void gc_list_free(gc_list *l) {
+    for (int k = 0; k < l->count; k++) free(l->g[k]);
+    l->count = 0;
+}
+
+/* RomM's card with this console's saves for the game on it, in place of the
+ * card's own. Unchanged saves leave the card exactly as RomM has it. */
+static int gc_virtual_card(int rom_id, const bundle *b, unsigned char **out, size_t *out_n) {
+    char cache[PATH_MAX_LEN];
+    gc_card_cache(rom_id, cache, sizeof cache);
+    size_t len = 0;
+    char *raw = read_file(cache, &len);
+    gc_card card;
+    if (!raw || gc_card_open(&card, (const unsigned char *)raw, len) != 0) {
+        free(raw);
+        return -1;
+    }
+    free(raw);
+    /* Same saves, same bytes (where each sits on the card aside)? */
+    gc_list on_card = {0};
+    gc_card_saves(&card, b->game_id, gc_keep, &on_card);
+    int same = on_card.count == b->n;
+    for (int i = 0; same && i < b->n; i++) {
+        size_t gl = 0;
+        char *g = read_file(b->files[i].path, &gl);
+        int match = 0;
+        for (int k = 0; g && k < on_card.count && !match; k++)
+            match = on_card.n[k] == gl && !memcmp(on_card.g[k], g, 0x36) &&
+                    !memcmp(on_card.g[k] + 0x38, g + 0x38, gl - 0x38);
+        same = match;
+        free(g);
+    }
+    gc_list_free(&on_card);
+    int rc = 0;
+    if (!same) {
+        gc_card_remove(&card, b->game_id);
+        for (int i = 0; i < b->n && rc == 0; i++) {
+            size_t gl = 0;
+            char *g = read_file(b->files[i].path, &gl);
+            if (!g || gc_card_put(&card, (const unsigned char *)g, gl) != 0) {
+                LOGW("%s doesn't fit on RomM's memory card", b->files[i].name);
+                rc = -1;
+            }
+            free(g);
+        }
+    }
+    if (rc == 0) {
+        *out = card.data;
+        *out_n = card.size;
+        card.data = NULL;
+    }
+    gc_card_free(&card);
+    return rc;
+}
+
+/* The one .gci that goes up when RomM keeps a single one: the same save as
+ * RomM's, or the newest. */
+static int gc_pick_gci(const bundle *b, const char *server_name, char *out, size_t n) {
+    time_t best = 0;
+    out[0] = 0;
+    for (int i = 0; i < b->n; i++)
+        if (server_name && !strcmp(b->files[i].name, server_name)) {
+            str_copy(out, n, b->files[i].path);
+            return 0;
+        }
+    for (int i = 0; i < b->n; i++) {
+        time_t t = file_mtime(b->files[i].path);
+        if (!out[0] || t > best) {
+            best = t;
+            str_copy(out, n, b->files[i].path);
+        }
+    }
+    return out[0] ? 0 : -1;
+}
+
 static void fill_bundle_file(local_file *f, const scan_ctx *c, const local_rom *r, const bundle *b) {
     memset(f, 0, sizeof *f);
     snprintf(f->path, sizeof f->path, "%s#%s", b->dir, b->game_id);
@@ -960,6 +1187,26 @@ static void fill_bundle_file(local_file *f, const scan_ctx *c, const local_rom *
         path_stem(stem, sizeof stem, r->path);
         snprintf(f->upload_name, sizeof f->upload_name, "%s.zip", stem);
     }
+    if (strcmp(r->map->save_layout, "gci") != 0) return;
+    /* In the form RomM has it: the hash RomM would give what we'd send. */
+    char form[8], name[256];
+    gc_form_get(r, form, sizeof form, name, sizeof name);
+    if (!strcmp(form, "gci") && gc_pick_gci(b, name, f->gc_file, sizeof f->gc_file) == 0) {
+        str_copy(f->gc_form, sizeof f->gc_form, "gci");
+        md5_file_hex(f->gc_file, f->hash);
+        str_copy(f->upload_name, sizeof f->upload_name, name[0] ? name : path_basename(f->gc_file));
+    } else if (!strcmp(form, "card")) {
+        unsigned char *card = NULL;
+        size_t n = 0;
+        str_copy(f->gc_form, sizeof f->gc_form, "card");
+        if (gc_virtual_card(r->rom_id, b, &card, &n) == 0) {
+            md5_hex(card, n, f->hash);
+            free(card);
+        } else {
+            f->hash[0] = 0; /* no card to put them on: not sent (scan_bundles) */
+        }
+        str_copy(f->upload_name, sizeof f->upload_name, name[0] ? name : "MemoryCardA.raw");
+    }
 }
 
 static void scan_bundles(scan_ctx *c) {
@@ -972,13 +1219,76 @@ static void scan_bundles(scan_ctx *c) {
         state_lock();
         cJSON_AddItemToArray(g_bundle_roots, cJSON_CreateString(b.dir));
         state_unlock();
+        if (!strcmp(r->map->save_layout, "gci")) gc_learn_form(c, r);
         if (b.n > 0 && !find_save(c, r->rom_id, c->slot)) {
             local_file f;
             fill_bundle_file(&f, c, r, &b);
-            add_file(&c->saves, &c->nsaves, &c->capsaves, &f);
+            if (f.hash[0]) add_file(&c->saves, &c->nsaves, &c->capsaves, &f);
+            else LOGW("%s: its saves can't go on RomM's memory card yet", path_basename(r->path));
         }
         bundle_free(&b);
     }
+}
+
+/* A GameCube save from RomM that's a memory card or a single .gci: the
+ * game's saves on it replace the game's .gci files here. 1 when placed, 0
+ * when it's neither (a zip), -1 when it can't be used. The bundle is listed
+ * again. */
+static int gc_place(const local_rom *r, bundle *b, const char *file) {
+    size_t len = 0;
+    char *data = read_file(file, &len);
+    if (!data) return -1;
+    const unsigned char *u = (const unsigned char *)data;
+    gc_card card;
+    int rc = 0;
+    if (gc_card_open(&card, u, len) == 0) {
+        gc_list on_card = {0};
+        gc_card_saves(&card, b->game_id, gc_keep, &on_card);
+        if (on_card.count) {
+            for (int i = 0; i < b->n; i++) unlink(b->files[i].path);
+            mkdir_p(b->dir);
+        } else {
+            LOGI("RomM's memory card has no saves for %s: keeping this console's", b->game_id);
+        }
+        for (int k = 0; k < on_card.count; k++) {
+            char name[256], path[PATH_MAX_LEN];
+            gc_gci_name(on_card.g[k], name, sizeof name);
+            path_join(path, sizeof path, b->dir, name);
+            if (write_file_atomic(path, on_card.g[k], on_card.n[k]) != 0) rc = -1;
+        }
+        gc_list_free(&on_card);
+        gc_card_free(&card);
+        char cache[PATH_MAX_LEN];
+        gc_card_cache(r->rom_id, cache, sizeof cache);
+        mkdir_parent(cache);
+        if (rc == 0) rc = copy_file(file, cache) == 0 ? 1 : -1;
+        if (rc > 0) gc_form_set(r, "card", NULL);
+    } else if (gc_gci_valid(u, len)) {
+        /* Over the same save here, or beside the others. */
+        char path[PATH_MAX_LEN] = "";
+        for (int i = 0; i < b->n && !path[0]; i++) {
+            size_t gl = 0;
+            char *g = read_file(b->files[i].path, &gl);
+            if (g && gl >= GC_DENTRY && gc_gci_same_save((const unsigned char *)g, u)) str_copy(path, sizeof path, b->files[i].path);
+            free(g);
+        }
+        if (!path[0]) {
+            char name[256];
+            gc_gci_name(u, name, sizeof name);
+            mkdir_p(b->dir);
+            path_join(path, sizeof path, b->dir, name);
+        }
+        rc = write_file_atomic(path, u, len) == 0 ? 1 : -1;
+        if (rc > 0) gc_form_set(r, "gci", NULL);
+    }
+    free(data);
+    if (rc > 0) {
+        char id[16];
+        str_copy(id, sizeof id, b->game_id);
+        bundle_free(b);
+        if (bundle_for_rom(r, id, b) != 0) rc = -1;
+    }
+    return rc;
 }
 
 /* Downloads a save zip and unpacks it over the game's current files. With
@@ -1015,7 +1325,9 @@ static int do_download_bundle(const scan_ctx *c, int save_id, const local_rom *r
         if (bundle_zip(&b, cur) == 0) backup_file(c, cur, r->rom_id);
         unlink(cur);
     }
-    if (bundle_replace(&b, zip, tmpdir) != 0) {
+    int placed = !strcmp(r->map->save_layout, "gci") ? gc_place(r, &b, zip) : 0;
+    if (placed < 0) goto out;
+    if (!placed && bundle_replace(&b, zip, tmpdir) != 0) {
         LOGE("save %d is not a usable zip", save_id);
         goto out;
     }
@@ -1055,7 +1367,26 @@ static int do_upload(const scan_ctx *c, const local_file *f, int session_id, int
     free(dev);
     long st = 0;
     cJSON *j;
-    if (f->is_bundle) {
+    char card_up[PATH_MAX_LEN] = "";
+    if (!strcmp(f->gc_form, "gci")) {
+        j = romm_upload("POST", path, "saveFile", f->gc_file, f->upload_name, &st);
+    } else if (!strcmp(f->gc_form, "card")) {
+        /* RomM's card with this console's saves for the game on it. */
+        bundle b;
+        unsigned char *card = NULL;
+        size_t n = 0;
+        snprintf(card_up, sizeof card_up, "%s/tmp/upload-%d.raw", plat_data_dir(), f->rom_id);
+        if (bundle_reopen(f, &b) != 0 || gc_virtual_card(f->rom_id, &b, &card, &n) != 0 ||
+            write_file_atomic(card_up, card, n) != 0) {
+            bundle_free(&b);
+            free(card);
+            if (status_out) *status_out = 0;
+            return -1;
+        }
+        bundle_free(&b);
+        free(card);
+        j = romm_upload("POST", path, "saveFile", card_up, f->upload_name, &st);
+    } else if (f->is_bundle) {
         char zip[PATH_MAX_LEN];
         bundle b;
         snprintf(zip, sizeof zip, "%s/tmp/upload-%d.zip", plat_data_dir(), f->rom_id);
@@ -1072,6 +1403,12 @@ static int do_upload(const scan_ctx *c, const local_file *f, int session_id, int
     }
     if (status_out) *status_out = st;
     int ok = (st == 200 || st == 201) && j;
+    if (card_up[0]) { /* the card RomM has now is the one kept here */
+        char cache[PATH_MAX_LEN];
+        gc_card_cache(f->rom_id, cache, sizeof cache);
+        if (ok) move_file(card_up, cache);
+        else unlink(card_up);
+    }
     if (ok) {
         record_save(f, (int)jget_num(j, "id", 0), jget_str(j, "content_hash", f->hash));
         LOGI("uploaded %s (rom %d, slot %s)", f->path, f->rom_id, f->slot);
@@ -1352,7 +1689,7 @@ static int restore_missing_saves(scan_ctx *c, int only_rom) {
         long st = 0;
         cJSON *all = romm_call("GET", api, NULL, &st);
         const cJSON *s, *best = NULL;
-        cJSON_ArrayForEach(s, st == 200 ? all : NULL)
+        cJSON_ArrayForEach(s, (st == 200 ? all : NULL))
             if ((int)jget_num(s, "rom_id", 0) == m->rom_id && !strcmp(jget_str(s, "slot", ""), m->slot) &&
                 (!best || strcmp(jget_str(s, "updated_at", ""), jget_str(best, "updated_at", "")) > 0))
                 best = s;
@@ -1373,6 +1710,44 @@ static int restore_missing_saves(scan_ctx *c, int only_rom) {
         cJSON_Delete(all);
     }
     free(list);
+    return n;
+}
+
+/* A game whose saves are a folder (GameCube, PSP, Wii) with none of them on
+ * this console while RomM has some: a new emulator, or files deleted. RomM's
+ * newest in this console's slot (or else anywhere) comes down. */
+static int restore_missing_bundles(scan_ctx *c, int only_rom) {
+    int n = 0;
+    for (int i = 0; i < c->nroms; i++) {
+        const local_rom *r = &c->roms[i];
+        if (!r->rules.sync_saves || !bundle_supported(r->map->save_layout) || (only_rom && r->rom_id != only_rom)) continue;
+        int done_before = 0; /* another emulator's copy of the game */
+        for (int k = 0; k < i; k++) done_before |= c->roms[k].rom_id == r->rom_id && bundle_supported(c->roms[k].map->save_layout);
+        char id[16];
+        bundle b;
+        if (done_before || rom_game_id(r, id, sizeof id) != 0 || bundle_for_rom(r, id, &b) != 0) continue;
+        const int empty = b.n == 0;
+        bundle_free(&b);
+        if (!empty) continue;
+        char api[64];
+        snprintf(api, sizeof api, "/api/saves?rom_id=%d", r->rom_id);
+        long st = 0;
+        cJSON *all = romm_call("GET", api, NULL, &st);
+        const cJSON *s, *mine = NULL, *any = NULL;
+        cJSON_ArrayForEach(s, (st == 200 ? all : NULL)) {
+            if ((int)jget_num(s, "rom_id", 0) != r->rom_id) continue;
+            const char *up = jget_str(s, "updated_at", "");
+            if (!any || strcmp(up, jget_str(any, "updated_at", "")) > 0) any = s;
+            if (!strcmp(jget_str(s, "slot", ""), c->slot) && (!mine || strcmp(up, jget_str(mine, "updated_at", "")) > 0))
+                mine = s;
+        }
+        const cJSON *pick = mine ? mine : any;
+        if (pick && do_download_bundle(c, (int)jget_num(pick, "id", 0), r, c->slot, 0, jget_str(pick, "content_hash", ""), 1) == 0) {
+            n++;
+            events_add("save", "downloaded", r->rom_id, b.dir, emu_name(r->map), "Missing here");
+        }
+        cJSON_Delete(all);
+    }
     return n;
 }
 
@@ -1765,11 +2140,13 @@ typedef struct {
  * (save_format) has one save: the newest of their copies goes to the others,
  * the copies replaced backed up first. Runs before the saves are scanned (so
  * one save goes up) and after the downloads (so a new one reaches them all). */
+static int share_bundles(scan_ctx *c);
+
 static int share_saves(scan_ctx *c) {
-    int copied = 0;
+    int copied = share_bundles(c);
     for (int i = 0; i < c->nroms; i++) {
         const local_rom *a = &c->roms[i];
-        if (!a->map->save_format[0] || a->map->own_slot || !a->rules.sync_saves) continue;
+        if (!a->map->save_format[0] || a->map->own_slot || !a->rules.sync_saves || a->map->save_layout[0]) continue;
         /* The first member of each group does the work. */
         int first = 1;
         for (int k = 0; k < i && first; k++)
@@ -1804,6 +2181,57 @@ static int share_saves(scan_ctx *c) {
                 copied++;
             }
         }
+    }
+    return copied;
+}
+
+/* The same for a GameCube game two Dolphins play (GCI folders): the game's
+ * .gci files from the one that saved last go to the other's folder. */
+static int share_bundles(scan_ctx *c) {
+    int copied = 0;
+    for (int i = 0; i < c->nroms; i++) {
+        const local_rom *a = &c->roms[i];
+        if (strcmp(a->map->save_layout, "gci") != 0 || a->map->own_slot || !a->rules.sync_saves) continue;
+        int first = 1;
+        for (int k = 0; k < i && first; k++)
+            if (c->roms[k].rom_id == a->rom_id && !strcmp(c->roms[k].map->save_layout, "gci") &&
+                !c->roms[k].map->own_slot && c->roms[k].rules.sync_saves)
+                first = 0;
+        char id[16];
+        if (!first || rom_game_id(a, id, sizeof id) != 0) continue;
+        bundle bs[4];
+        int n = 0, newest = -1;
+        for (int k = i; k < c->nroms && n < 4; k++) {
+            const local_rom *r = &c->roms[k];
+            if (r->rom_id != a->rom_id || strcmp(r->map->save_layout, "gci") || r->map->own_slot || !r->rules.sync_saves)
+                continue;
+            if (bundle_for_rom(r, id, &bs[n]) != 0) continue;
+            if (bs[n].n && (newest < 0 || bs[n].mtime > bs[newest].mtime)) newest = n;
+            n++;
+        }
+        char want[33] = "";
+        if (n >= 2 && newest >= 0) bundle_hash(&bs[newest], want);
+        for (int k = 0; want[0] && k < n; k++) {
+            char have[33];
+            bundle_hash(&bs[k], have);
+            if (k == newest || !strcmp(have, want)) continue;
+            if (bs[k].n) { /* what was there, kept as a zip */
+                char cur[PATH_MAX_LEN];
+                snprintf(cur, sizeof cur, "%s/tmp/%s-shared.zip", plat_data_dir(), id);
+                if (bundle_zip(&bs[k], cur) == 0) backup_file(c, cur, a->rom_id);
+                unlink(cur);
+            }
+            for (int f = 0; f < bs[k].n; f++) unlink(bs[k].files[f].path);
+            mkdir_p(bs[k].dir);
+            for (int f = 0; f < bs[newest].n; f++) {
+                char to[PATH_MAX_LEN];
+                path_join(to, sizeof to, bs[k].dir, bs[newest].files[f].name);
+                if (copy_file(bs[newest].files[f].path, to) == 0) set_file_mtime(to, file_mtime(bs[newest].files[f].path));
+            }
+            LOGI("shared save: %s's GameCube saves -> %s", id, bs[k].dir);
+            copied++;
+        }
+        for (int k = 0; k < n; k++) bundle_free(&bs[k]);
     }
     return copied;
 }
@@ -2032,7 +2460,7 @@ static void run_sync(const char *reason, int only_rom, sync_result *res) {
         }
     }
     cJSON_Delete(neg);
-    if (!upload_only) res->downloaded += restore_missing_saves(&c, only_rom);
+    if (!upload_only) res->downloaded += restore_missing_saves(&c, only_rom) + restore_missing_bundles(&c, only_rom);
     if (!upload_only) res->downloaded += fetch_slotless_saves(&c, only_rom);
 
     set_phase("finishing");

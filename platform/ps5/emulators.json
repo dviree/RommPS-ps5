@@ -69,10 +69,13 @@
     "id": "porpoise", "name": "Porpoise",
     "title_ids": ["PPSA99764"],
     "detect": ["/data/porpoise", "/data/homebrew/PPSA99764"],
-    "note": "Untested: the current build crashes leaving the app sandbox.",
+    "note": "Dolphin, with its user folder in {root}/saves/User.",
     "profile": {
-      "root": "/data/porpoise", "rom_dir": "{root}/games", "save_dir": "{root}/saves",
-      "platforms": [{"romm": ["ngc", "gamecube"], "dir": "gamecube"}, {"romm": ["wii"], "dir": "wii"}]
+      "root": "/data/porpoise", "rom_dir": "{root}/games", "save_dir": "{root}/saves/User",
+      "platforms": [
+        {"romm": ["ngc", "gamecube"], "dir": "gamecube", "emulator": "dolphin", "save_layout": "gci", "bundle_dirs": "{root}/saves/User/GC"},
+        {"romm": ["wii"], "dir": "wii", "emulator": "dolphin", "save_layout": "wii", "bundle_dirs": "{root}/saves/User/Wii"}
+      ]
     }
   }
 ]

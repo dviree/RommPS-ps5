@@ -62,6 +62,12 @@ ROMM_SYNC_HOMEBREW="$T/homebrew" ROMM_SYNC_DATA="$T/data" ROMM_SYNC_AUTOSTART="$
   ROMM_SYNC_UPDATE_URL="http://127.0.0.1:$MOCK_PORT/_github/release" "$ROOT/build/host/romm-sync" >"$T/daemon.log" 2>&1 &
 sleep 6   # let the (unpaired, skipped) startup sync pass
 
+echo "web UI script parses"
+if command -v node >/dev/null; then
+    python3 -c "import re,sys; print('\n'.join(re.findall(r'<script>(.*?)</script>', open(sys.argv[1]).read(), re.S)))" "$ROOT/ui/index.html" > "$T/ui.js"
+    node --check "$T/ui.js" || fail "the web UI's script doesn't parse"
+fi
+
 echo "0. self-signed HTTPS needs certificate checks turned off"
 r=$(curl -s -X POST "$API/api/pair/start" -d "{\"server_url\":\"https://127.0.0.1:$TLS_PORT\"}")
 [[ "$r" == *"doesn't trust"* ]] || fail "untrusted certificate not reported: $r"
@@ -294,6 +300,64 @@ syncnow
 [[ -f "$SD/ULUS10336GAMEDATA/BIG.BIN" ]] || fail "game data folder must be left alone"
 ls "$T/data/backups/30/" | grep -q "ULUS10336.zip" || fail "no backup of the PSP save"
 
+echo "12b. GameCube saves stay in the form RomM has them: one .gci, or a whole memory card"
+GC="python3 $ROOT/tests/gccard.py"
+admin_save() { # rom_id file_name path
+    python3 -c "import base64,json,sys; print(json.dumps({'rom_id':int(sys.argv[1]),'slot':'autosave','file_name':sys.argv[2],'content_b64':base64.b64encode(open(sys.argv[3],'rb').read()).decode()}))" "$1" "$2" "$3" > "$T/admin.json"
+    curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/_admin/save" -d @"$T/admin.json" >/dev/null
+}
+newest() { # rom_id: writes RomM's newest save for it to $T/newest, prints its name
+    dump | python3 -c "
+import json,sys,re
+s=sorted([x for x in json.load(sys.stdin)['saves'] if x['rom_id']==$1], key=lambda x: (x['updated_at'], x['id']))
+open('$T/newest','wb').write(s[-1]['content'].encode('latin1')); print(re.sub(r' \[[^]]*\]', '', s[-1]['file_name']))"; }
+blocks_md5() { python3 -c "import hashlib,sys; print(hashlib.md5(open(sys.argv[1],'rb').read()[0x40:]).hexdigest())" "$1"; }
+for g in "41 Sunshine GMSE01" "42 Melee GALE01"; do
+    set -- $g
+    curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/_admin/rom" -d "{\"id\":$1,\"platform_id\":4,\"name\":\"$2\",\"fs_name\":\"$2 (USA).iso\",\"files\":[]}" >/dev/null
+    python3 "$ROOT/tests/make_disc.py" gc "$RA/roms/ngc/$2 (USA).iso" "$3"
+done
+# One .gci on RomM (another app's): it comes down into the GCI folder, and goes back up as one .gci.
+$GC gci "$T/sms.gci" GMSE01 super_mario_sunshine 2 0x11
+admin_save 41 "01-GMSE-super_mario_sunshine.gci" "$T/sms.gci"
+syncnow
+cmp -s "$T/sms.gci" "$CARD/01-GMSE-super_mario_sunshine.gci" || fail "RomM's .gci must land in the GCI folder"
+syncnow
+[[ "$(last uploaded)" == 0 ]] || fail "an unchanged .gci must not go up again"
+sleep 1.1; $GC gci "$CARD/01-GMSE-super_mario_sunshine.gci" GMSE01 super_mario_sunshine 3 0x22
+syncnow
+[[ "$(newest 41)" == "01-GMSE-super_mario_sunshine.gci" ]] || fail "a .gci on RomM must go back up as a .gci: $(newest 41)"
+cmp -s "$T/newest" "$CARD/01-GMSE-super_mario_sunshine.gci" || fail "the .gci RomM got isn't this console's"
+# A whole card on RomM with Melee's save and another game's: Melee's comes
+# down; this console's change goes back onto RomM's card, the other save untouched.
+$GC blank "$T/cardA.raw" 64
+$GC gci "$T/melee.gci" GALE01 SuperSmashBros0110290334 3 0x33; $GC put "$T/cardA.raw" "$T/melee.gci"
+$GC gci "$T/other.gci" GXXE01 other_game 2 0x44; $GC put "$T/cardA.raw" "$T/other.gci"
+admin_save 42 "MemoryCardA.USA.raw" "$T/cardA.raw"
+syncnow
+cmp -s "$T/melee.gci" "$CARD/01-GALE-SuperSmashBros0110290334.gci" 2>/dev/null ||
+    [[ "$(blocks_md5 "$T/melee.gci")" == "$(blocks_md5 "$CARD/01-GALE-SuperSmashBros0110290334.gci" 2>/dev/null)" ]] || fail "Melee's save must come off RomM's card"
+[[ ! -e "$CARD/01-GXXE-other_game.gci" ]] || fail "only the game's own saves come off the card"
+syncnow
+[[ "$(last uploaded)" == 0 ]] || fail "an unchanged save must leave RomM's card alone"
+other_md5=$($GC saves "$T/cardA.raw" GXXE01)
+sleep 1.1; $GC gci "$CARD/01-GALE-SuperSmashBros0110290334.gci" GALE01 SuperSmashBros0110290334 4 0x55
+syncnow
+[[ "$(newest 42)" == "MemoryCardA.USA.raw" ]] || fail "a card on RomM must go back up as the card: $(newest 42)"
+dump | python3 -c "import json,sys; n=[x['file_name'] for x in json.load(sys.stdin)['saves'] if x['rom_id'] in (41,42)]; sys.exit(any(f.count('[') > 1 for f in n))" || fail "a name sent back must not pile up RomM's stamps"
+$GC check "$T/newest" || fail "the card sent to RomM must be one Dolphin reads"
+[[ "$($GC saves "$T/newest" GALE01 | cut -d' ' -f2)" == "$(blocks_md5 "$CARD/01-GALE-SuperSmashBros0110290334.gci")" ]] || fail "this console's Melee save must be on the card"
+[[ "$($GC saves "$T/newest" GXXE01)" == "$other_md5" ]] || fail "the card's other saves must stay as they were"
+# Another device changes the card: it comes down, and this console's file follows.
+cp "$T/newest" "$T/cardB.raw"; $GC gci "$T/melee2.gci" GALE01 SuperSmashBros0110290334 2 0x66; $GC put "$T/cardB.raw" "$T/melee2.gci"
+sleep 1.1; admin_save 42 "MemoryCardA.USA.raw" "$T/cardB.raw"
+syncnow
+[[ "$(blocks_md5 "$CARD/01-GALE-SuperSmashBros0110290334.gci")" == "$(blocks_md5 "$T/melee2.gci")" ]] || fail "a newer card on RomM must update the save here"
+ls "$T/data/backups/42/" 2>/dev/null | grep -q . || fail "no backup before the card's save replaced this console's"
+grep -q "Sunshine (USA).iso: RomM keeps its saves as gci (01-GMSE-super_mario_sunshine.gci)" "$T/daemon.log" &&
+    grep -q "Melee (USA).iso: RomM keeps its saves as card (MemoryCardA.USA.raw)" "$T/daemon.log" ||
+    fail "each game's form must be the one RomM has"
+
 echo "13. in-app update: only a correctly signed release installs"
 SIGN="$ROOT/build/host/release-sign"
 upd() { curl -sf "$API/api/update" | python3 -c "import json,sys; u=json.load(sys.stdin); print(u['$1'])"; }
@@ -484,6 +548,42 @@ post /api/download '{"rom_id":61}' >/dev/null; sleep 2
 [[ -f "$T/n64emu/games/Other Racer (U).z64" && -f "$T/n64b/roms/Other Racer (U).z64" ]] || fail "the download didn't reach the extra emulator"
 python3 -c 'import os,sys; sys.exit(not os.path.samefile(sys.argv[1], sys.argv[2]))' \
   "$T/n64emu/games/Other Racer (U).z64" "$T/n64b/roms/Other Racer (U).z64" || fail "the extra copy should be a hard link"
+
+echo "16b. two Dolphins for GameCube keep one save: the main one's .gci files reach the extra's folder"
+mkdir -p "$T/gcA/games" "$T/gcB/ngc"
+python3 - "$T/catalog.json" "$T" <<'PY'
+import json, sys
+cat = json.load(open(sys.argv[1]))
+# Dolphin A keeps GameCube and Wii games in one folder, like Porpoise;
+# Dolphin B a folder for each.
+# Their folders for GameCube are named differently ("gamecube", "ngc"), as
+# Porpoise's and RetroArch's are.
+for gid, name, roms, gc_dir in (("gcA", "Dolphin A", "{root}/games", "gamecube"), ("gcB", "Dolphin B", "{root}/{platform}", "ngc")):
+    cat.append({"id": gid, "name": name, "detect": [f"{sys.argv[2]}/{gid}"],
+                "profile": {"root": f"{sys.argv[2]}/{gid}", "rom_dir": roms, "save_dir": "{root}/User",
+                            "platforms": [{"romm": ["ngc"], "dir": gc_dir, "emulator": "dolphin",
+                                           "save_layout": "gci", "bundle_dirs": "{root}/User/GC"},
+                                          {"romm": ["wii"], "dir": "wii", "emulator": "dolphin",
+                                           "save_layout": "wii", "bundle_dirs": "{root}/User/Wii"}]}})
+json.dump(cat, open(sys.argv[1], "w"))
+PY
+python3 "$ROOT/tests/make_disc.py" gc "$T/gcA/games/Sunshine (USA).iso" GMSE01
+python3 "$ROOT/tests/make_disc.py" gc "$T/gcB/ngc/Sunshine (USA).iso" GMSE01
+post /api/setup/emulators "{\"roots\":[\"$HB\",\"$T/psxemu\",\"$T/n64emu\",\"$T/n64b\",\"$T/ps2emu\",\"$T/nope\",\"$T/gcA\",\"$T/gcB\"],
+  \"choices\":{\"psx\":\"$T/psxemu\",\"n64\":\"$T/n64emu\",\"ps2\":\"$T/ps2emu\",\"ngc\":\"$T/gcA\",\"wii\":\"$T/gcA\"},
+  \"also\":{\"n64\":[\"$T/n64b\"],\"ngc\":[\"$T/gcB\"],\"wii\":[\"$T/gcB\"]}}" >/dev/null \
+  || fail "setup with two Dolphins refused"
+A="$T/gcA/User/GC/USA/Card A"; Bc="$T/gcB/User/GC/USA/Card A"
+syncnow
+sleep 1; syncnow
+[[ ! -e "$T/gcB/wii/Sunshine (USA).iso" ]] || fail "a GameCube game in a folder shared with Wii must not go to the extra's Wii folder"
+cmp -s "$A/01-GMSE-super_mario_sunshine.gci" "$Bc/01-GMSE-super_mario_sunshine.gci" || fail "RomM's save must reach both Dolphins"
+sleep 1.1; $GC gci "$Bc/01-GMSE-super_mario_sunshine.gci" GMSE01 super_mario_sunshine 2 0x77
+syncnow
+cmp -s "$Bc/01-GMSE-super_mario_sunshine.gci" "$A/01-GMSE-super_mario_sunshine.gci" || fail "a save made in the extra must reach the main Dolphin"
+[[ "$(last uploaded)" == 1 ]] || fail "two Dolphins sharing a save must upload it once: $(last uploaded)"
+[[ "$(newest 41)" == "01-GMSE-super_mario_sunshine.gci" ]] && cmp -s "$T/newest" "$A/01-GMSE-super_mario_sunshine.gci" || fail "RomM must get the newer save, as one .gci"
+ls "$T/data/backups/41/" 2>/dev/null | grep -q "GMSE01-shared.zip" || fail "the save replaced in the main Dolphin must be backed up"
 
 echo "17. paired with another server, the old server's game and save ids are forgotten"
 hist() { curl -sf "$API/api/status" | python3 -c "import json,sys; print(len(json.load(sys.stdin)['sync']['history']))"; }

@@ -135,6 +135,13 @@ class SetupPage
     // Rows above the emulators': their heading, or a message instead of them.
     int lead() const { return 1; }
     std::vector<Row> emulator_rows(const App &app, std::vector<RowRef> *refs = nullptr) const;
+    // Settings' Emulators: what Save sends, whether it differs from what was
+    // saved, and saving it.
+    std::string save_body() const;
+    bool dirty() const;
+    void save_emulators(App &app, hui::ui::Feedback &feedback);
+    // Leaving with changes not saved: Save, Discard or Keep editing.
+    std::vector<Row> leave_rows() const;
     // ids: what each row is (the steps' rows depend on save_sync_).
     std::vector<Row> preview_rows(std::vector<int> *ids = nullptr) const;
     std::vector<Row> finish_rows(std::vector<int> *ids = nullptr) const;
@@ -176,6 +183,9 @@ class SetupPage
     // system key -> emulator root -> games, saves, states ("" keeps that one).
     std::map<std::string, std::map<std::string, std::array<std::string, 3>>> custom_dirs_;
     bool editing_ = false;
+    std::string saved_;      // save_body() + ps2_cards_ as last saved (Settings' Emulators)
+    bool leaving_ = false;   // asking whether to save before going back
+    RowList leave_list_;
     std::string ps2_cards_ = "per_game";
     std::map<std::string, Own> own_;    // by system key (first slug)
     std::vector<std::string> own_order_; // the server's order

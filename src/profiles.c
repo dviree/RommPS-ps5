@@ -362,6 +362,9 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
             str_copy(m->state_stems, sizeof m->state_stems, jstr(p, e, "state_stems", ""));
             str_copy(m->state_name, sizeof m->state_name, jstr(p, e, "state_name", "{rom_stem}{ext}"));
             str_copy(m->save_format, sizeof m->save_format, jstr(p, e, "save_format", ""));
+            /* Every Dolphin with a GCI folder keeps GameCube saves the same way. */
+            if (!m->save_format[0] && !strcmp(jstr(p, e, "save_layout", ""), "gci"))
+                str_copy(m->save_format, sizeof m->save_format, "gc-gci");
             str_copy(m->state_cores, sizeof m->state_cores, state_str(p, e, "state_cores", m->emulator));
             str_copy(m->state_format, sizeof m->state_format, state_str(p, e, "state_format", "retroarch"));
             str_copy(m->state_slot0, sizeof m->state_slot0, state_str(p, e, "state_slot0", ".state"));
@@ -415,10 +418,19 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
     for (int i = 0; i < cnt; i++) {
         if (!maps[i].extra) continue;
         maps[i].own_slot = 1;
-        for (int k = 0; k < cnt; k++)
-            if (!maps[k].extra && !strcmp(maps[k].platform_dir, maps[i].platform_dir) && maps[i].save_format[0] &&
+        /* The same system (RomM's first slug: Porpoise calls GameCube's
+         * folder "gamecube", RetroArch "ngc") and the same format. */
+        char sys_i[64];
+        str_copy(sys_i, sizeof sys_i, maps[i].romm_slugs);
+        sys_i[strcspn(sys_i, ",")] = 0;
+        for (int k = 0; k < cnt; k++) {
+            char sys_k[64];
+            str_copy(sys_k, sizeof sys_k, maps[k].romm_slugs);
+            sys_k[strcspn(sys_k, ",")] = 0;
+            if (!maps[k].extra && !strcmp(sys_k, sys_i) && maps[i].save_format[0] &&
                 !strcmp(maps[k].save_format, maps[i].save_format))
                 maps[i].own_slot = 0;
+        }
     }
     *out = maps;
     return cnt;
