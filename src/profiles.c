@@ -213,7 +213,7 @@ static void check_requirement(const profile_map *m, const char *game, const char
                               size_t nn) {
     *sync = m->base_sync_saves;
     note[0] = 0;
-    if (m->sync_off) str_copy(note, nn, "save sync is off for this emulator");
+    if (m->sync_off) str_copy(note, nn, "save sync is off for this platform");
     if (!m->req_key[0] || !m->base_sync_saves) return;
     char val[64];
     if (!m->ra_cfg_dir[0] || !core_option(m, game, cdir, val, sizeof val)) str_copy(val, sizeof val, m->req_default);
@@ -394,7 +394,7 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
             str_template(m->memcards, sizeof m->memcards, jstr(p, e, "memcards", ""), vars);
             m->extra = profile_lists(p, "extra", profiles_system_key(e));
             m->sync_saves = m->base_sync_saves = jbool(p, e, "sync_saves", 1);
-            const char *mode = jstr(p, NULL, "sync", "all");
+            const char *mode = jstr(p, e, "sync", "all"); /* per platform, or the emulator's (before 1.2) */
             m->sync_off = !strcmp(mode, "off");
             m->sync_states = !m->sync_off && strcmp(mode, "saves") != 0;
             if (m->sync_off) m->sync_saves = m->base_sync_saves = 0;
@@ -409,7 +409,7 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
             }
             /* Platform-wide answer, for the UI; games can override it. */
             check_requirement(m, NULL, NULL, &m->sync_saves, m->sync_note, sizeof m->sync_note);
-            if (m->sync_off) str_copy(m->sync_note, sizeof m->sync_note, "save sync is off for this emulator");
+            if (m->sync_off) str_copy(m->sync_note, sizeof m->sync_note, "save sync is off for this platform");
             cnt++;
         }
     }

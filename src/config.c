@@ -66,7 +66,7 @@ static void set_defaults(void) {
     g_cfg.conflicts = CONFLICT_ASK;
     str_copy(g_cfg.slot, sizeof g_cfg.slot, "autosave");
     str_copy(g_cfg.ps2_cards, sizeof g_cfg.ps2_cards, "per_game");
-    str_copy(g_cfg.ui_theme, sizeof g_cfg.ui_theme, "classic");
+    str_copy(g_cfg.ui_theme, sizeof g_cfg.ui_theme, "acrylic");
 }
 
 void config_apply_json(const cJSON *j) {

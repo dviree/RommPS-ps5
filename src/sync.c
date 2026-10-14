@@ -97,6 +97,13 @@ static void set_phase(const char *p) { str_copy(g_phase, sizeof g_phase, p); }
 
 static char *url_q(const char *s) { return http_escape(s ? s : ""); }
 
+/* This console's slots: its own ("autosave"), and the ones derived from it
+ * ("autosave-rtc", "autosave-<emulator>"). Other slots are other devices'. */
+static int our_slot(const scan_ctx *c, const char *slot) {
+    size_t n = strlen(c->slot);
+    return !strncmp(slot, c->slot, n) && (slot[n] == 0 || slot[n] == '-');
+}
+
 static const char *slot_for(const scan_ctx *c, const profile_map *m, const char *file,
                             char *buf, size_t n) {
     /* The main save uses the shared slot so other RomM clients pair with it.
@@ -424,7 +431,18 @@ static void scan_rom_dir(scan_ctx *c, const profile_map *m) {
             if (sd) closedir(sd);
             /* One file in the folder (RomM keeps some single-file games so):
              * emulators name its saves after that file. */
-            if (files == 1) add_stem(&r, only);
+            if (files == 1) {
+                /* The emulator names saves after the file inside, so new
+                 * saves take its name (the folder's still matches old ones). */
+                add_stem(&r, only);
+                for (int k = 1; k < r.nstems; k++)
+                    if (!strcmp(r.stems[k], only)) {
+                        char first[sizeof r.stems[0]];
+                        str_copy(first, sizeof first, r.stems[0]);
+                        str_copy(r.stems[0], sizeof r.stems[0], only);
+                        str_copy(r.stems[k], sizeof r.stems[k], first);
+                    }
+            }
         } else {
             path_stem(stem, sizeof stem, de->d_name);
             add_stem(&r, stem);
@@ -444,6 +462,23 @@ static void scan_rom_dir(scan_ctx *c, const profile_map *m) {
         if (other_system) {
             state_unlock();
             continue;
+        }
+        /* Seen under this emulator now (an older version named its profile otherwise). */
+        if (e && rom_id && strcmp(jget_str(e, "profile", ""), m->profile_id) != 0) {
+            int stale = 1; /* no profile has that name now */
+            for (int k = 0; k < c->nmaps && stale; k++) stale = strcmp(c->maps[k].profile_id, jget_str(e, "profile", "")) != 0;
+            /* In a folder shared by systems, the system it was recorded for takes it. */
+            int theirs = 0;
+            for (int k = 0; k < c->nmaps && stale && was_dir[0] && strcmp(was_dir, m->platform_dir) != 0; k++)
+                theirs |= !strcmp(c->maps[k].profile_id, m->profile_id) && !strcmp(c->maps[k].platform_dir, was_dir);
+            if (theirs) {
+                state_unlock();
+                continue;
+            }
+            if (stale) {
+                jset_str(e, "profile", m->profile_id);
+                jset_str(e, "platform_dir", m->platform_dir);
+            }
         }
         if (e) {
             const cJSON *s;
@@ -515,8 +550,19 @@ static void scan_rom_dir(scan_ctx *c, const profile_map *m) {
 
 /* The folder the emulator reads this game's saves (or states) from. Returns 0
  * when saves are sorted by core and the core name isn't known. */
+static int rom_game_id(const local_rom *r, char *out, size_t n);
+
 static int expected_dir(const local_rom *r, int states, char *out, size_t n) {
     const rom_rules *ru = &r->rules;
+    /* A folder per game, by its id (Porpoise's states/GAFE01). */
+    const char *at = strstr(states ? ru->state_dir : ru->save_dir, "{game_id}");
+    if (at) {
+        char id[16];
+        if (rom_game_id(r, id, sizeof id) != 0) return 0;
+        const char *dir = states ? ru->state_dir : ru->save_dir;
+        snprintf(out, n, "%.*s%s%s", (int)(at - dir), dir, id, at + 9);
+        return 1;
+    }
     char content_dir[PATH_MAX_LEN];
     str_copy(content_dir, sizeof content_dir, r->path);
     if (!dir_exists(r->path)) { /* multi-file games are folders themselves */
@@ -551,6 +597,14 @@ static const local_rom *match_rom(const scan_ctx *c, const char *file_dir, const
         const local_rom *r = &c->roms[i];
         if (!r->rules.sync_saves || (states && !r->map->sync_states) || (!states && r->map->save_layout[0])) continue;
         if (!ext_in_list(file_name, states ? r->map->state_exts : r->map->save_exts)) continue;
+        if (strstr(states ? r->rules.state_dir : r->rules.save_dir, "{game_id}")) {
+            char exp[PATH_MAX_LEN];
+            if (expected_dir(r, states, exp, sizeof exp) && !strcmp(exp, file_dir)) {
+                *active = 1;
+                return r;
+            }
+            continue;
+        }
         for (int s = 0; s < r->nstems; s++) {
             size_t l = strlen(r->stems[s]);
             if (strncmp(file_name, r->stems[s], l) != 0 || file_name[l] != '.') continue;
@@ -678,8 +732,17 @@ static void scan_file_dir(scan_ctx *c, const char *dir, int depth, int states) {
             for (int i = 0; i < c->nsaves; i++) {
                 local_file *o = &c->saves[i];
                 if (o->rom_id == f.rom_id && !strcmp(o->slot, f.slot)) {
-                    LOGW("two local saves for rom %d slot %s: %s, %s (using newest)", f.rom_id,
-                         f.slot, o->path, f.path);
+                    /* Said once per pair while running, not at every sync. */
+                    static cJSON *told;
+                    char key[2 * PATH_MAX_LEN + 8];
+                    snprintf(key, sizeof key, "%s|%s", o->path, f.path);
+                    state_lock();
+                    if (!told) told = cJSON_CreateObject();
+                    const int first = !cJSON_GetObjectItemCaseSensitive(told, key);
+                    if (first) cJSON_AddTrueToObject(told, key);
+                    state_unlock();
+                    if (first)
+                        LOGW("two local saves for rom %d slot %s: %s, %s (using newest)", f.rom_id, f.slot, o->path, f.path);
                     /* A blank card (an emulator made a fresh one under another
                      * name) never beats one with saves on it. */
                     int fo = psx_card_saves(r->map, f.path), oo = psx_card_saves(r->map, o->path);
@@ -715,6 +778,9 @@ static void base_dir(const local_rom *r, int states, char *out, size_t n) {
         }
     } else {
         str_copy(out, n, states ? r->rules.state_dir : r->rules.save_dir);
+        /* A folder per game ("states/{game_id}"): scan from its parent. */
+        char *id = strstr(out, "/{game_id}");
+        if (id) *id = 0;
     }
 }
 
@@ -1070,6 +1136,7 @@ static void gc_learn_form(const scan_ctx *c, const local_rom *r) {
         gc_form_set(r, form, name);
         char cache[PATH_MAX_LEN];
         gc_card_cache(r->rom_id, cache, sizeof cache);
+        if (strcmp(form, "card") != 0) unlink(cache); /* RomM keeps no card for it now */
         if (!strcmp(form, "card") && !file_exists(cache) && gc_fetch((int)jget_num(pick, "id", 0), cache) == 0 &&
             !gc_is_card_file(cache)) {
             LOGW("%s: RomM's save %s isn't a GameCube memory card", path_basename(r->path), name);
@@ -1599,7 +1666,8 @@ static const char *emu_name(const profile_map *m) {
     return out;
 }
 
-/* Saves from before RomM's sync slots (no slot): its sync never offers them.
+/* Saves from before RomM's sync slots (no slot), or kept in another device's
+ * slot: this console's sync never brings them.
  * A game here with no save of its own gets the newest one, and from then on
  * syncs it in this console's slot. Never over a file that's there. */
 static int fetch_slotless_saves(scan_ctx *c, int only_rom) {
@@ -1623,24 +1691,45 @@ static int fetch_slotless_saves(scan_ctx *c, int only_rom) {
         int done_before = 0; /* another emulator's copy of the game took it */
         for (int k = 0; k < i; k++) done_before |= c->roms[k].rom_id == r->rom_id;
         if (done_before) continue;
-        const cJSON *s, *best = NULL;
-        int slotted = 0;
+        /* The newest of each kind: the save, and files beside it such as a
+         * real-time clock (.rtc), each in the slot it would sync in. */
+        struct { char slot[64]; const cJSON *s; } picks[4];
+        int np = 0, slotted = 0;
+        const cJSON *s;
         cJSON_ArrayForEach(s, all) {
             if ((int)jget_num(s, "rom_id", 0) != r->rom_id) continue;
-            if (jget_str(s, "slot", "")[0]) slotted = 1;
-            else if (ext_in_list(jget_str(s, "file_name", ""), r->map->save_exts) &&
-                     (!best || strcmp(jget_str(s, "updated_at", ""), jget_str(best, "updated_at", "")) > 0))
-                best = s;
+            if (our_slot(c, jget_str(s, "slot", ""))) { /* the sync's own */
+                slotted = 1;
+                continue;
+            }
+            const char *name = jget_str(s, "file_name", "");
+            if (!ext_in_list(name, r->map->save_exts)) continue;
+            char sl[64];
+            slot_for(c, r->map, name, sl, sizeof sl);
+            int at = -1;
+            for (int k = 0; k < np; k++)
+                if (!strcmp(picks[k].slot, sl)) at = k;
+            if (at < 0 && np < 4) {
+                at = np++;
+                str_copy(picks[at].slot, sizeof picks[at].slot, sl);
+                picks[at].s = s;
+            } else if (at >= 0 && strcmp(jget_str(s, "updated_at", ""), jget_str(picks[at].s, "updated_at", "")) > 0) {
+                picks[at].s = s;
+            }
         }
-        if (slotted || !best) continue; /* the sync's own job, or nothing to take */
-        char dest[PATH_MAX_LEN];
-        download_target(r, jget_str(best, "file_name", ""), c->slot, c, dest, sizeof dest);
-        if (file_exists(dest)) continue;
-        mkdir_parent(dest);
-        if (do_download(c, (int)jget_num(best, "id", 0), dest, NULL, r->rom_id, c->slot, 0, "",
-                        jget_str(best, "updated_at", ""), 0) == 0) {
-            n++;
-            events_add("save", "downloaded", r->rom_id, dest, emu_name(r->map), "Older save with no slot");
+        if (slotted) continue; /* the sync's own job */
+        for (int k = 0; k < np; k++) {
+            if (find_save(c, r->rom_id, picks[k].slot)) continue;
+            char dest[PATH_MAX_LEN];
+            download_target(r, jget_str(picks[k].s, "file_name", ""), picks[k].slot, c, dest, sizeof dest);
+            if (file_exists(dest)) continue;
+            mkdir_parent(dest);
+            if (do_download(c, (int)jget_num(picks[k].s, "id", 0), dest, NULL, r->rom_id, picks[k].slot, 0, "",
+                            jget_str(picks[k].s, "updated_at", ""), 0) == 0) {
+                n++;
+                events_add("save", "downloaded", r->rom_id, dest, emu_name(r->map),
+                           jget_str(picks[k].s, "slot", "")[0] ? "From another device" : "Older save with no slot");
+            }
         }
     }
     cJSON_Delete(all);
@@ -1722,9 +1811,9 @@ static int restore_missing_bundles(scan_ctx *c, int only_rom) {
         const local_rom *r = &c->roms[i];
         if (!r->rules.sync_saves || !bundle_supported(r->map->save_layout) || (only_rom && r->rom_id != only_rom)) continue;
         int done_before = 0; /* another emulator's copy of the game */
-        for (int k = 0; k < i; k++) done_before |= c->roms[k].rom_id == r->rom_id && bundle_supported(c->roms[k].map->save_layout);
+        for (int k = 0; k < i; k++) done_before |= c->roms[k].rom_id == r->rom_id && c->roms[k].rules.sync_saves && bundle_supported(c->roms[k].map->save_layout);
         char id[16];
-        bundle b;
+        bundle b = {0};
         if (done_before || rom_game_id(r, id, sizeof id) != 0 || bundle_for_rom(r, id, &b) != 0) continue;
         const int empty = b.n == 0;
         bundle_free(&b);
@@ -2069,7 +2158,19 @@ static int sync_states_down(scan_ctx *c, int only_rom) {
         if (seen) continue;
 
         const char *emulator = jget_str(s, "emulator", "");
-        const local_rom *r = find_rom_for_state(c, (int)jget_num(s, "rom_id", 0), emulator);
+        const local_rom *r = NULL;
+        if (e) { /* a state kept here: the emulator whose folder it's in (two can play the game) */
+            char folder[PATH_MAX_LEN], exp[PATH_MAX_LEN];
+            str_copy(folder, sizeof folder, path);
+            char *slash = strrchr(folder, '/');
+            if (slash) *slash = 0;
+            for (int k = 0; k < c->nroms && !r; k++)
+                if (c->roms[k].rom_id == (int)jget_num(s, "rom_id", 0) && c->roms[k].rules.sync_saves &&
+                    c->roms[k].map->sync_states && map_takes_state(c->roms[k].map, emulator) &&
+                    expected_dir(&c->roms[k], 1, exp, sizeof exp) && !strcmp(exp, folder))
+                    r = &c->roms[k];
+        }
+        if (!r) r = find_rom_for_state(c, (int)jget_num(s, "rom_id", 0), emulator);
         if (!r) {
             note_skipped_state(c, s);
             continue;
@@ -2077,13 +2178,28 @@ static int sync_states_down(scan_ctx *c, int only_rom) {
         char dir[PATH_MAX_LEN], name[256];
         if (!expected_dir(r, 1, dir, sizeof dir)) continue;
         const char *server_name = jget_str(s, "file_name", "");
-        if (!ext_in_list(server_name, r->map->state_exts)) continue;
+        /* A folder per game renames what comes down (slot1.state): any state will do. */
+        const int per_game = strstr(r->rules.state_dir, "{game_id}") != NULL;
+        const char *sx = path_ext(server_name);
+        if (per_game ? strncmp(sx, ".state", 6) != 0 : !ext_in_list(server_name, r->map->state_exts)) continue;
 
         if (e) { /* a newer version of a state we keep */
             if (file_exists(path)) {
                 char hash[33];
                 md5_file_hex(path, hash);
                 if (strcmp(hash, rec_hash) != 0) continue;
+            }
+        } else if (strstr(r->rules.state_dir, "{game_id}")) {
+            /* A folder per game holding slot1.state, slot2.state...: the first free. */
+            int k = 1;
+            for (; k < 10; k++) {
+                snprintf(name, sizeof name, "slot%d.state", k);
+                path_join(path, sizeof path, dir, name);
+                if (!state_path_taken(path, id)) break;
+            }
+            if (k == 10) {
+                LOGI("state %d skipped: no free slot in %s", id, dir);
+                continue;
             }
         } else {
             state_local_name(r, server_name, name, sizeof name);
@@ -2342,6 +2458,7 @@ static void run_sync(const char *reason, int only_rom, sync_result *res) {
         int save_id = (int)jget_num(op, "save_id", 0);
         const char *slot = jget_str(op, "slot", "");
         if (only_rom && rom_id != only_rom) continue;
+        if (!our_slot(&c, slot)) continue; /* another device's slot: its saves stay its own */
         const local_file *f = find_save(&c, rom_id, slot);
 
         const char *server_hash = jget_str(op, "server_content_hash", "");
@@ -2576,6 +2693,7 @@ static void *worker(void *arg) {
             continue;
         }
         sync_result r;
+        const unsigned mark = events_seq();
         run_and_record(reason, 0, &r);
 
         int notify = notify_on();
@@ -2586,8 +2704,11 @@ static void *worker(void *arg) {
             /* Issue #10 - Added notification and log file for memory card operations. */
             LOGI("sync done: %d up, %d down, %d conflicts, %d failed, %d states, %d cards", r.uploaded,
                  r.downloaded, r.conflicts, r.failed, r.states_up, r.cards);
-            char text[200];
-            if (notify && sync_summary(&r, text, sizeof text)) plat_notify("RommPS: %s", text);
+            char text[200], games[400];
+            if (notify && sync_summary(&r, text, sizeof text)) {
+                if (events_games(mark, 3, games, sizeof games)) plat_notify("RommPS: %s\n%s", text, games);
+                else plat_notify("RommPS: %s", text);
+            }
         }
     }
     return NULL;
@@ -2599,7 +2720,7 @@ static int sync_summary(const sync_result *r, char *out, size_t n) {
     struct { int count; const char *one, *many; } parts[] = {
         {r->uploaded, "save up", "saves up"},       {r->downloaded, "save down", "saves down"},
         {r->states_up, "state up", "states up"},    {r->states_down, "state down", "states down"},
-        {r->cards, "memory card backed up", "memory cards backed up"},
+        {r->cards, "memory card up", "memory cards up"},
         {r->conflicts, "conflict to resolve", "conflicts to resolve"}, {r->failed, "failed", "failed"}};
     size_t o = 0;
     out[0] = 0;
@@ -2874,6 +2995,7 @@ cJSON *sync_preview(char *err, int en) {
         const char *action = jget_str(op, "action", "");
         int rom_id = (int)jget_num(op, "rom_id", 0);
         const char *slot = jget_str(op, "slot", "");
+        if (!our_slot(&c, slot)) continue;
         const local_file *f = find_save(&c, rom_id, slot);
         char game[256] = "";
         if (f) rom_display_name(f->rom, game, sizeof game);
@@ -3085,14 +3207,23 @@ done:
 static void tracked_file(cJSON *games, const cJSON *roms, const profile_map *maps, int nmaps, const char *kind,
                          const cJSON *e, const cJSON *conflicts) {
     int rom_id = (int)jget_num(e, "rom_id", 0);
+    /* The game's record, one whose file is here first. */
     const cJSON *game = NULL, *g;
-    cJSON_ArrayForEach(g, roms) if ((int)jget_num(g, "rom_id", -1) == rom_id && rom_id) game = g;
+    int here = 0;
+    cJSON_ArrayForEach(g, roms) if ((int)jget_num(g, "rom_id", -1) == rom_id && rom_id) {
+        const int exists = file_exists(g->string) || dir_exists(g->string);
+        if (!game || (exists && !here)) game = g;
+        here |= exists;
+    }
     const char *platform = game ? jget_str(game, "platform_dir", "") : "";
     const char *profile = game ? jget_str(game, "profile", "") : "";
     const char *emulator = "";
     for (int i = 0; i < nmaps; i++)
         if (!strcmp(maps[i].profile_id, profile) && (!platform[0] || !strcmp(maps[i].platform_dir, platform)))
             emulator = maps[i].profile_name;
+    /* A record from an older version names its profile differently: by platform. */
+    for (int i = 0; i < nmaps && !emulator[0] && platform[0]; i++)
+        if (!strcmp(maps[i].platform_dir, platform)) emulator = maps[i].profile_name;
 
     char key[16];
     snprintf(key, sizeof key, "%d", rom_id);
@@ -3109,6 +3240,8 @@ static void tracked_file(cJSON *games, const cJSON *roms, const profile_map *map
     const char *status = "synced";
     if (cJSON_GetObjectItemCaseSensitive(conflicts, path)) {
         status = "conflict";
+    } else if (!here) { /* the game isn't on this console any more */
+        status = "no_game";
     } else if (strchr(path, '#')) { /* a save folder synced as a zip */
         status = "synced";
     } else if (!file_exists(path)) {

@@ -24,6 +24,12 @@ void events_set_sync(const char *reason);
 void events_add(const char *kind, const char *action, int rom_id, const char *path, const char *emulator,
                 const char *detail);
 
+/* Counts the entries added so far; with events_games, the games a sync touched. */
+unsigned events_seq(void);
+/* The games of the saves and states moved since events_seq() was "since":
+ * "Wind Waker, Mario Kart and 2 more" (at most "max" names). 0 if none. */
+int events_games(unsigned since, int max, char *out, size_t n);
+
 /* Newest first; rom_id 0 for every game. Caller frees. */
 cJSON *events_json(int rom_id, int limit);
 

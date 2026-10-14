@@ -38,7 +38,7 @@ if (/PlayStation/.test(navigator.userAgent)) document.documentElement.className 
       <p class="muted">RomM 5.2.0 or newer.</p>
       <label for="srv">Server address</label>
       <input id="srv" placeholder="https://romm.example.com or 192.168.1.10:8080" autocomplete="off">
-      <div class="toggle"><input type="checkbox" id="wzInsecure"><label for="wzInsecure">Skip certificate checks (for self-signed HTTPS)</label></div>
+      <div class="toggle"><input type="checkbox" id="wzInsecure"><label for="wzInsecure">Don't verify TLS certificate</label></div>
       <div class="row" style="margin-top:14px"><button class="primary" id="pairStart">Continue</button></div>
       <details style="margin-top:18px">
         <summary class="muted">Use a pairing code instead</summary>
@@ -229,7 +229,7 @@ if (/PlayStation/.test(navigator.userAgent)) document.documentElement.className 
     <div class="toggle"><input type="checkbox" id="saveSync"><label for="saveSync">Sync saves and states with RomM</label></div>
     <label for="devname">Device name</label><input id="devname">
     <div class="toggle"><input type="checkbox" id="notify"><label for="notify">Notifications</label></div>
-    <div class="toggle"><input type="checkbox" id="tls"><label for="tls">Verify TLS certificates</label></div>
+    <div class="toggle"><input type="checkbox" id="tls"><label for="tls">Verify TLS certificate</label></div>
     <label for="concurrency">Downloads at once</label><select id="concurrency"></select>
     <div id="syncOpts">
     <label for="interval">Sync every (minutes, 0 to turn off)</label><input id="interval" type="number" min="0">
@@ -399,7 +399,7 @@ function renderStatus(s) {
       : h.conflicts ? '<span class="warn">' + h.conflicts + " conflict" + (h.conflicts > 1 ? "s" : "") + "</span>"
       : '<span class="ok">OK</span>';
     if (h.failed) result += ' <span class="err">' + h.failed + " failed</span>";
-    if (h.cards_uploaded) result += " " + pill("memory card backed up");
+    if (h.cards_uploaded) result += " " + pill("memory card up");
     return "<tr><td>" + ago(h.time) + "</td><td>" + esc(h.reason) + "</td><td>" + h.uploaded + "</td><td>" + h.downloaded +
       (h.deferred ? ' <small class="muted">(' + h.deferred + " waiting for the game to close)</small>" : "") + "</td><td>" + h.states_uploaded + "</td><td>" + result + "</td></tr>";
   }).join("") || '<tr><td colspan=6 class="muted">No syncs yet.</td></tr>';
@@ -511,7 +511,7 @@ function emuCard(c) {
     (c.cores.length ? '<div class="group"><small>Cores</small><div>' + c.cores.map(function (x) { return pill(x); }).join("") + "</div></div>" : "") +
     (plats.length ? '<div class="group"><small>Platforms</small><div>' + platPills + "</div></div>" : "") +
     ($("wzSaveSync").checked ? '<div class="group"><small>Save sync</small><div><select data-sync="' + esc(c.root) + '">' +
-      [["all", "Saves and states"], ["saves", "Saves"], ["off", "Off"]].map(function (o) {
+      [["all", "Saves and states"], ["saves", "Saves"], ["off", "Off"]].concat((wz.sync || {})[c.root] === "mixed" ? [["mixed", "Per platform"]] : []).map(function (o) {
         return '<option value="' + o[0] + '"' + (((wz.sync || {})[c.root] || "all") === o[0] ? " selected" : "") + ">" + o[1] + "</option>";
       }).join("") + "</select></div></div>" : "") + "</div>";
 }
@@ -537,7 +537,8 @@ function emuConflicts() {
       if (!key) return;
       if (!by[key]) { by[key] = []; order.push(key); }
       if (by[key].some(function (o) { return o.root === c.root; })) return;
-      by[key].push({ root: c.root, label: c.name + (p.core_name ? " (" + p.core_name + ")" : ""), retroarch: c.kind === "retroarch" });
+      by[key].push({ root: c.root, label: c.name + (p.core_name ? " (" + p.core_name + ")" : ""), retroarch: c.kind === "retroarch",
+                     games: (c.dirs && c.dirs[key] && c.dirs[key].games) || 0 });
     });
   });
   return order.filter(function (k) { return by[k].length > 1; }).map(function (k) { return { key: k, options: by[k] }; });
@@ -550,8 +551,10 @@ function renderEmuChoices() {
     '<p class="muted">Pick the main emulator for each system. Tick others that should get the same games.</p>' +
     '<div class="row"><button id="allRetroarch">Use RetroArch for all</button></div>' +
     list.map(function (s) {
+      /* Not picked yet: where the system's games already are (most), else RetroArch. */
+      var most = s.options.reduce(function (b, o) { return o.games > (b ? b.games : 0) || (b && o.games === b.games && o.games > 0 && o.retroarch) ? o : b; }, null);
       var pick = prev[s.key] && s.options.some(function (o) { return o.root === prev[s.key]; }) ? prev[s.key]
-        : (s.options.filter(function (o) { return o.retroarch; })[0] || s.options[0]).root;
+        : (most || s.options.filter(function (o) { return o.retroarch; })[0] || s.options[0]).root;
       return '<div class="emu"><div class="head"><b>' + esc(systemName(s.key)) + "</b></div><small>Main</small>" + s.options.map(function (o) {
         return '<label class="toggle"><input type="radio" name="sys-' + esc(s.key) + '" data-sys="' + esc(s.key) + '" value="' + esc(o.root) + '"' +
           (o.root === pick ? " checked" : "") + ">" + esc(o.label) + "</label>";
@@ -681,7 +684,9 @@ function loadEmus() {
         return;
       }
       wz.current[p.root] = true;
-      if (p.sync) wz.sync[p.root] = p.sync;
+      // One setting for the emulator, or "mixed" when its platforms differ.
+      var modes = (p.platforms || []).map(function (e) { return e.sync || p.sync || "all"; });
+      wz.sync[p.root] = modes.every(function (m) { return m === modes[0]; }) ? (modes[0] || "all") : "mixed";
       (p.platforms || []).forEach(function (e) {
         var key = (e.romm || [])[0];
         if (!key) return;
@@ -722,7 +727,8 @@ $("wzEmus").onclick = function () {
   var custom = ownCustom(), missing = custom.filter(function (c) { return !c.rom_dir; })[0];
   if (missing) { $("pairErr").textContent = "Choose a games folder for " + missing.name + ", or turn it off."; return; }
   var sync = {};
-  each("#emus select[data-sync]", function (x) { sync[x.dataset.sync] = x.value; });
+  // Only what was changed here, so per-platform settings made in the app stay.
+  each("#emus select[data-sync]", function (x) { if (x.value !== ((wz.sync || {})[x.dataset.sync] || "all")) sync[x.dataset.sync] = x.value; });
   api("POST", "/api/setup/emulators", { roots: roots, choices: emuChoices(), also: emuAlso(), custom: custom, sync: sync })
     .then(function () { return api("POST", "/api/config", { ps2_cards: ps2Mode() }); })
     .then(function () {
@@ -1008,7 +1014,7 @@ $("histBody").onclick = function (ev) {
 
 // Activity and tracked saves
 var ACTION_PILL = { uploaded: "ok", downloaded: "ok", restored: "ok", resolved: "ok", "backed up": "ok", conflict: "warn", skipped: "off", failed: "err" };
-var STATUS_LABEL = { synced: ["In sync", "ok"], changed: ["Changed here", "warn"], conflict: ["Conflict", "warn"], missing: ["Missing", "err"] };
+var STATUS_LABEL = { synced: ["In sync", "ok"], changed: ["Changed here", "warn"], conflict: ["Conflict", "warn"], missing: ["Missing", "err"], no_game: ["Game not here", "off"] };
 function cap(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : ""; }
 function eventRow(e, withGame) {
   var what = [e.kind === "card" ? "Memory card" : cap(e.kind)];

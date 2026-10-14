@@ -179,10 +179,27 @@ void RowList::draw(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, const 
             }
             used = w + chevrons + (row.kind == RowKind::choice ? 50.0f : 24.0f);
         }
-        const float room = std::max(200.0f, bounds.w - 64 - used);
-        ui::text(list, fonts.semibold, fonts.semibold.font->fit(row.label, 26, room), x, label_y, 26, ink.with_alpha(dim));
+        // A chevron for a row that opens: right when closed, down when open.
+        const float indent = row.expander ? 30.0f : 0.0f;
+        if (row.expander)
+        {
+            const float cx = x + 8, cy = label_y - 9;
+            const Color c = ink.with_alpha(dim);
+            if (row.expander == 1)
+            {
+                list.line(cx - 3, cy - 8, cx + 4, cy, 3.0f, c);
+                list.line(cx + 4, cy, cx - 3, cy + 8, 3.0f, c);
+            }
+            else
+            {
+                list.line(cx - 8, cy - 3, cx, cy + 4, 3.0f, c);
+                list.line(cx, cy + 4, cx + 8, cy - 3, 3.0f, c);
+            }
+        }
+        const float room = std::max(200.0f, bounds.w - 64 - used - indent);
+        ui::text(list, fonts.semibold, fonts.semibold.font->fit(row.label, 26, room), x + indent, label_y, 26, ink.with_alpha(dim));
         if (two_lines)
-            ui::text(list, fonts.regular, fonts.regular.font->fit(row.detail, 19, room), x, label_y + 30, 19,
+            ui::text(list, fonts.regular, fonts.regular.font->fit(row.detail, 19, room), x + indent, label_y + 30, 19,
                      soft.with_alpha(dim));
     }
     list.pop_clip();

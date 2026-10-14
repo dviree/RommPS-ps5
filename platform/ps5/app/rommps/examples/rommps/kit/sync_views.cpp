@@ -118,6 +118,7 @@ const char *status_label(const std::string &status)
            : status == "changed"  ? "Changed here"
            : status == "conflict" ? "Conflict"
            : status == "missing"  ? "Missing"
+           : status == "no_game"  ? "Game not here"
                                   : status.c_str();
 }
 

@@ -429,6 +429,16 @@ cJSON *detect_emulators(void) {
             cJSON_AddStringToObject(d, "rom_dir", maps[i].rom_dir);
             cJSON_AddStringToObject(d, "save_dir", maps[i].save_dir);
             cJSON_AddStringToObject(d, "state_dir", maps[i].state_dir);
+            /* Games already there, so setup can pick the emulator they're in. */
+            int games = 0;
+            DIR *g = opendir(maps[i].rom_dir);
+            struct dirent *ge;
+            while (g && (ge = readdir(g)))
+                if (ge->d_name[0] != '.' && !ext_in_list(ge->d_name, maps[i].save_exts) &&
+                    !ext_in_list(ge->d_name, maps[i].state_exts) && !ext_in_list(ge->d_name, ".part,.tmp,.txt,.png,.jpg,.xml"))
+                    games++;
+            if (g) closedir(g);
+            cJSON_AddNumberToObject(d, "games", games);
         }
         free(maps);
         cJSON_Delete(one);
@@ -438,9 +448,42 @@ cJSON *detect_emulators(void) {
     return out;
 }
 
+/* Keys a newer preset has that a saved profile lacks (a state folder added
+ * to Porpoise's, say) are added to it. Nothing already there changes, so
+ * folders the user picked stay. */
+static int fill_from_catalog(cJSON *p) {
+    const cJSON *entry = detect_catalog_entry(jget_str(p, "id", ""));
+    const cJSON *preset = entry ? cJSON_GetObjectItemCaseSensitive(entry, "profile") : NULL, *k;
+    cJSON *pe;
+    if (!preset) return 0;
+    int added = 0;
+    cJSON_ArrayForEach(k, preset)
+        if (strcmp(k->string, "platforms") && !cJSON_GetObjectItemCaseSensitive(p, k->string)) {
+            cJSON_AddItemToObject(p, k->string, cJSON_Duplicate(k, 1));
+            added++;
+        }
+    cJSON_ArrayForEach(pe, cJSON_GetObjectItemCaseSensitive(p, "platforms")) {
+        const cJSON *first = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(pe, "romm"), 0), *ce;
+        if (!cJSON_IsString(first)) continue;
+        cJSON_ArrayForEach(ce, cJSON_GetObjectItemCaseSensitive(preset, "platforms")) {
+            const cJSON *cf = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(ce, "romm"), 0);
+            if (!cJSON_IsString(cf) || strcmp(cf->valuestring, first->valuestring)) continue;
+            cJSON_ArrayForEach(k, ce)
+                if (!cJSON_GetObjectItemCaseSensitive(pe, k->string)) {
+                    cJSON_AddItemToObject(pe, k->string, cJSON_Duplicate(k, 1));
+                    added++;
+                }
+        }
+    }
+    if (added) LOGI("the %s profile got %d setting%s from its newer preset", jget_str(p, "name", ""), added, added == 1 ? "" : "s");
+    return added;
+}
+
 int detect_refresh_profiles(cJSON *profiles) {
     int changed = 0;
     cJSON *found = NULL;
+    cJSON *each;
+    cJSON_ArrayForEach(each, profiles) changed += fill_from_catalog(each) > 0;
     for (int i = 0; i < cJSON_GetArraySize(profiles); i++) {
         cJSON *p = cJSON_GetArrayItem(profiles, i);
         const char *id = jget_str(p, "id", "");
@@ -461,6 +504,15 @@ int detect_refresh_profiles(cJSON *profiles) {
             if (extra) cJSON_AddItemToObject(fresh, "extra", cJSON_Duplicate(extra, 1));
             const cJSON *mode = cJSON_GetObjectItemCaseSensitive(p, "sync");
             if (cJSON_IsString(mode)) cJSON_AddStringToObject(fresh, "sync", mode->valuestring);
+            /* ... and each platform's. */
+            cJSON *fe;
+            cJSON_ArrayForEach(fe, cJSON_GetObjectItemCaseSensitive(fresh, "platforms")) {
+                const cJSON *pe, *m;
+                cJSON_ArrayForEach(pe, cJSON_GetObjectItemCaseSensitive(p, "platforms"))
+                    if (!strcmp(profiles_system_key(pe), profiles_system_key(fe)) &&
+                        cJSON_IsString(m = cJSON_GetObjectItemCaseSensitive(pe, "sync")))
+                        cJSON_AddStringToObject(fe, "sync", m->valuestring);
+            }
             LOGI("updated the %s profile for %s", jget_str(fresh, "name", ""), jget_str(p, "root", ""));
             cJSON_ReplaceItemInArray(profiles, i, fresh);
             changed++;

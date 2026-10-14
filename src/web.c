@@ -1079,22 +1079,33 @@ static void route(request *r) {
             }
             cJSON_AddItemToArray(profiles, p);
         }
-        /* Each emulator's save sync ("sync": {root: "off" | "saves" | "all"}),
-         * or what it was before. */
+        /* Save sync per platform, on each platform entry ("sync": "off" or
+         * "saves"; none is everything): "systems"{key}{"sync"} from the app,
+         * else "sync"{root} (the web UI, per emulator), else what it was. */
         const cJSON *modes = cJSON_GetObjectItemCaseSensitive(j, "sync");
         config_lock();
         cJSON *pr;
         cJSON_ArrayForEach(pr, profiles) {
             const char *at = jget_str(pr, "root", "");
-            const char *mode = jget_str(modes, at, NULL);
-            const cJSON *old;
-            cJSON_ArrayForEach(old, g_cfg.profiles) if (!mode && !strcmp(jget_str(old, "root", ""), at) &&
-                                                        !strcmp(jget_str(old, "id", ""), jget_str(pr, "id", "")))
-                mode = jget_str(old, "sync", NULL);
-            char keep[8] = "";
-            if (mode && (!strcmp(mode, "off") || !strcmp(mode, "saves"))) str_copy(keep, sizeof keep, mode);
+            const cJSON *old = NULL, *o;
+            cJSON_ArrayForEach(o, g_cfg.profiles) if (!strcmp(jget_str(o, "root", ""), at) &&
+                                                      !strcmp(jget_str(o, "id", ""), jget_str(pr, "id", "")))
+                old = o;
+            cJSON *pe;
+            cJSON_ArrayForEach(pe, cJSON_GetObjectItemCaseSensitive(pr, "platforms")) {
+                const char *key = profiles_system_key(pe);
+                const char *mode = jget_str(cJSON_GetObjectItemCaseSensitive(systems, key), "sync", NULL);
+                if (!mode) mode = jget_str(modes, at, NULL);
+                const cJSON *oe;
+                cJSON_ArrayForEach(oe, cJSON_GetObjectItemCaseSensitive(old, "platforms")) if (!mode && !strcmp(profiles_system_key(oe), key))
+                    mode = jget_str(oe, "sync", NULL);
+                if (!mode) mode = jget_str(old, "sync", NULL);
+                char keep[8] = "";
+                if (mode && (!strcmp(mode, "off") || !strcmp(mode, "saves"))) str_copy(keep, sizeof keep, mode);
+                cJSON_DeleteItemFromObjectCaseSensitive(pe, "sync");
+                if (keep[0]) cJSON_AddStringToObject(pe, "sync", keep);
+            }
             cJSON_DeleteItemFromObjectCaseSensitive(pr, "sync");
-            if (keep[0]) cJSON_AddStringToObject(pr, "sync", keep);
         }
         config_unlock();
         cJSON_Delete(found);
@@ -1119,7 +1130,7 @@ static void route(request *r) {
         return;
     }
     if (is_post && !strcmp(r->path, "/api/emulators/sync")) {
-        /* One emulator's save sync: {"root", "sync": "off" | "saves" | "all"}. */
+        /* One emulator's save sync, for every platform it plays: {"root", "sync": "off" | "saves" | "all"}. */
         cJSON *j = body_json(r), *p;
         const char *at = jget_str(j, "root", ""), *mode = jget_str(j, "sync", "");
         int found = 0, rc = -1;
@@ -1129,7 +1140,11 @@ static void route(request *r) {
                 if (strcmp(jget_str(p, "root", ""), at) != 0) continue;
                 found = 1;
                 cJSON_DeleteItemFromObjectCaseSensitive(p, "sync");
-                if (strcmp(mode, "all") != 0) cJSON_AddStringToObject(p, "sync", mode);
+                cJSON *pe; /* every platform it plays */
+                cJSON_ArrayForEach(pe, cJSON_GetObjectItemCaseSensitive(p, "platforms")) {
+                    cJSON_DeleteItemFromObjectCaseSensitive(pe, "sync");
+                    if (strcmp(mode, "all") != 0) cJSON_AddStringToObject(pe, "sync", mode);
+                }
             }
             if (found) {
                 g_cfg.profiles_custom = 1;
@@ -1269,7 +1284,7 @@ static void route(request *r) {
     }
     if (is_get && !strcmp(r->path, "/api/installed")) {
         int limit = qint(r, "limit", 20);
-        send_json(fd, 200, library_installed(limit < 1 || limit > 200 ? 20 : limit));
+        send_json(fd, 200, library_installed(limit < 1 ? 20 : limit > 5000 ? 5000 : limit));
         return;
     }
     if (is_post && !strcmp(r->path, "/api/download")) {

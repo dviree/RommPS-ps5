@@ -72,6 +72,7 @@
     "note": "Dolphin, with its user folder in {root}/saves/User.",
     "profile": {
       "root": "/data/porpoise", "rom_dir": "{root}/games", "save_dir": "{root}/saves/User",
+      "state_dir": "{root}/states/{game_id}", "state_exts": ".state", "state_format": "raw",
       "platforms": [
         {"romm": ["ngc", "gamecube"], "dir": "gamecube", "emulator": "dolphin", "save_layout": "gci", "bundle_dirs": "{root}/saves/User/GC"},
         {"romm": ["wii"], "dir": "wii", "emulator": "dolphin", "save_layout": "wii", "bundle_dirs": "{root}/saves/User/Wii"}

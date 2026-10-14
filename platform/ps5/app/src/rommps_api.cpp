@@ -53,6 +53,7 @@ struct OpenSocket {
     ~OpenSocket() {
         int expected = fd;
         g_open_fd.compare_exchange_strong(expected, -1);
+        ::close(fd);
     }
 };
 }  // namespace
@@ -145,10 +146,10 @@ Api::~Api() {
     thread_.join();
 }
 
-void Api::get(const std::string &path, Callback done) {
+void Api::get(const std::string &path, Callback done, int timeout_ms) {
     {
         std::lock_guard<std::mutex> g(lock_);
-        queue_.push_back(Job{"GET", path, "", std::move(done), {}});
+        queue_.push_back(Job{"GET", path, "", std::move(done), {}, timeout_ms});
     }
     wake_.notify_one();
 }
@@ -187,7 +188,7 @@ void Api::worker() {
             queue_.pop_front();
             in_flight_ = 1;
         }
-        job.result = http_request(host_, port_, job.method, job.path, job.body);
+        job.result = http_request(host_, port_, job.method, job.path, job.body, job.timeout_ms);
         std::lock_guard<std::mutex> g(lock_);
         in_flight_ = 0;
         finished_.push_back(std::move(job));

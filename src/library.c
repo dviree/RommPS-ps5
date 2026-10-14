@@ -935,6 +935,27 @@ static void backfill_installed(void) {
     }
 }
 
+/* A game's size here: its file, or everything in its folder. */
+static double local_size(const char *path, int depth) {
+    if (!dir_exists(path)) return (double)(file_size(path) > 0 ? file_size(path) : 0);
+    double total = 0;
+    DIR *d = depth < 3 ? opendir(path) : NULL;
+    struct dirent *de;
+    while (d && (de = readdir(d))) {
+        if (de->d_name[0] == '.') continue;
+        char p[PATH_MAX_LEN];
+        path_join(p, sizeof p, path, de->d_name);
+        total += local_size(p, depth + 1);
+    }
+    if (d) closedir(d);
+    return total;
+}
+
+static int newest_first(const void *a, const void *b) {
+    double x = jget_num(*(cJSON *const *)a, "played", 0), y = jget_num(*(cJSON *const *)b, "played", 0);
+    return x < y ? 1 : x > y ? -1 : 0;
+}
+
 cJSON *library_installed(int limit) {
     backfill_installed();
     cJSON *out = cJSON_CreateArray();
@@ -960,22 +981,31 @@ cJSON *library_installed(int limit) {
         cJSON_AddStringToObject(o, "cover", jget_str(e, "cover", ""));
         cJSON_AddStringToObject(o, "profile", jget_str(e, "profile", ""));
         cJSON_AddNumberToObject(o, "played", played);
+        cJSON_AddStringToObject(o, "path", e->string); /* sized below, off the lock */
         cJSON_AddItemToArray(out, o);
     }
     state_unlock();
-    /* Newest first (a handful of games: a simple selection sort will do). */
-    int n = cJSON_GetArraySize(out);
+    /* Newest first. */
+    int n = cJSON_GetArraySize(out), k = 0;
+    cJSON **all = malloc(sizeof *all * (size_t)(n ? n : 1)), *o;
     cJSON *sorted = cJSON_CreateArray();
-    for (int k = 0; k < n && k < limit; k++) {
-        int best = -1;
-        double top = -1;
-        for (int i = 0; i < cJSON_GetArraySize(out); i++) {
-            double t = jget_num(cJSON_GetArrayItem(out, i), "played", 0);
-            if (t > top) top = t, best = i;
-        }
-        cJSON_AddItemToArray(sorted, cJSON_DetachItemFromArray(out, best));
+    if (!all) {
+        cJSON_Delete(out);
+        return sorted;
     }
+    while ((o = cJSON_DetachItemFromArray(out, 0))) all[k++] = o;
     cJSON_Delete(out);
+    qsort(all, (size_t)n, sizeof *all, newest_first);
+    for (k = 0; k < n; k++) {
+        if (k < limit) {
+            cJSON_AddNumberToObject(all[k], "size", local_size(jget_str(all[k], "path", ""), 0));
+            cJSON_DeleteItemFromObjectCaseSensitive(all[k], "path");
+            cJSON_AddItemToArray(sorted, all[k]);
+        } else {
+            cJSON_Delete(all[k]);
+        }
+    }
+    free(all);
     return sorted;
 }
 

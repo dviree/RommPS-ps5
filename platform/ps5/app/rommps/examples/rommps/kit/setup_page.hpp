@@ -80,6 +80,7 @@ class SetupPage
         // Its folders for each system when left as they are (detection's
         // "dirs"): games, saves, states; and which it doesn't let you change.
         std::map<std::string, std::array<std::string, 3>> dirs;
+        std::map<std::string, int> games; // games already in its folder, by system
         std::set<std::string> fixed; // "rom_dir", "save_dir", "state_dir"
     };
     // What a row of the emulator step does.
@@ -89,7 +90,8 @@ class SetupPage
         {
             kNone,
             kEmulator,
-            kEmuSync, // an emulator's save sync
+            kEmuSync, // an emulator's save sync (unused since save sync is per platform)
+            kSysSync, // a platform's save sync
             kMain,
             kAlso,
             kPs2,
@@ -130,8 +132,11 @@ class SetupPage
     void load_autostart(App &app);
     std::vector<Conflict> conflicts() const; // systems several emulators on play
     std::vector<Conflict> systems() const;   // every system an emulator on plays, by name
-    // The root of the emulator that keeps a system: the one picked, else RetroArch, else the first.
+    // The root of the emulator that keeps a system: the one picked ("" when
+    // it's off), else RetroArch, else the first.
     std::string chosen(const Conflict &conflict) const;
+    // Whether an emulator plays a system, as the main one or an extra.
+    bool used(const Emulator &e) const;
     // Rows above the emulators': their heading, or a message instead of them.
     int lead() const { return 1; }
     std::vector<Row> emulator_rows(const App &app, std::vector<RowRef> *refs = nullptr) const;
@@ -177,7 +182,11 @@ class SetupPage
     // 3
     std::vector<Emulator> emulators_;
     bool emulators_loaded_ = false;
-    std::map<std::string, std::string> choices_; // system key -> the root of its main emulator
+    float retry_in_ = 0.0f; // after an error: looking again (the service may have been restarting)
+    std::map<std::string, std::string> choices_; // system key -> the root of its main emulator ("": off)
+    std::map<std::string, std::string> sync_;    // system key -> its save sync: "all", "saves" or "off"
+    std::string expanded_;                       // the system whose details show
+    int focus_expander_ = 0;                     // the focused row's chevron (for the hint): 0, 1 closed, 2 open
     std::map<std::string, std::set<std::string>> also_; // system key -> roots of its extra emulators
     // Folders picked for a system in an emulator, instead of the ones found:
     // system key -> emulator root -> games, saves, states ("" keeps that one).

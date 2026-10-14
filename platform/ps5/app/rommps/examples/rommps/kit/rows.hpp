@@ -37,6 +37,7 @@ struct Row
     bool on = false;    // a toggle's state
     bool enabled = true;
     bool danger = false; // an action that can't be undone
+    int expander = 0;    // 1: closed, 2: open: a chevron before the label (Cross opens what's under it)
 };
 
 struct RowEvent

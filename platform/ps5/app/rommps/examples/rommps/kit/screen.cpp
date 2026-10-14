@@ -67,7 +67,7 @@ enum Tab
 constexpr const char *kTabNames[kTabs] = {"Home", "Library", "Downloads", "Settings"};
 
 constexpr const char *kTechniques[] = {
-    "The RomM Sync payload's state, read through its local API on a worker thread",
+    "The background service's state, read through its local API on a worker thread",
     "Covers fetched once, decoded a few per frame, their colours driving the backdrop",
     "Spring-driven shelves, card growth and a gliding focus ring (from Aurora Shelf)",
     "Frosted details sheet over the blurred screen",
@@ -366,7 +366,7 @@ class RommPS final : public app::Concept
     {
         std::string label;
         bool enabled;
-        int kind; // 0 download, 1 cancel, 2 close, 3 remove, 4 saves and states
+        int kind; // 0 download, 1 cancel, 3 remove, 4 saves and states (Circle closes the sheet)
     };
 
     std::vector<SheetAction> sheet_actions() const
@@ -381,14 +381,13 @@ class RommPS final : public app::Concept
             actions.push_back({"Hold to cancel download", true, 1});
         else if (g && g->installed)
         {
-            actions.push_back({"Saves and states", true, 4});
             actions.push_back({"Hold to delete this game", true, 3});
+            actions.push_back({"Saves and states", true, 4});
         }
         else if (p && p->profile.empty())
             actions.push_back({"No emulator for this platform", false, 0});
         else
             actions.push_back({"Download", true, 0});
-        actions.push_back({"Close", true, 2});
         return actions;
     }
 
@@ -585,8 +584,8 @@ class RommPS final : public app::Concept
         const rommps::Status &s = app_.status();
         const bool old_payload = s.reachable && app_.payload_too_old();
         std::string where = !s.known       ? "Connecting"
-                            : !s.reachable ? "RomM Sync isn't running"
-                            : old_payload  ? "Updating RomM Sync " + s.version
+                            : !s.reachable ? "The background service isn't running"
+                            : old_payload  ? "Updating the background service " + s.version
                             : s.paired     ? s.user + " @ " + s.server
                                            : "Not paired";
         const float dot_x = 1824 - 12 - ui::text(list, fonts.regular, context_.fonts.regular.font->fit(where, 22, 640), 1824, 90,
@@ -614,12 +613,12 @@ class RommPS final : public app::Concept
         const float x = panel.x + 72;
         const bool starting = app_.payload_starting() || (s.known && !s.reachable && app_.payload_error().empty());
         ui::text(list, fonts.display,
-                 !s.known ? "Connecting to RomM Sync" : starting ? "Starting RomM Sync" : "RomM Sync isn't running", x,
+                 !s.known ? "Connecting to the background service" : starting ? "Starting the background service" : "The background service isn't running", x,
                  panel.y + 120, 56, L.panel_text);
         ui::paragraph(list, fonts.regular,
-                      starting ? "RomM Sync does the syncing in the background, and RommPS starts it for you. "
+                      starting ? "RommPS syncs through a background service, and starts it for you. "
                                  "This takes a few seconds."
-                               : "RommPS couldn't start RomM Sync. Press Cross to try again, or load romm-sync.elf "
+                               : "RommPS couldn't start its background service. Press Cross to try again, or load romm-sync.elf "
                                  "with your HEN's payload loader.",
                       x, panel.y + 190, 28, 1060, 42, L.panel_muted, 4);
         if (!starting && !app_.payload_error().empty())

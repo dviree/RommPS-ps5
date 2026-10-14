@@ -42,6 +42,8 @@ struct Cover
     bool requested = false;
     bool failed = false;
     double used = 0; // when it was last drawn
+    double retry_at = 0; // a fetch that failed (not a missing cover) is tried again then
+    int retries = 0;     // tries again so far this launch (kCoverRetries at most)
 };
 
 struct Game
@@ -216,7 +218,7 @@ class App
     // (assets/rommps/romm-sync.elf, version kMinPayload): it starts it when
     // none is running, puts it in place of an older one (never of a newer
     // one), and keeps the copies the console starts it from up to date.
-    static constexpr const char *kMinPayload = "1.1.1";
+    static constexpr const char *kMinPayload = "1.2.0";
     bool payload_too_old() const;
     void start_payload(); // sends the payload to the HEN's loader
     // Sending it, or RomM Sync is running and not answering yet (starting up,
@@ -276,8 +278,12 @@ class App
     // Asks for the status now rather than at the next tick.
     void refresh_now() { refresh_status(); }
 
-    // Any other call to the payload, for the setup's steps.
-    void get(const std::string &path, Api::Callback done) { api_.get(path, std::move(done)); }
+    // Any other call to the payload, for the setup's steps. A long one (the
+    // sync preview) goes on a worker of its own, so the status never waits.
+    void get(const std::string &path, Api::Callback done, int timeout_ms = 15000)
+    {
+        (timeout_ms > 15000 ? slow_api_ : api_).get(path, std::move(done), timeout_ms);
+    }
     void post(const std::string &path, const std::string &body, Api::Callback done)
     {
         api_.post(path, body, std::move(done));
@@ -303,6 +309,7 @@ class App
     void refresh_downloads();
 
     Api api_;
+    Api slow_api_; // calls that may take minutes
     // Covers on workers of their own, so lists never wait behind them; asked
     // for only while they're on screen (wanted_), newest first.
     static constexpr int kCoverWorkers = 3;

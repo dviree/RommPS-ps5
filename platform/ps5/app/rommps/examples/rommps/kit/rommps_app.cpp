@@ -33,6 +33,7 @@ namespace
 constexpr float kStatusEvery = 3.0f;
 constexpr float kDownloadsEvery = 1.0f;     // while one is running
 constexpr float kDownloadsIdleEvery = 5.0f; // otherwise
+constexpr int kCoverRetries = 3;            // a failed cover is tried again after 15, 30, 60 s
 constexpr int kDecodesPerFrame = 2;         // covers turned into textures each frame
 constexpr std::size_t kCoverTextures = 360; // covers kept as textures (about 130 MB); the
                                             // least recently drawn go, and come back from
@@ -196,6 +197,7 @@ void App::tick(float dt, hui::gfx::Renderer *renderer)
 {
     clock_ += dt;
     api_.poll();
+    slow_api_.poll();
     for (Api &a : covers_api_)
         a.poll();
     for (Api &a : pages_api_)
@@ -213,6 +215,8 @@ void App::tick(float dt, hui::gfx::Renderer *renderer)
         if (covers_in_flight_ >= kCoversInFlight)
             break;
         Cover &c = covers_[path];
+        if (c.failed && c.retry_at > 0 && clock_ >= c.retry_at)
+            c.requested = c.failed = false, c.retry_at = 0; // try again
         if (c.requested)
             continue;
         c.requested = true;
@@ -223,7 +227,14 @@ void App::tick(float dt, hui::gfx::Renderer *renderer)
             if (r.ok() && !r.body.empty())
                 to_decode_.push_back({path, r.body});
             else
-                covers_[path].failed = true;
+            {
+                Cover &c = covers_[path];
+                c.failed = true;
+                // RomM has no cover: that stays. Anything else (the service
+                // busy, a network hiccup): again in a little while.
+                const bool again = r.status != 404 && c.retries < kCoverRetries;
+                c.retry_at = again ? clock_ + 15.0 * (1 << c.retries++) : 0;
+            }
         });
     }
     wanted_.clear();
@@ -253,7 +264,7 @@ void App::tick(float dt, hui::gfx::Renderer *renderer)
     else if (start_state_ == 3)
     {
         start_state_ = 0;
-        say("Couldn't start RomM Sync: " + start_error_);
+        say("Couldn't start RommPS's background service: " + start_error_);
     }
 
     // A few covers a frame become textures; the rest wait their turn, so a
@@ -321,7 +332,7 @@ void App::start_payload()
     const std::string &elf = bundled_payload();
     if (elf.size() < 4 || elf.compare(0, 4, "\x7f" "ELF") != 0)
     {
-        start_error_ = "this RommPS doesn't carry the RomM Sync payload";
+        start_error_ = "this RommPS doesn't carry its background service";
         start_state_ = 3;
         return;
     }
@@ -365,7 +376,7 @@ void App::repair_autostart()
         {
             install_autostart([this](const Response &a) {
                 if (a.ok())
-                    say("RomM Sync now starts with the console. You can turn this off in Set up again.");
+                    say("RommPS now starts with the console. You can turn this off in Set up again.");
             });
             return;
         }
@@ -377,7 +388,7 @@ void App::repair_autostart()
             return;
         api_.post("/api/autostart/install", bundled_payload(), [this](const Response &a) {
             if (!a.ok())
-                say("Couldn't update RomM Sync's autostart: " + a.message());
+                say("Couldn't update RommPS's autostart: " + a.message());
         });
     });
 }
@@ -465,7 +476,7 @@ void App::refresh_status()
         if (payload_too_old() && !updated_payload_ && idle)
         {
             updated_payload_ = true;
-            say("Updating RomM Sync to " + std::string(kMinPayload));
+            say("Updating RommPS's background service to " + std::string(kMinPayload));
             start_payload();
         }
         else if (!repaired_ && version_cmp(status_.version, kMinPayload) == 0)
@@ -716,7 +727,7 @@ const Details &App::details(int rom_id)
 
 void App::refresh_installed()
 {
-    api_.get("/api/installed?limit=30", [this](const Response &r) {
+    api_.get("/api/installed?limit=1000", [this](const Response &r) { // every one: the shelf's count is theirs
         if (!r.ok())
             return;
         std::unique_ptr<cJSON, void (*)(cJSON *)> j(r.json(), cJSON_Delete);
@@ -730,6 +741,7 @@ void App::refresh_installed()
             game.name = plain(str(g, "name"));
             game.fs_name = str(g, "fs_name");
             game.cover = str(g, "cover");
+            game.size = num(g, "size");
             game.installed = true;
             list.push_back(std::move(game));
         }
@@ -955,10 +967,10 @@ void App::refresh_update()
             if (u.state == "error")
                 say("Update: " + (u.error.empty() ? u.message : u.error));
             else if (u.available)
-                say(u.self_update ? "RomM Sync " + u.latest + " is available"
+                say(u.self_update ? "RommPS " + u.latest + " is available"
                                   : "RommPS " + u.latest + " is available in ProsperoStore");
             else if (u.state == "idle")
-                say("RomM Sync is up to date");
+                say("RommPS is up to date");
             else if (!u.message.empty())
                 say(u.message);
         }

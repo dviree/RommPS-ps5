@@ -1,6 +1,7 @@
 #include "events.h"
 
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -13,6 +14,7 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static cJSON *g_events; /* oldest first */
 static char g_sync[64] = "";
 static int g_dirty;
+static unsigned g_seq; /* entries ever added */
 
 static void path_of(char *out, size_t n) { path_join(out, n, plat_data_dir(), "events.json"); }
 
@@ -61,9 +63,51 @@ void events_add(const char *kind, const char *action, int rom_id, const char *pa
     if (!g_events) g_events = cJSON_CreateArray();
     cJSON_AddStringToObject(e, "sync", g_sync);
     cJSON_AddItemToArray(g_events, e);
+    g_seq++;
     while (cJSON_GetArraySize(g_events) > EVENTS_MAX) cJSON_DeleteItemFromArray(g_events, 0);
     g_dirty = 1;
     pthread_mutex_unlock(&g_lock);
+}
+
+unsigned events_seq(void) {
+    pthread_mutex_lock(&g_lock);
+    unsigned s = g_seq;
+    pthread_mutex_unlock(&g_lock);
+    return s;
+}
+
+int events_games(unsigned since, int max, char *out, size_t n) {
+    int ids[64], nids = 0;
+    pthread_mutex_lock(&g_lock);
+    int size = g_events ? cJSON_GetArraySize(g_events) : 0;
+    unsigned added = g_seq - since;
+    for (int i = added < (unsigned)size ? size - (int)added : 0; i < size && nids < 64; i++) {
+        const cJSON *e = cJSON_GetArrayItem(g_events, i);
+        const char *a = jget_str(e, "action", "");
+        int id = (int)jget_num(e, "rom_id", 0), seen = 0;
+        if (!id || !(!strcmp(a, "uploaded") || !strcmp(a, "downloaded") || !strcmp(a, "conflict") || !strcmp(a, "failed")))
+            continue;
+        for (int k = 0; k < nids; k++) seen |= ids[k] == id;
+        if (!seen) ids[nids++] = id;
+    }
+    pthread_mutex_unlock(&g_lock);
+    size_t o = 0;
+    int named = 0, more = 0;
+    out[0] = 0;
+    state_lock();
+    const cJSON *roms = state_section("roms"), *r;
+    for (int k = 0; k < nids; k++) {
+        const char *name = "";
+        cJSON_ArrayForEach(r, roms) if ((int)jget_num(r, "rom_id", 0) == ids[k] && jget_str(r, "name", "")[0])
+            name = jget_str(r, "name", "");
+        if (!name[0]) continue;
+        if (named == max) { more++; continue; }
+        if (o < n) o += (size_t)snprintf(out + o, n - o, "%s%s", named ? ", " : "", name);
+        named++;
+    }
+    state_unlock();
+    if (more && o < n) snprintf(out + o, n - o, " and %d more", more);
+    return named > 0;
 }
 
 cJSON *events_json(int rom_id, int limit) {

@@ -421,7 +421,9 @@ void LibraryPage::draw_platforms(hui::gfx::DrawList &list, const hui::ui::Fonts 
     {
         const float in = tween::stagger(age, 1, 0.08f, 0.6f);
         list.push_opacity(in);
-        ui::text(list, fonts.semibold, "On this console", kMargin, 190, 24, section_ == 0 ? look.text : look.muted);
+        char here[64];
+        std::snprintf(here, sizeof here, "On this console  \xC2\xB7  %d", static_cast<int>(recent.size()));
+        ui::text(list, fonts.semibold, here, kMargin, 190, 24, section_ == 0 ? look.text : look.muted);
         list.push_clip({0, 150, 1920, 330});
         for (int i = 0; i < static_cast<int>(recent.size()); ++i)
         {
