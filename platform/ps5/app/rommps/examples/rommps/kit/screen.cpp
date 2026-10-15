@@ -10,10 +10,9 @@
 //   - L1 / R1 move between Home, Library, Queue and Settings.
 //   - Home: the sync at a glance; Cross syncs now. Beside it: the conflicts
 //     to settle, the sync log and the saves kept in sync (sync_views.hpp).
-//   - Library (library_page.hpp): the games on this console and RomM's
-//     platforms; a platform's games in a grid with an A to Z bar; search. The
-//     backdrop eases toward the focused cover's colours; Cross opens a frosted
-//     sheet to download the game.
+//   - Library (library_page.hpp): RomM's platforms; a platform's games in a
+//     grid with an A to Z bar; search. The backdrop eases toward the focused
+//     cover's colours; Cross opens a frosted sheet to download the game.
 //   - Queue: what's queued and running; Cross cancels one.
 //   - Settings: the look, the payload's settings, its updates, the setup.
 //

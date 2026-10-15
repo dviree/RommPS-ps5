@@ -26,8 +26,9 @@ using hui::gfx::Rect;
 
 constexpr float kMargin = 96.0f;
 
-// "On this console"
-constexpr float kRecentW = 150.0f, kRecentH = 200.0f, kRecentGap = 22.0f;
+// The platform tiles start right under the page's heading.
+constexpr float kPlatformTop = 196.0f;
+
 // Platform tiles
 constexpr int kTileCols = 4;
 constexpr float kTileW = 408.0f, kTileH = 220.0f, kTileGap = 32.0f, kTilePitch = kTileH + kTileGap;
@@ -201,10 +202,9 @@ LibraryPage::LibraryPage()
     keys_.set_bounds({360, 610, 1200, 370});
 }
 
-void LibraryPage::enter(App &app)
+void LibraryPage::enter(App &)
 {
     mode_age_ = 0.0f;
-    app.refresh_installed();
     if (mode_ == kSearch)
         mode_ = before_search_;
 }
@@ -218,13 +218,6 @@ void LibraryPage::refuse(hui::ui::Feedback &feedback)
 
 const Game *LibraryPage::focused(App &app) const
 {
-    if (mode_ == kPlatforms)
-    {
-        const auto &recent = app.installed();
-        if (section_ == 0 && recent_ >= 0 && recent_ < static_cast<int>(recent.size()))
-            return &recent[static_cast<std::size_t>(recent_)];
-        return nullptr;
-    }
     if (mode_ == kGrid)
         return grid(app).at(index_);
     return nullptr;
@@ -234,7 +227,7 @@ std::string LibraryPage::backdrop_cover(App &app) const
 {
     if (const Game *g = focused(app))
         return g->cover;
-    if (mode_ == kPlatforms && section_ == 1)
+    if (mode_ == kPlatforms)
     {
         const auto &platforms = app.platforms();
         if (tile_ >= 0 && tile_ < static_cast<int>(platforms.size()))
@@ -253,7 +246,7 @@ bool LibraryPage::update(App &app, const hui::InputFrame &input, float dt, hui::
     switch (mode_)
     {
     case kPlatforms:
-        update_platforms(app, input, feedback, details);
+        update_platforms(app, input, feedback);
         break;
     case kGrid:
         update_grid(app, input, feedback, details);
@@ -263,16 +256,13 @@ bool LibraryPage::update(App &app, const hui::InputFrame &input, float dt, hui::
         break;
     }
     // Scrolling.
-    const int tile_rows = std::max(1, static_cast<int>((1000.0f - platforms_top(app) - 24.0f) / kTilePitch));
+    const int tile_rows = std::max(1, static_cast<int>((1000.0f - kPlatformTop - 24.0f) / kTilePitch));
     const int tile_row = tile_ / kTileCols;
     if (tile_row < tiles_scroll_.target)
         tiles_scroll_.target = static_cast<float>(tile_row);
     if (tile_row > tiles_scroll_.target + static_cast<float>(tile_rows - 1))
         tiles_scroll_.target = static_cast<float>(tile_row - tile_rows + 1);
     tiles_scroll_.update(dt, 14.0f);
-    recent_scroll_.reveal(static_cast<float>(recent_) * (kRecentW + kRecentGap),
-                          static_cast<float>(recent_) * (kRecentW + kRecentGap) + kRecentW, 1728.0f, 120.0f);
-    recent_scroll_.update(dt, 14.0f);
     grid_scroll_.target = static_cast<float>(std::max(0, index_ / kCols - 1));
     grid_scroll_.update(dt, 14.0f);
     const Game *g = focused(app);
@@ -287,19 +277,10 @@ bool LibraryPage::update(App &app, const hui::InputFrame &input, float dt, hui::
 
 // ------------------------------------------------------------------ platforms
 
-float LibraryPage::platforms_top(App &app) const
+void LibraryPage::update_platforms(App &app, const hui::InputFrame &input, hui::ui::Feedback &feedback)
 {
-    return app.installed().empty() ? 196.0f : 486.0f;
-}
-
-void LibraryPage::update_platforms(App &app, const hui::InputFrame &input, hui::ui::Feedback &feedback, bool &details)
-{
-    const auto &recent = app.installed();
     const auto &platforms = app.platforms();
-    const int nrecent = static_cast<int>(recent.size()), ntiles = static_cast<int>(platforms.size());
-    if (nrecent == 0)
-        section_ = 1;
-    recent_ = std::clamp(recent_, 0, std::max(0, nrecent - 1));
+    const int ntiles = static_cast<int>(platforms.size());
     tile_ = std::clamp(tile_, 0, std::max(0, ntiles - 1));
 
     // The covers of the tiles in view.
@@ -308,99 +289,52 @@ void LibraryPage::update_platforms(App &app, const hui::InputFrame &input, hui::
         app.ensure(app.games(platforms[static_cast<std::size_t>(i)].id, ""), 0, 0);
 
     const bool repeat = input.nav_repeat;
-    if (section_ == 0)
+    switch (input.nav)
     {
-        switch (input.nav)
+    case Direction::left:
+    case Direction::right:
+    {
+        const int col = tile_ % kTileCols;
+        const int next = tile_ + (input.nav == Direction::right ? 1 : -1);
+        if ((input.nav == Direction::right ? col < kTileCols - 1 : col > 0) && next >= 0 && next < ntiles)
         {
-        case Direction::left:
-        case Direction::right:
-        {
-            const int next = recent_ + (input.nav == Direction::right ? 1 : -1);
-            if (next >= 0 && next < nrecent)
-            {
-                recent_ = next;
-                feedback.play(Cue::focus);
-            }
-            else if (!repeat)
-                refuse(feedback);
-            break;
+            tile_ = next;
+            feedback.play(Cue::focus);
         }
-        case Direction::down:
-            if (ntiles > 0)
-            {
-                section_ = 1;
-                feedback.play(Cue::tab);
-            }
-            else if (!repeat)
-                refuse(feedback);
-            break;
-        case Direction::up:
-            if (!repeat)
-                refuse(feedback);
-            break;
-        case Direction::none:
-            break;
-        }
-        if (input.is_pressed(Action::confirm) && nrecent > 0)
-        {
-            details = true;
-            feedback.play(Cue::open);
-        }
+        else if (!repeat)
+            refuse(feedback);
+        break;
     }
-    else
+    case Direction::up:
+        if (tile_ - kTileCols >= 0)
+        {
+            tile_ -= kTileCols;
+            feedback.play(Cue::focus);
+        }
+        else if (!repeat)
+            refuse(feedback);
+        break;
+    case Direction::down:
+        if (tile_ + kTileCols < ntiles)
+        {
+            tile_ += kTileCols;
+            feedback.play(Cue::focus);
+        }
+        else if (tile_ / kTileCols < (ntiles - 1) / kTileCols)
+        {
+            tile_ = ntiles - 1;
+            feedback.play(Cue::focus);
+        }
+        else if (!repeat)
+            refuse(feedback);
+        break;
+    case Direction::none:
+        break;
+    }
+    if (input.is_pressed(Action::confirm) && ntiles > 0)
     {
-        switch (input.nav)
-        {
-        case Direction::left:
-        case Direction::right:
-        {
-            const int col = tile_ % kTileCols;
-            const int next = tile_ + (input.nav == Direction::right ? 1 : -1);
-            if ((input.nav == Direction::right ? col < kTileCols - 1 : col > 0) && next >= 0 && next < ntiles)
-            {
-                tile_ = next;
-                feedback.play(Cue::focus);
-            }
-            else if (!repeat)
-                refuse(feedback);
-            break;
-        }
-        case Direction::up:
-            if (tile_ - kTileCols >= 0)
-            {
-                tile_ -= kTileCols;
-                feedback.play(Cue::focus);
-            }
-            else if (nrecent > 0)
-            {
-                section_ = 0;
-                feedback.play(Cue::tab);
-            }
-            else if (!repeat)
-                refuse(feedback);
-            break;
-        case Direction::down:
-            if (tile_ + kTileCols < ntiles)
-            {
-                tile_ += kTileCols;
-                feedback.play(Cue::focus);
-            }
-            else if (tile_ / kTileCols < (ntiles - 1) / kTileCols)
-            {
-                tile_ = ntiles - 1;
-                feedback.play(Cue::focus);
-            }
-            else if (!repeat)
-                refuse(feedback);
-            break;
-        case Direction::none:
-            break;
-        }
-        if (input.is_pressed(Action::confirm) && ntiles > 0)
-        {
-            feedback.play(Cue::open);
-            open_grid(app, platforms[static_cast<std::size_t>(tile_)].id, "");
-        }
+        feedback.play(Cue::open);
+        open_grid(app, platforms[static_cast<std::size_t>(tile_)].id, "");
     }
     if (input.is_pressed(Action::north))
     {
@@ -412,53 +346,16 @@ void LibraryPage::update_platforms(App &app, const hui::InputFrame &input, hui::
 void LibraryPage::draw_platforms(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, const Look &look, App &app,
                                  Color accent, float clock, float age) const
 {
-    const auto &recent = app.installed();
     const auto &platforms = app.platforms();
     const float shake = ui::shake(nudge_.value, clock, 10.0f, 9.0f);
 
-    // On this console
-    if (!recent.empty())
-    {
-        const float in = tween::stagger(age, 1, 0.08f, 0.6f);
-        list.push_opacity(in);
-        char here[64];
-        std::snprintf(here, sizeof here, "On this console  \xC2\xB7  %d", static_cast<int>(recent.size()));
-        ui::text(list, fonts.semibold, here, kMargin, 190, 24, section_ == 0 ? look.text : look.muted);
-        list.push_clip({0, 150, 1920, 330});
-        for (int i = 0; i < static_cast<int>(recent.size()); ++i)
-        {
-            const Game &g = recent[static_cast<std::size_t>(i)];
-            Rect r{kMargin + static_cast<float>(i) * (kRecentW + kRecentGap) - recent_scroll_.offset(), 214, kRecentW, kRecentH};
-            if (r.x > 1920 || r.x + r.w < 0)
-                continue;
-            const bool on = section_ == 0 && i == recent_;
-            if (on)
-            {
-                r.x += shake;
-                list.glow(r, 18, 22, accent.with_alpha(0.45f));
-            }
-            draw_cover(list, fonts, look, app, &g, r, on || section_ == 0 ? 1.0f : 0.8f, 16);
-            if (on)
-                list.bordered_rect(r.inset(-5), 20, Color::rgb(0x000000, 0.0f), 4, look.focus.with_alpha(1.0f));
-        }
-        list.pop_clip();
-        if (section_ == 0)
-        {
-            const Game &g = recent[static_cast<std::size_t>(recent_)];
-            const Platform *p = app.platform_by_id(g.platform_id);
-            std::string line = g.name + (p ? "  \xC2\xB7  " + p->name : "");
-            ui::text(list, fonts.regular, fonts.regular.font->fit(line, 22, 1700), kMargin, 452, 22, look.muted);
-        }
-        list.pop_opacity();
-    }
-
     // Platforms
-    const float top = platforms_top(app);
-    const float in = tween::stagger(age, 2, 0.08f, 0.6f);
+    const float top = kPlatformTop;
+    const float in = tween::stagger(age, 1, 0.08f, 0.6f);
     list.push_opacity(in);
     char label[64];
     std::snprintf(label, sizeof label, "Platforms  \xC2\xB7  %d", static_cast<int>(platforms.size()));
-    ui::text(list, fonts.semibold, label, kMargin, top, 24, section_ == 1 ? look.text : look.muted);
+    ui::text(list, fonts.semibold, label, kMargin, top, 24, look.text);
     if (platforms.empty())
         ui::text(list, fonts.regular, "Loading your platforms", kMargin, top + 60, 26, look.muted);
     const float grid_top = top + 24;
@@ -470,7 +367,7 @@ void LibraryPage::draw_platforms(hui::gfx::DrawList &list, const hui::ui::Fonts 
         const float y = grid_top + (static_cast<float>(row) - tiles_scroll_.value) * kTilePitch;
         if (y > 1080 || y + kTileH < grid_top - 20)
             continue;
-        const bool on = section_ == 1 && i == tile_;
+        const bool on = i == tile_;
         Rect r{kMargin + static_cast<float>(col) * (kTileW + kTileGap) + (on ? shake : 0.0f), y, kTileW, kTileH};
         if (on)
             list.glow(r, 26, 26, accent.with_alpha(0.4f));
@@ -971,7 +868,7 @@ std::vector<hui::ui::Hint> LibraryPage::hints() const
     case kPlatforms:
         return {{Button::l1, "Pages", Button::r1},
                 {Button::triangle, "Search"},
-                {Button::cross, section_ == 0 ? "Details" : "Open"}};
+                {Button::cross, "Open"}};
     case kGrid:
         if (on_letters_)
             return {{Button::cross, "Jump"}, {Button::circle, "Back"}};
