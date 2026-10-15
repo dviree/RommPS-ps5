@@ -11,6 +11,9 @@ void sync_request(const char *reason);   /* queued; repeats are merged */
 /* After pairing: forgets the game and save ids of any server before. */
 void sync_new_pairing(void);
 int sync_is_running(void);
+/* Waits for a sync running and holds the next back while files move. */
+void sync_pause(void);
+void sync_resume(void);
 time_t sync_last_run(void);
 cJSON *sync_status_json(void);           /* caller frees */
 

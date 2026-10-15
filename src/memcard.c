@@ -19,7 +19,8 @@
 #include "zip.h"
 
 /* The shared memory cards backed up: LRPS2's (<system>/pcsx2/memcards/
- * Mcd00N.ps2, when its "backup" mode is on) and those a profile lists in
+ * Mcd00N.ps2, when its "backup" mode is on), RetroArch 2.0's PS5SX2's (the
+ * same two, always: it has no per-game cards) and those a profile lists in
  * "memcards" (PS5SX2's Mcd001.ps2 and Mcd002.ps2). RomM only takes cards as
  * zips, so each goes up as a zip holding exactly one file. */
 #define MAX_CARDS 8
@@ -42,12 +43,15 @@ static int cards_list(card *out, int max) {
     for (int i = 0; i < cnt && n < max; i++) {
         const profile_map *m = &maps[i];
         if (m->sync_off) continue;
-        if (!strcmp(mode, "backup") && profile_map_handles(m, "ps2", NULL) && str_ieq(m->core_name, "LRPS2")) {
+        const int lrps2 = !strcmp(mode, "backup") && str_ieq(m->core_name, "LRPS2");
+        const int ps5sx2 = str_ieq(m->core_name, "PS5SX2");
+        if ((lrps2 || ps5sx2) && profile_map_handles(m, "ps2", NULL)) {
             for (int s = 1; s <= 2 && n < max; s++) {
                 card *c = &out[n++];
                 snprintf(c->path, sizeof c->path, "%s/pcsx2/memcards/Mcd%03d.ps2", m->bios_dir, s);
-                str_copy(c->emulator, sizeof c->emulator, "lrps2");
-                c->label[0] = 0;
+                /* Not "ps5sx2": standalone PS5SX2's cards are RomM's "ps5sx2". */
+                str_copy(c->emulator, sizeof c->emulator, lrps2 ? "lrps2" : "ps5sx2-retroarch");
+                str_copy(c->label, sizeof c->label, lrps2 ? "" : "RetroArch PS5SX2");
                 c->slot = s;
             }
         }

@@ -2778,6 +2778,9 @@ void sync_request(const char *reason) {
 }
 
 int sync_is_running(void) { return g_running; }
+
+void sync_pause(void) { pthread_mutex_lock(&g_run_lock); }
+void sync_resume(void) { pthread_mutex_unlock(&g_run_lock); }
 time_t sync_last_run(void) { return g_last_run; }
 
 void sync_add_play_session(time_t start, time_t end, const char *title_id) {

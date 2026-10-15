@@ -22,6 +22,7 @@
 // the look picked in Settings (rommps_look.hpp): the cover's colours, or one
 // of the kit's themes.
 
+#include "cJSON.h"
 #include "concepts/concepts.hpp"
 
 #include "core/tween.hpp"
@@ -145,6 +146,18 @@ class RommPS final : public app::Concept
                 }
             }
         }
+        // RetroArch 2.0 looks for games in new folders: asked once a launch.
+        if (ready && !move_asked_ && app_.status().retroarch_move > 0 && !calling && !setup_.editing())
+        {
+            move_asked_ = move_open_ = true;
+            move_list_.set_focus(0);
+            feedback.play(audio::Cue::modal_open);
+        }
+        if (move_open_)
+        {
+            update_move(input, dt, feedback);
+            return;
+        }
         // Settings' Emulators opens that setup step on its own.
         if (settings_.take_emulators_request())
             setup_.edit_emulators();
@@ -254,8 +267,11 @@ class RommPS final : public app::Concept
             settings_.call().draw(frame.overlay, context_.fonts, clock_);
             return;
         }
-        draw_toast(back > 0.5f ? frame.overlay : frame.scene);
-        draw_hints(back > 0.5f ? frame.overlay : frame.scene);
+        if (move_open_)
+            draw_move(frame.overlay);
+        draw_toast(back > 0.5f || move_open_ ? frame.overlay : frame.scene);
+        if (!move_open_)
+            draw_hints(back > 0.5f ? frame.overlay : frame.scene);
     }
 
   private:
@@ -516,6 +532,62 @@ class RommPS final : public app::Concept
             feedback.play(audio::Cue::back);
             sheet_open_ = false;
         }
+    }
+
+    // ---------------------------------------------------------------- RetroArch 2.0 folders
+
+    std::vector<rommps::Row> move_rows() const
+    {
+        const int n = app_.status().retroarch_move;
+        return {{rommps::RowKind::action, n == 1 ? "Move it" : "Move them"}, {rommps::RowKind::action, "Not now"}};
+    }
+
+    void update_move(const InputFrame &input, float dt, app::Feedback &feedback)
+    {
+        const std::vector<rommps::Row> rows = move_rows();
+        const rommps::RowEvent pick = move_list_.handle(rows, input, feedback);
+        move_list_.update(dt, static_cast<int>(rows.size()), 2 * rommps::RowList::kRowHeight);
+        if (input.is_pressed(Action::back) || pick.row == 1)
+        {
+            feedback.play(audio::Cue::back);
+            move_open_ = false;
+        }
+        else if (pick.row == 0)
+        {
+            feedback.play(audio::Cue::select);
+            move_open_ = false;
+            app_.post("/api/retroarch/move", "{}", [this](const rommps::Response &r) {
+                cJSON *j = r.ok() ? r.json() : nullptr;
+                const cJSON *moved = cJSON_GetObjectItemCaseSensitive(j, "moved");
+                const int n = cJSON_IsNumber(moved) ? moved->valueint : 0;
+                if (!r.ok())
+                    app_.say("Couldn't move the games: " + r.message());
+                else
+                    app_.say("Moved " + std::to_string(n) + (n == 1 ? " game" : " games") +
+                             (cJSON_GetObjectItemCaseSensitive(j, "error") ? ", some couldn't be" : ""));
+                cJSON_Delete(j);
+                app_.refresh_now();
+            });
+        }
+    }
+
+    void draw_move(gfx::DrawList &list) const
+    {
+        const rommps::Look &L = look();
+        const rommps::Status &s = app_.status();
+        list.rounded_rect({0, 0, gfx::kVirtualWidth, gfx::kVirtualHeight}, 0, Color::rgb(0x000000, 0.55f));
+        const Rect box{460, 280, 1000, 520};
+        Color solid = L.page; // nothing shows through the panel
+        solid.a = 1.0f;
+        list.rounded_rect(box, L.radius, solid);
+        draw_panel(list, box);
+        ui::text(list, context_.fonts.display, "RetroArch 2.0 has new game folders", box.x + 48, box.y + 84, 40, L.panel_text);
+        const std::string text = "It no longer sees " + std::to_string(s.retroarch_move) +
+                                 (s.retroarch_move == 1 ? " game" : " games") + " in its old folders (" + s.retroarch_folders +
+                                 "). Move " + (s.retroarch_move == 1 ? "it" : "them") + " to the new ones?";
+        ui::paragraph(list, context_.fonts.regular, text, box.x + 48, box.y + 146, 26, box.w - 96, 36, L.muted, 3);
+        move_list_.draw(list, context_.fonts, L, move_rows(), {box.x + 16, box.y + 300, box.w - 32, 2 * rommps::RowList::kRowHeight},
+                        clock_);
     }
 
     void update_downloads(const InputFrame &input, float dt, app::Feedback &feedback)
@@ -842,9 +914,10 @@ class RommPS final : public app::Concept
         list.rounded_rect(sheet, 44, L.covers ? gfx::mix(palette.dark, kInk, 0.5f).with_alpha(0.62f) : L.panel);
         list.bordered_rect(sheet, 44, Color::rgb(0x000000, 0.0f), 1.5f, L.outline);
 
-        const Rect art{sheet.x + 56, sheet.y + 56, 300, 400};
-        rommps::draw_cover(list, fonts, L, app_, g, art, 1.0f, 26);
-        const float x = art.x + art.w + 56;
+        // The cover in its own shape, as large as fits the space for it.
+        const Rect space{sheet.x + 56, sheet.y + 56, 300, 400};
+        rommps::draw_cover(list, fonts, L, app_, g, rommps::fit_cover(rommps::cover_shape(app_, g), space), 1.0f, 26);
+        const float x = space.x + space.w + 56;
         ui::text(list, fonts.semibold, ui::upper(p ? p->name : ""), x, sheet.y + 92, 20, acc, gfx::Align::left, 4.0f);
         float y = ui::paragraph(list, fonts.display, g->name, x - 2, sheet.y + 156, 54, 640, 62, L.panel_text, 2) - 18;
         if (g->versions > 1)
@@ -1032,6 +1105,9 @@ class RommPS final : public app::Concept
     rommps::Game sheet_game_; // the game the details sheet is for
     rommps::SetupPage setup_;
     bool setting_up_ = false;
+    bool move_asked_ = false; // this launch
+    bool move_open_ = false;  // asking whether to move games to RetroArch 2.0's folders
+    rommps::RowList move_list_;
 };
 
 } // namespace

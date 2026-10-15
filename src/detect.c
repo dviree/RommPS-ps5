@@ -20,6 +20,7 @@
 
 #include "platform.h"
 #include "profiles.h"
+#include "ra2.h"
 #include "state.h"
 #include "util.h"
 
@@ -70,6 +71,23 @@ static const struct {
     {"Commodore - Amiga", "amiga"},
     {"DOS", "dos"},
 };
+
+const char *detect_db_name(const cJSON *entry) {
+    const char *db = jget_str(entry, "db", NULL);
+    if (db) return db;
+    if (str_ieq(jget_str(entry, "core_name", ""), "MAME")) return "MAME"; /* arcade, like FBNeo */
+    const cJSON *slug;
+    cJSON_ArrayForEach(slug, cJSON_GetObjectItemCaseSensitive(entry, "romm")) {
+        if (!cJSON_IsString(slug)) continue;
+        for (size_t i = 0; i < sizeof DB_MAP / sizeof DB_MAP[0]; i++) {
+            char slugs[256], *save = NULL;
+            str_copy(slugs, sizeof slugs, DB_MAP[i].slugs);
+            for (char *t = strtok_r(slugs, ",", &save); t; t = strtok_r(NULL, ",", &save))
+                if (str_ieq(t, slug->valuestring)) return DB_MAP[i].db;
+        }
+    }
+    return NULL;
+}
 
 /* Value of key = "value" in a libretro .info file. */
 static int info_get(const char *txt, const char *key, char *out, size_t n) {
@@ -142,6 +160,7 @@ static void add_core_platforms(cJSON *plats, cJSON *cores, const char *core_id, 
         cJSON *e = cJSON_CreateObject();
         cJSON_AddItemToObject(e, "romm", slug_array(slugs));
         cJSON_AddStringToObject(e, "dir", first);
+        cJSON_AddStringToObject(e, "db", db);
         cJSON_AddStringToObject(e, "emulator", core_id);
         cJSON_AddStringToObject(e, "core_name", corename);
         /* Saves other emulators keep in the same format share one save on RomM. */
@@ -227,6 +246,17 @@ static cJSON *retroarch_candidate(const char *root) {
         if (!dup) str_copy(names[n++], sizeof names[0], id);
     }
     if (d) closedir(d);
+    /* RetroArch 2.0's PS5SX2 replaces LRPS2, whose files an upgrade can leave behind. */
+    int has_ps5sx2 = 0;
+    for (int i = 0; i < n; i++) has_ps5sx2 |= !strcmp(names[i], "ps5sx2");
+    if (has_ps5sx2 && ra2_is_v2(root))
+        for (int i = 0; i < n; i++)
+            if (!strcmp(names[i], "pcsx2")) {
+                LOGI("ignoring LRPS2 at %s: RetroArch 2.0 plays PS2 with PS5SX2", root);
+                memmove(names[i], names[n - 1], sizeof names[0]);
+                n--;
+                break;
+            }
     /* Sorted so the first core per system doesn't depend on readdir order. */
     for (int i = 0; i < n; i++)
         for (int k = i + 1; k < n; k++)
@@ -268,6 +298,7 @@ static cJSON *retroarch_candidate(const char *root) {
     } else {
         cJSON_Delete(plats); /* no .info files, keep the default platforms */
     }
+    ra2_update_profile(profile);
 
     cJSON *c = cJSON_CreateObject();
     cJSON_AddStringToObject(c, "kind", "retroarch");
