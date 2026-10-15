@@ -77,7 +77,9 @@ A state from elsewhere never replaces one of yours: it goes into the next free s
 
 ## PS4/PS5 Games
 
-If you are interested in downloading PS4 and PS5 games from your RomM server, RomM has direct FPKGi support, simply add it as a library. This sync client does NOT handle PS4/PS5 save syncing at this time, but is being researched for potential future inclusion.
+If you are interested in downloading PS4 and PS5 games from your RomM server, RomM has direct FPKGi support, simply add it as a library.
+
+RommPS can also fetch PS5 games itself, like a store: with a USB drive in the PS5, setup and the Emulators page offer **PS5 games (USB homebrew)**. Turn it on and games from RomM's `ps5` platform (the `roms/ps5` folder of your library, e.g. `/volume1/games/roms/ps5`) download straight to `/mnt/usb0/homebrew`, a folder game file by file. Change the folder on the Emulators page if your drive is elsewhere. It downloads games only, no saves. This sync client does NOT handle PS4/PS5 save syncing at this time, but is being researched for potential future inclusion.
 
 ## Requirements
 
