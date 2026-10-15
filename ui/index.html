@@ -1091,7 +1091,7 @@ function downloadRow(d) {
   else if (d.status === "cancelling") meta = "Cancelling";
   else if (d.status === "queued") meta = "Queued";
   else meta = (d.note ? esc(d.note) + ": " : "") + fmtSize(d.done) + (d.total ? " of " + fmtSize(d.total) : "") + (d.speed > 0 ? ", " + fmtSize(d.speed) + "/s" + (d.total ? ", " + fmtEta((d.total - d.done) / d.speed) : "") : "");
-  var cover = d.cover ? '<img class="instCover" alt="" loading="lazy" src="' + coverUrl(d.cover) + '" onerror="this.style.visibility=\'hidden\'">' : "";
+  var cover = d.cover ? '<img class="instCover" alt="" loading="lazy" src="' + coverUrl(d) + '" onerror="this.style.visibility=\'hidden\'">' : "";
   return '<div class="dl-item installed-item"><div class="row">' + cover + '<div' + (cover ? ' style="flex:1"' : "") + '>' +
     '<div>' + (d.platform ? pill(d.platform) : "") + (d.type === "firmware" ? pill("BIOS", "off") : "") + "</div>" +
     '<div class="t"><b>' + esc(d.name) + "</b></div>" +
