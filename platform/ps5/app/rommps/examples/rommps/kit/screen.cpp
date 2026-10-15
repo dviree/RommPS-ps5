@@ -64,7 +64,7 @@ enum Tab
     kSettings,
     kTabs
 };
-constexpr const char *kTabNames[kTabs] = {"Home", "Library", "Downloads", "Settings"};
+constexpr const char *kTabNames[kTabs] = {"Home", "Library", "Queue", "Settings"};
 
 constexpr const char *kTechniques[] = {
     "The background service's state, read through its local API on a worker thread",
@@ -729,7 +729,7 @@ class RommPS final : public app::Concept
         const auto &downloads = app_.downloads();
         const float in = tween::stagger(tab_age_, 1, 0.08f, 0.6f);
         list.push_opacity(in);
-        ui::text(list, fonts.display, "Downloads", kMargin, 240, 64, L.text);
+        ui::text(list, fonts.display, "Queue", kMargin, 240, 64, L.text);
         // Top right: everything downloading at once, and what's waiting.
         double total_speed = 0;
         int running = 0, queued = 0;
