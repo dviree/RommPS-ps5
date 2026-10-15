@@ -1105,7 +1105,10 @@ function loadDownloads() {
 // Installed: the games this console keeps (/api/installed), like the app's Downloads tab.
 function installedRow(g) {
   var p = (state.platforms || []).filter(function (x) { return x.id == g.platform_id; })[0];
-  return '<div class="dl-item"><div class="row"><div>' + (p && p.name ? pill(p.name, "off") : "") + "<b>" + esc(g.name) + "</b>" +
+  var cover = g.cover ? '<img class="instCover" alt="" loading="lazy" src="' + coverUrl(g) + '" onerror="this.style.visibility=\'hidden\'">' : "";
+  return '<div class="dl-item installed-item"><div class="row">' + cover +
+    '<div style="flex:1"><div>' + (p && p.name ? pill(p.name, "off") : "") + "</div>" +
+    '<div class="t"><b>' + esc(g.name) + "</b></div>" +
     '<div class="meta">' + fmtSize(g.size) + " · played " + ago(g.played) + "</div></div>" +
     '<button class="small" data-del="' + g.id + '">Delete</button></div></div>';
 }
