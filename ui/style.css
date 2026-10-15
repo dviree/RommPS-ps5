@@ -61,7 +61,7 @@ label { display: block; margin: 10px 0 4px; color: var(--text-muted); font-size:
 button.icon { display: inline-flex; align-items: center; justify-content: center; padding: 8px 10px; line-height: 0; }
 button.icon svg { width: 18px; height: 18px; }
 .dl-item { padding: 12px 0; border-bottom: 1px solid var(--outline); }
-.installed-item .row { align-items: flex-start; }
+.installed-item .row { align-items: center; }
 .instCover { width: 58px; border-radius: 8px; display: block; flex: 0 0 auto; }
 .installed-item .t { margin-top: 4px; font-size: 16px; }
 .installed-item .meta { margin-top: 2px; }
