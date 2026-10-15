@@ -1,4 +1,4 @@
-// RommPS - the screen: Home, Library, Downloads and Settings for the RomM Sync payload.
+// RommPS - the screen: Home, Library, Queue and Settings for the RomM Sync payload.
 // Copyright (C) 2026 BlackBearReloaded (the Aurora Shelf design it grew from)
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
@@ -7,14 +7,14 @@
 // from the payload through rommps_app.hpp; the screen only draws it and sends
 // what the pad asks for.
 //
-//   - L1 / R1 move between Home, Library and Downloads.
+//   - L1 / R1 move between Home, Library, Queue and Settings.
 //   - Home: the sync at a glance; Cross syncs now. Beside it: the conflicts
 //     to settle, the sync log and the saves kept in sync (sync_views.hpp).
 //   - Library (library_page.hpp): the games on this console and RomM's
 //     platforms; a platform's games in a grid with an A to Z bar; search. The
 //     backdrop eases toward the focused cover's colours; Cross opens a frosted
 //     sheet to download the game.
-//   - Downloads: what's queued and running; Cross cancels one.
+//   - Queue: what's queued and running; Cross cancels one.
 //   - Settings: the look, the payload's settings, its updates, the setup.
 //
 // Until the payload answers the screen says so; until it's paired with RomM
@@ -60,7 +60,7 @@ enum Tab
 {
     kHome,
     kLibrary,
-    kDownloads,
+    kQueue,
     kSettings,
     kTabs
 };
@@ -177,8 +177,8 @@ class RommPS final : public app::Concept
             else if (library_.update(app_, input, dt, feedback))
                 open_sheet();
         }
-        else if (tab_ == kDownloads)
-            update_downloads(input, dt, feedback);
+        else if (tab_ == kQueue)
+            update_queue(input, dt, feedback);
         else
             settings_.update(app_, input, dt, feedback);
 
@@ -200,14 +200,14 @@ class RommPS final : public app::Concept
         sheet_.update(dt, context_.settings.reduced_motion ? 40.0f : 13.0f);
         action_position_.target = static_cast<float>(action_);
         action_position_.update(dt, 22.0f);
-        download_row_ = std::clamp(download_row_, 0, std::max(0, static_cast<int>(app_.downloads().size()) - 1));
+        queue_row_ = std::clamp(queue_row_, 0, std::max(0, static_cast<int>(app_.queue().size()) - 1));
         if (!cancel_seen_) // focus left the download (another row, tab or button): the hold is gone
         {
             cancel_hold_ = 0;
             cancel_job_ = 0;
         }
-        download_position_.target = static_cast<float>(download_row_);
-        download_position_.update(dt, 20.0f);
+        queue_position_.target = static_cast<float>(queue_row_);
+        queue_position_.update(dt, 20.0f);
     }
 
     void draw(app::Frame &frame) const override
@@ -238,8 +238,8 @@ class RommPS final : public app::Concept
             draw_home(list);
         else if (tab_ == kLibrary)
             draw_library(list);
-        else if (tab_ == kDownloads)
-            draw_downloads(list);
+        else if (tab_ == kQueue)
+            draw_queue(list);
         else
             settings_.draw(list, context_.fonts, L, app_, clock_, tab_age_);
         list.pop_transform();
@@ -518,17 +518,17 @@ class RommPS final : public app::Concept
         }
     }
 
-    void update_downloads(const InputFrame &input, float dt, app::Feedback &feedback)
+    void update_queue(const InputFrame &input, float dt, app::Feedback &feedback)
     {
-        const int count = static_cast<int>(app_.downloads().size());
+        const int count = static_cast<int>(app_.queue().size());
         // The list can get shorter at any tick (finished ones cleared, the payload restarted).
-        download_row_ = std::clamp(download_row_, 0, std::max(0, count - 1));
+        queue_row_ = std::clamp(queue_row_, 0, std::max(0, count - 1));
         if ((input.nav == Direction::up || input.nav == Direction::down) && count > 0)
         {
-            const int next = std::clamp(download_row_ + (input.nav == Direction::down ? 1 : -1), 0, count - 1);
-            if (next != download_row_)
+            const int next = std::clamp(queue_row_ + (input.nav == Direction::down ? 1 : -1), 0, count - 1);
+            if (next != queue_row_)
             {
-                download_row_ = next;
+                queue_row_ = next;
                 feedback.play(audio::Cue::focus);
             }
             else if (!input.nav_repeat)
@@ -536,19 +536,19 @@ class RommPS final : public app::Concept
         }
         if (input.is_pressed(Action::west) && count > 0)
         {
-            const auto &downloads = app_.downloads();
+            const auto &downloads = app_.queue();
             if (std::any_of(downloads.begin(), downloads.end(), [](const rommps::Download &d) { return d.finished(); }))
             {
-                app_.clear_finished_downloads();
-                download_row_ = 0;
+                app_.clear_finished_queue();
+                queue_row_ = 0;
                 feedback.play(audio::Cue::back);
             }
             else
                 refuse(feedback, 0.0f);
         }
-        if (count > 0 && download_row_ < static_cast<int>(app_.downloads().size()))
+        if (count > 0 && queue_row_ < static_cast<int>(app_.queue().size()))
         {
-            const rommps::Download &d = app_.downloads()[static_cast<std::size_t>(download_row_)];
+            const rommps::Download &d = app_.queue()[static_cast<std::size_t>(queue_row_)];
             if (d.cancellable())
                 hold_to_cancel(input, dt, &d, feedback);
             else if (input.is_pressed(Action::confirm))
@@ -722,11 +722,11 @@ class RommPS final : public app::Concept
         library_.draw(list, context_.fonts, look(), app_, accent(), clock_, tab_age_);
     }
 
-    void draw_downloads(gfx::DrawList &list) const
+    void draw_queue(gfx::DrawList &list) const
     {
         const ui::Fonts &fonts = context_.fonts;
         const rommps::Look &L = look();
-        const auto &downloads = app_.downloads();
+        const auto &downloads = app_.queue();
         const float in = tween::stagger(tab_age_, 1, 0.08f, 0.6f);
         list.push_opacity(in);
         ui::text(list, fonts.display, "Queue", kMargin, 240, 64, L.text);
@@ -766,8 +766,8 @@ class RommPS final : public app::Concept
         }
         constexpr float kRowH = 110.0f;
         const float top = 300.0f;
-        const int first = std::max(0, download_row_ - 5);
-        list.rounded_rect({kMargin - 24, top + (download_position_.value - static_cast<float>(first)) * kRowH, 1776, kRowH - 14},
+        const int first = std::max(0, queue_row_ - 5);
+        list.rounded_rect({kMargin - 24, top + (queue_position_.value - static_cast<float>(first)) * kRowH, 1776, kRowH - 14},
                           26, L.text.with_alpha(0.1f));
         for (int i = first; i < static_cast<int>(downloads.size()) && i < first + 6; ++i)
         {
@@ -993,13 +993,13 @@ class RommPS final : public app::Concept
             const std::vector<ui::Hint> hints = library_.hints();
             hint_row(list, fonts, style, hints.data(), static_cast<int>(hints.size()));
         }
-        else if (tab_ == kDownloads)
+        else if (tab_ == kQueue)
         {
             // Cross on a download that's still going stops it and deletes what
             // came so far; Square takes the finished ones off the list.
-            const auto &downloads = app_.downloads();
-            const bool on_active = download_row_ < static_cast<int>(downloads.size()) &&
-                                   downloads[static_cast<std::size_t>(download_row_)].cancellable();
+            const auto &downloads = app_.queue();
+            const bool on_active = queue_row_ < static_cast<int>(downloads.size()) &&
+                                   downloads[static_cast<std::size_t>(queue_row_)].cancellable();
             const bool any_finished = std::any_of(downloads.begin(), downloads.end(),
                                                   [](const rommps::Download &d) { return d.finished(); });
             std::vector<ui::Hint> hints{pages};
@@ -1034,12 +1034,12 @@ class RommPS final : public app::Concept
     tween::Spring sheet_;
     int action_ = 0;
     tween::Spring action_position_;
-    int download_row_ = 0;
+    int queue_row_ = 0;
     float cancel_hold_ = 0; // seconds Cross has been held to cancel cancel_job_; -1 once done
     float remove_hold_ = -1; // seconds Cross has been held on remove; -1 waits for a press
     int cancel_job_ = 0;
     bool cancel_seen_ = false; // hold_to_cancel ran this frame
-    tween::Spring download_position_;
+    tween::Spring queue_position_;
     rommps::SettingsPage settings_;
     rommps::LibraryPage library_;
     rommps::Game sheet_game_; // the game the details sheet is for

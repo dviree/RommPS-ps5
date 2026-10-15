@@ -228,7 +228,7 @@ class App
     // The payload into the HEN's autostart folder, so it starts with the console.
     void install_autostart(Api::Callback done);
     const std::vector<Platform> &platforms() const { return platforms_; }
-    const std::vector<Download> &downloads() const { return downloads_; }
+    const std::vector<Download> &queue() const { return queue_; }
     const Download *download_for(int rom_id) const;
 
     const Platform *platform_by_id(int id) const;
@@ -256,7 +256,7 @@ class App
     void download(int rom_id, const std::string &name);
     void cancel_download(int job_id);
     void remove_game(int rom_id);
-    void clear_finished_downloads();
+    void clear_finished_queue();
     void sync_now();
 
     const Config &config() const { return config_; }
@@ -306,7 +306,7 @@ class App
     void evict_covers(hui::gfx::Renderer *renderer);
     void send_page(const std::string &key, int page);
     void refresh_platforms();
-    void refresh_downloads();
+    void refresh_queue();
 
     Api api_;
     Api slow_api_; // calls that may take minutes
@@ -325,7 +325,7 @@ class App
     int covers_in_flight_ = 0, next_cover_worker_ = 0;
     Status status_;
     std::vector<Platform> platforms_;
-    std::vector<Download> downloads_;
+    std::vector<Download> queue_;
     std::vector<Game> installed_;
     std::unordered_map<int, Details> details_;
     struct CachedList
@@ -345,8 +345,8 @@ class App
         std::string path, bytes;
     };
     std::deque<Pending> to_decode_;
-    float status_timer_ = 0, downloads_timer_ = 0;
-    bool status_busy_ = false, downloads_busy_ = false, platforms_busy_ = false;
+    float status_timer_ = 0, queue_timer_ = 0;
+    bool status_busy_ = false, queue_busy_ = false, platforms_busy_ = false;
     bool was_paired_ = false;
     const std::string &bundled_payload();
     std::string bundled_;
@@ -356,7 +356,7 @@ class App
     bool tried_start_ = false, updated_payload_ = false, repaired_ = false;
     bool payload_waiting_ = false;
     int unanswered_ = 0; // status requests in a row RomM Sync didn't answer
-    int active_downloads_ = 0;
+    int active_queue_ = 0;
     std::string toast_;
     float toast_age_ = 0;
 };

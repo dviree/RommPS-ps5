@@ -31,8 +31,8 @@ namespace
 {
 
 constexpr float kStatusEvery = 3.0f;
-constexpr float kDownloadsEvery = 1.0f;     // while one is running
-constexpr float kDownloadsIdleEvery = 5.0f; // otherwise
+constexpr float kQueueEvery = 1.0f;     // while one is running
+constexpr float kQueueIdleEvery = 5.0f; // otherwise
 constexpr int kCoverRetries = 3;            // a failed cover is tried again after 15, 30, 60 s
 constexpr int kDecodesPerFrame = 2;         // covers turned into textures each frame
 constexpr std::size_t kCoverTextures = 360; // covers kept as textures (about 130 MB); the
@@ -248,10 +248,10 @@ void App::tick(float dt, hui::gfx::Renderer *renderer)
     update_timer_ += dt;
     if (update_.busy() && !update_busy_ && update_timer_ >= 1.0f)
         refresh_update();
-    downloads_timer_ += dt;
-    if (status_.paired && !downloads_busy_ &&
-        downloads_timer_ >= (active_downloads_ ? kDownloadsEvery : kDownloadsIdleEvery))
-        refresh_downloads();
+    queue_timer_ += dt;
+    if (status_.paired && !queue_busy_ &&
+        queue_timer_ >= (active_queue_ ? kQueueEvery : kQueueIdleEvery))
+        refresh_queue();
 
     if (renderer)
         evict_covers(renderer);
@@ -472,7 +472,7 @@ void App::refresh_status()
         // idle: the new one takes over from it and then, being this
         // RommPS's own, updates the copies on disk (below). A newer one is
         // left alone.
-        const bool idle = !flag(cJSON_GetObjectItemCaseSensitive(j.get(), "sync"), "running") && active_downloads_ == 0;
+        const bool idle = !flag(cJSON_GetObjectItemCaseSensitive(j.get(), "sync"), "running") && active_queue_ == 0;
         if (payload_too_old() && !updated_payload_ && idle)
         {
             updated_payload_ = true;
@@ -762,12 +762,12 @@ const Cover &App::cover(const std::string &path)
     return c;
 }
 
-void App::refresh_downloads()
+void App::refresh_queue()
 {
-    downloads_timer_ = 0;
-    downloads_busy_ = true;
+    queue_timer_ = 0;
+    queue_busy_ = true;
     api_.get("/api/downloads", [this](const Response &r) {
-        downloads_busy_ = false;
+        queue_busy_ = false;
         if (!r.ok())
             return;
         std::unique_ptr<cJSON, void (*)(cJSON *)> j(r.json(), cJSON_Delete);
@@ -793,13 +793,13 @@ void App::refresh_downloads()
             dl.saves_failed = flag(d, "saves_failed");
             active += dl.active();
             // A game that just finished shows as downloaded on its shelf.
-            for (const Download &old : downloads_)
+            for (const Download &old : queue_)
                 if (old.id == dl.id && old.active() && dl.status == "done")
                     finished_one = true;
             list.push_back(std::move(dl));
         }
-        downloads_ = std::move(list);
-        active_downloads_ = active;
+        queue_ = std::move(list);
+        active_queue_ = active;
         // A game that finished shows as downloaded: the lists load again.
         if (finished_one)
         {
@@ -827,7 +827,7 @@ std::string Download::saves_note() const
 const Download *App::download_for(int rom_id) const
 {
     const Download *found = nullptr;
-    for (const Download &d : downloads_)
+    for (const Download &d : queue_)
         if (d.rom_id == rom_id)
             found = &d; // the newest one wins
     return found;
@@ -845,16 +845,16 @@ void App::download(int rom_id, const std::string &name)
     api_.post("/api/download", body, [this](const Response &r) {
         if (!r.ok())
             say("Couldn't start the download: " + r.message());
-        refresh_downloads();
+        refresh_queue();
     });
 }
 
-void App::clear_finished_downloads()
+void App::clear_finished_queue()
 {
     api_.post("/api/downloads/clear", "{}", [this](const Response &r) {
         if (!r.ok())
             say("Couldn't clear the list: " + r.message());
-        refresh_downloads();
+        refresh_queue();
     });
 }
 
@@ -865,7 +865,7 @@ void App::cancel_download(int job_id)
     api_.post("/api/downloads/cancel", body, [this](const Response &r) {
         if (!r.ok())
             say("Couldn't cancel: " + r.message());
-        refresh_downloads();
+        refresh_queue();
     });
 }
 
@@ -882,7 +882,7 @@ void App::remove_game(int rom_id)
         say("Game removed. Its saves are kept.");
         lists_.clear();
         refresh_installed();
-        refresh_downloads();
+        refresh_queue();
     });
 }
 
