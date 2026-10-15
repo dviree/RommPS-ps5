@@ -119,6 +119,8 @@ std::string plain(const char *text)
             out += ' ';
         else if (cp == 0xB7)
             out += "\xC2\xB7"; // the middle dot is in the fonts: the app uses it too
+        else if (cp == 0xB0)
+            out += "\xC2\xB0"; // the degree sign is in the fonts ("1080 Avalanche")
         else
             out += '?';
     }
