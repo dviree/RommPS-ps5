@@ -1291,7 +1291,7 @@ static void route(request *r) {
         cJSON *j = body_json(r);
         int rc;
         if (cJSON_GetObjectItemCaseSensitive(j, "rom_id"))
-            rc = library_queue_rom((int)jget_num(j, "rom_id", 0), jget_str(j, "name", ""), err, sizeof err);
+            rc = library_queue_rom((int)jget_num(j, "rom_id", 0), jget_str(j, "name", ""), jget_str(j, "cover", ""), err, sizeof err);
         else
             rc = library_queue_firmware((int)jget_num(j, "platform_id", 0), err, sizeof err);
         cJSON_Delete(j);

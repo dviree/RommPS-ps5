@@ -21,8 +21,9 @@ cJSON *library_details(int rom_id, char *err, int en);
 /* The games on this console, most recently played first. */
 cJSON *library_installed(int limit);
 
-/* name: the game's name as the client shows it ("" for "Game #<id>" until the job runs). */
-int library_queue_rom(int rom_id, const char *name, char *err, int en);
+/* name: the game's name as the client shows it ("Game #<id>" if "" until the job runs).
+ * cover: the client's copy of RomM's path_cover_small, if it has one; the job re-reads it from RomM when it runs. */
+int library_queue_rom(int rom_id, const char *name, const char *cover, char *err, int en);
 int library_queue_firmware(int platform_id, char *err, int en);
 int library_cancel(int id, char *err, int en);
 int library_clear_finished(void);

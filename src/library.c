@@ -29,6 +29,7 @@ typedef struct job {
     job_type type;
     int target_id; /* rom id or platform id */
     char name[256];
+    char cover[160]; /* RomM's path_cover_small, for the queue row */
     char platform[64];
     job_status status;
     int cancel;
@@ -238,6 +239,7 @@ static void run_rom_job(job *j) {
     }
     pthread_mutex_lock(&g_q_lock);
     str_copy(j->name, sizeof j->name, jget_str(rom, "name", jget_str(rom, "fs_name", "?")));
+    str_copy(j->cover, sizeof j->cover, jget_str(rom, "path_cover_small", ""));
     str_copy(j->platform, sizeof j->platform, jget_str(rom, "platform_display_name", jget_str(rom, "platform_slug", "")));
     j->total = (int64_t)jget_num(rom, "fs_size_bytes", 0);
     pthread_mutex_unlock(&g_q_lock);
@@ -484,7 +486,7 @@ static void trim_jobs(void) {
     }
 }
 
-static int enqueue(job_type type, int id, const char *name, char *err, int en) {
+static int enqueue(job_type type, int id, const char *name, const char *cover, char *err, int en) {
     pthread_mutex_lock(&g_q_lock);
     for (job *p = g_jobs; p; p = p->next) {
         if (p->type == type && p->target_id == id && !finished(p)) {
@@ -502,6 +504,7 @@ static int enqueue(job_type type, int id, const char *name, char *err, int en) {
     j->type = type;
     j->target_id = id;
     str_copy(j->name, sizeof j->name, name);
+    str_copy(j->cover, sizeof j->cover, cover ? cover : "");
     j->id = ++g_job_seq;
     j->next = g_jobs;
     g_jobs = j;
@@ -511,16 +514,16 @@ static int enqueue(job_type type, int id, const char *name, char *err, int en) {
     return 0;
 }
 
-int library_queue_rom(int rom_id, const char *name, char *err, int en) {
+int library_queue_rom(int rom_id, const char *name, const char *cover, char *err, int en) {
     /* The name the client shows, so the download is named from the start;
      * RomM's own replaces it once the job runs. */
     char fallback[32];
     snprintf(fallback, sizeof fallback, "Game #%d", rom_id);
-    return enqueue(JOB_ROM, rom_id, name && name[0] ? name : fallback, err, en);
+    return enqueue(JOB_ROM, rom_id, name && name[0] ? name : fallback, cover, err, en);
 }
 
 int library_queue_firmware(int platform_id, char *err, int en) {
-    return enqueue(JOB_FIRMWARE, platform_id, "BIOS files", err, en);
+    return enqueue(JOB_FIRMWARE, platform_id, "BIOS files", NULL, err, en);
 }
 
 int library_cancel(int id, char *err, int en) {
@@ -609,6 +612,7 @@ cJSON *library_downloads(void) {
         cJSON_AddNumberToObject(o, j->type == JOB_ROM ? "rom_id" : "platform_id", j->target_id);
         cJSON_AddStringToObject(o, "name", j->name);
         cJSON_AddStringToObject(o, "platform", j->platform);
+        if (j->type == JOB_ROM) cJSON_AddStringToObject(o, "cover", j->cover);
         cJSON_AddStringToObject(o, "status", j->status == JOB_RUNNING && j->cancel ? "cancelling" : names[j->status]);
         cJSON_AddStringToObject(o, "error", j->error);
         cJSON_AddNumberToObject(o, "done", (double)j->done);
