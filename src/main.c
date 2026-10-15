@@ -17,6 +17,7 @@
 #include "http.h"
 #include "library.h"
 #include "platform.h"
+#include "ra2.h"
 #include "romm.h"
 #include "state.h"
 #include "sync.h"
@@ -127,6 +128,8 @@ static void *app_main(void *arg) {
     config_load();
     if (g_cfg.profiles_custom && detect_refresh_profiles(g_cfg.profiles) > 0) config_save();
     state_load();
+    /* RetroArch 2.0 keeps games in new folders. */
+    ra2_check(1);
     events_load();
     /* Copies of older versions left on the console are brought up to date. */
     autostart_repair();

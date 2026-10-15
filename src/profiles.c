@@ -286,6 +286,7 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
         str_copy(root, sizeof root, jstr(p, NULL, "root", ""));
 
         char ra_save[PATH_MAX_LEN] = "", ra_state[PATH_MAX_LEN] = "", ra_sys[PATH_MAX_LEN] = "";
+        char ra_playlists[PATH_MAX_LEN] = "";
         int ra_in_content[2] = {0, 0}, ra_by_content[2] = {0, 0}, ra_by_core[2] = {0, 0};
         char ra_cfg_dir[PATH_MAX_LEN] = "";
         const char *ra_tpl = jstr(p, NULL, "retroarch_cfg", NULL);
@@ -303,6 +304,7 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
                 if (slash) *slash = 0;
                 apply_ra_cfg(cfg, root, none, ra_save, ra_state, sizeof ra_save, ra_in_content, ra_by_content, ra_by_core);
                 ra_apply(cfg, "system_directory", root, ra_sys, sizeof ra_sys);
+                ra_apply(cfg, "playlist_directory", root, ra_playlists, sizeof ra_playlists);
                 free(cfg);
                 break;
             }
@@ -344,6 +346,12 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
                 str_copy(m->state_dir, sizeof m->state_dir, ra_state);
             if (ra_sys[0] && !cJSON_GetObjectItemCaseSensitive(e, "bios_dir"))
                 str_copy(m->bios_dir, sizeof m->bios_dir, ra_sys);
+            /* RetroArch's PS2 cores read their BIOS from <system>/pcsx2/bios. */
+            const char *core = jstr(p, e, "core_name", "");
+            const int pcsx2 = str_ieq(core, "LRPS2") || str_ieq(core, "PCSX2") || str_ieq(core, "PS5SX2");
+            const char *sub = jstr(p, e, "firmware_subdir", pcsx2 && ra_tpl ? "pcsx2/bios" : "");
+            if (sub[0]) path_join(m->firmware_dir, sizeof m->firmware_dir, m->bios_dir, sub);
+            else str_copy(m->firmware_dir, sizeof m->firmware_dir, m->bios_dir);
             for (int k = 0; k < 2; k++) {
                 m->explicit_dir[k] = cJSON_GetObjectItemCaseSensitive(e, k ? "state_dir" : "save_dir") != NULL;
                 if (m->explicit_dir[k]) continue;
@@ -352,6 +360,7 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
                 m->by_core[k] = ra_by_core[k];
             }
             str_copy(m->core_name, sizeof m->core_name, jstr(p, e, "core_name", ""));
+            str_copy(m->playlist_dir, sizeof m->playlist_dir, ra_playlists);
             str_copy(m->save_layout, sizeof m->save_layout, jstr(p, e, "save_layout", ""));
             str_copy(m->bundle_dirs, sizeof m->bundle_dirs, jstr(p, e, "bundle_dirs", ""));
 

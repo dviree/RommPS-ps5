@@ -283,6 +283,9 @@ void App::tick(float dt, hui::gfx::Renderer *renderer)
             continue;
         }
         cover.palette = palette_of(rgba, w, h);
+        cover.aspect = h > 0 ? static_cast<float>(w) / static_cast<float>(h) : 0.0f;
+        if (shapes_[job.path].aspect != cover.aspect)
+            shapes_[job.path] = {cover.aspect, clock_};
         if (renderer)
             cover.texture = renderer->create_texture(w, h, rgba);
         stbi_image_free(rgba);
@@ -505,6 +508,14 @@ void App::refresh_status()
         status_.last_up = static_cast<int>(num(last, "uploaded"));
         status_.last_down = static_cast<int>(num(last, "downloaded"));
         status_.server_version = str(j.get(), "server_version");
+        const cJSON *move = cJSON_GetObjectItemCaseSensitive(j.get(), "retroarch_move"), *folder;
+        status_.retroarch_move = static_cast<int>(num(move, "games"));
+        status_.retroarch_folders.clear();
+        cJSON_ArrayForEach(folder, cJSON_GetObjectItemCaseSensitive(move, "folders"))
+        {
+            const std::string from = str(folder, "from");
+            status_.retroarch_folders += (status_.retroarch_folders.empty() ? "" : ", ") + from.substr(from.find_last_of('/') + 1);
+        }
         const cJSON *covers = cJSON_GetObjectItemCaseSensitive(j.get(), "covers");
         status_.covers_state = str(covers, "state");
         status_.covers_done = static_cast<int>(num(covers, "done"));
@@ -760,6 +771,16 @@ const Cover &App::cover(const std::string &path)
     if (!c.requested && wanted_.size() < 64)
         wanted_.push_back(path);
     return c;
+}
+
+float App::cover_aspect(const std::string &path, double *since) const
+{
+    auto found = shapes_.find(path);
+    if (found == shapes_.end())
+        return 0.0f;
+    if (since)
+        *since = found->second.since;
+    return found->second.aspect;
 }
 
 void App::refresh_downloads()

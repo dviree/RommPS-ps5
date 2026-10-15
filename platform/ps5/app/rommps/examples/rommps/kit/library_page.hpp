@@ -29,6 +29,14 @@
 namespace rommps
 {
 
+// Covers keep their own shape (width over height) within these: narrower or
+// wider ones are cropped, never stretched.
+constexpr float kPortrait = 0.75f, kNarrowest = 0.6f, kWidest = 1.45f;
+// A game's cover shape: fallback until its cover has been loaded, then its
+// own, eased in over a moment so what's around it slides rather than jumps.
+float cover_shape(App &app, const Game *g, float fallback = kPortrait);
+// The largest rectangle of a shape that fits in box, centred in it.
+hui::gfx::Rect fit_cover(float shape, const hui::gfx::Rect &box);
 // A game's cover, or a card with its name while there's none.
 void draw_cover(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, const Look &look, App &app, const Game *g,
                 const hui::gfx::Rect &rect, float alpha, float radius, bool name = true);
@@ -79,6 +87,8 @@ class LibraryPage
     // ---- a grid of games
     void open_grid(App &app, int platform_id, const std::string &search);
     void update_grid(App &app, const hui::InputFrame &input, hui::ui::Feedback &feedback, bool &details);
+    // Picks the grid's shape from its first covers, until it settles.
+    void settle_shape(App &app, GameList &l) const;
     void move_in_grid(App &app, const hui::InputFrame &input, hui::ui::Feedback &feedback, bool &details);
     void draw_grid(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, const Look &look, App &app, Color accent,
                    float clock, float age) const;

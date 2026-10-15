@@ -15,4 +15,9 @@ int detect_refresh_profiles(cJSON *profiles);
  * Parsed once; don't free. */
 const cJSON *detect_catalog_entry(const char *id);
 
+/* The libretro database a RetroArch platform entry plays ("Sony - PlayStation
+ * 2"): its own "db", else the first that takes one of its RomM slugs. NULL if
+ * none does. */
+const char *detect_db_name(const cJSON *entry);
+
 #endif
