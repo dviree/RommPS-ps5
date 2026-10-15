@@ -940,6 +940,19 @@ class RommPS final : public app::Concept
         list.pop_opacity();
     }
 
+    // The hint row floats over the page's bottom corner: it gets the panel
+    // treatment (draw_panel: shadow, fill, outline), so it reads over the
+    // covers it crosses instead of hovering on them.
+    void hint_row(gfx::DrawList &list, const ui::Fonts &fonts, const ui::GlyphStyle &style,
+                  const ui::Hint *hints, int count) const
+    {
+        const ui::HintLayout layout; // the kit's bottom row: glyphs 40 tall, cy 1010
+        const float width = ui::measure_hints(fonts, hints, count, layout);
+        const Rect plate{1824.0f - width - 30.0f, layout.cy - 38.0f, width + 60.0f, 76.0f};
+        draw_panel(list, plate);
+        ui::draw_hints(list, fonts, style, hints, count, 1824, true);
+    }
+
     void draw_hints(gfx::DrawList &list) const
     {
         const ui::Fonts &fonts = context_.fonts;
@@ -947,7 +960,7 @@ class RommPS final : public app::Concept
         if (setting_up_)
         {
             const std::vector<ui::Hint> hints = setup_.hints();
-            ui::draw_hints(list, fonts, style, hints.data(), static_cast<int>(hints.size()), 1824, true);
+            hint_row(list, fonts, style, hints.data(), static_cast<int>(hints.size()));
             return;
         }
         const bool ready = app_.status().paired && app_.status().setup_complete;
@@ -956,13 +969,13 @@ class RommPS final : public app::Concept
         if (sheet_open_)
         {
             const ui::Hint hints[] = {{ui::Button::cross, "Choose"}, {ui::Button::circle, "Back"}};
-            ui::draw_hints(list, fonts, style, hints, 2, 1824, true);
+            hint_row(list, fonts, style, hints, 2);
             return;
         }
         if (view_.active())
         {
             const std::vector<ui::Hint> hints = view_.hints();
-            ui::draw_hints(list, fonts, style, hints.data(), static_cast<int>(hints.size()), 1824, true);
+            hint_row(list, fonts, style, hints.data(), static_cast<int>(hints.size()));
             return;
         }
         list.push_opacity(tween::stagger(age_, 8, 0.08f, 0.5f) * (1.0f - sheet_.value));
@@ -973,12 +986,12 @@ class RommPS final : public app::Concept
             std::vector<ui::Hint> hints{close, pages};
             if (app_.config().save_sync)
                 hints.push_back({ui::Button::cross, home_focus_ == 0 ? "Sync now" : "Open"});
-            ui::draw_hints(list, fonts, style, hints.data(), static_cast<int>(hints.size()), 1824, true);
+            hint_row(list, fonts, style, hints.data(), static_cast<int>(hints.size()));
         }
         else if (tab_ == kLibrary)
         {
             const std::vector<ui::Hint> hints = library_.hints();
-            ui::draw_hints(list, fonts, style, hints.data(), static_cast<int>(hints.size()), 1824, true);
+            hint_row(list, fonts, style, hints.data(), static_cast<int>(hints.size()));
         }
         else if (tab_ == kDownloads)
         {
@@ -994,12 +1007,12 @@ class RommPS final : public app::Concept
                 hints.push_back({ui::Button::square, "Clear finished"});
             if (on_active)
                 hints.push_back({ui::Button::cross, "Hold to cancel and delete"});
-            ui::draw_hints(list, fonts, style, hints.data(), static_cast<int>(hints.size()), 1824, true);
+            hint_row(list, fonts, style, hints.data(), static_cast<int>(hints.size()));
         }
         else
         {
             const ui::Hint hints[] = {close, pages, {ui::Button::cross, settings_.cross_hint(app_)}};
-            ui::draw_hints(list, fonts, style, hints, 3, 1824, true);
+            hint_row(list, fonts, style, hints, 3);
         }
         list.pop_opacity();
     }
