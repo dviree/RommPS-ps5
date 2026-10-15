@@ -78,5 +78,15 @@
         {"romm": ["wii"], "dir": "wii", "emulator": "dolphin", "save_layout": "wii", "bundle_dirs": "{root}/saves/User/Wii"}
       ]
     }
+  },
+  {
+    "id": "ps5-games", "name": "PS5 games (USB homebrew)",
+    "detect": ["/mnt/usb0/homebrew", "/mnt/usb0"],
+    "note": "Not an emulator: PS5 games from RomM's ps5 platform (roms/ps5) download straight to the USB drive's homebrew folder, a folder game file by file. Games only, no saves.",
+    "profile": {
+      "root": "/mnt/usb0/homebrew", "rom_dir": "{root}", "bios_dir": "{root}/bios",
+      "sync_saves": false, "sync": "off",
+      "platforms": [{"romm": ["ps5", "playstation-5"], "dir": "ps5", "emulator": "ps5-games", "sync": "off"}]
+    }
   }
 ]
