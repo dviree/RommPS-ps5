@@ -394,7 +394,7 @@ static void run_firmware_job(job *j) {
         if (cancelled(j)) break;
         const char *fn = jget_str(f, "file_name", "");
         char dest[PATH_MAX_LEN];
-        path_join(dest, sizeof dest, m->bios_dir, fn);
+        path_join(dest, sizeof dest, m->firmware_dir, fn);
         if (file_size(dest) == (int64_t)jget_num(f, "file_size_bytes", -1)) continue;
         char *q = http_escape(fn);
         snprintf(path, sizeof path, "/api/firmware/%d/content/%s", (int)jget_num(f, "id", 0), q);
@@ -404,6 +404,7 @@ static void run_firmware_job(job *j) {
             count++;
             LOGI("downloaded BIOS %s", fn);
         } else {
+            LOGW("BIOS %s didn't download: %s", fn, r.error);
             discard_partial(dest, 0);
             failed++;
         }

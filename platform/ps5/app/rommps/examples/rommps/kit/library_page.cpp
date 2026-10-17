@@ -29,12 +29,16 @@ constexpr float kMargin = 96.0f;
 // The platform tiles start right under the page's heading.
 constexpr float kPlatformTop = 196.0f;
 
+// A cover on the shelf follows its shape.
+constexpr float kRecentH = 200.0f;
 // Platform tiles
 constexpr int kTileCols = 4;
 constexpr float kTileW = 408.0f, kTileH = 220.0f, kTileGap = 32.0f, kTilePitch = kTileH + kTileGap;
-// A grid of games
-constexpr int kCols = 8;
-constexpr float kGridTop = 400.0f, kCardW = 176.0f, kCardH = 235.0f, kColPitch = 200.0f, kRowPitch = 260.0f;
+// A grid of games: its columns and cards follow the shape of its covers
+constexpr int kMinCols = 4, kMaxCols = 8;
+constexpr float kGridTop = 400.0f, kGridW = 1620.0f, kCardTallest = 235.0f, kColGap = 24.0f, kRowGap = 25.0f;
+// Search results, in a row
+constexpr float kResultH = 224.0f, kResultGap = 24.0f, kResultsEnd = 1824.0f;
 constexpr float kBarX = 1726.0f, kBarW = 98.0f, kBarTop = 392.0f, kBarH = 600.0f;
 // The A to Z bar's slots: # (digits and the rest) then A to Z.
 constexpr int kSlots = 27;
@@ -87,6 +91,41 @@ std::string tail(const hui::gfx::Font &font, const std::string &text, float size
     return from ? "\xE2\x80\xA6" + text.substr(from + 1) : text;
 }
 
+struct GridLayout
+{
+    float shape; // of the cards, width over height
+    int cols;
+    float card_w, card_h, col_pitch, row_pitch;
+};
+
+// As many columns as cards of the grid's shape fit across (8 of 3:4 covers,
+// 6 of square ones, 5 of the wide SNES and N64 boxes), the cards a little
+// shorter when that fills the width better. Every card the same size.
+GridLayout grid_layout(const GameList &l)
+{
+    const float shape = std::clamp(l.shape > 0 ? l.shape : kPortrait, 0.7f, kWidest);
+    const int cols = std::clamp(static_cast<int>(std::lround((kGridW + kColGap) / (kCardTallest * shape + kColGap))),
+                                kMinCols, kMaxCols);
+    const float w = std::min(kCardTallest * shape, (kGridW - kColGap * static_cast<float>(cols - 1)) / static_cast<float>(cols));
+    return {shape, cols, w, w / shape, w + kColGap, w / shape + kRowGap};
+}
+
+// A cover in a grid's card: its own shape, centred. One much wider than the
+// card keeps most of the card's height, cropped at the sides.
+Rect in_card(float shape, const Rect &card)
+{
+    Rect r = fit_cover(shape, card);
+    const float least = card.h * 0.75f;
+    if (r.h < least)
+        r.y = card.y + (card.h - least) * 0.5f, r.h = least;
+    return r;
+}
+
+float shelf_width(App &app, const Game &g)
+{
+    return kRecentH * cover_shape(app, &g);
+}
+
 } // namespace
 
 // ------------------------------------------------------------------ shared
@@ -132,13 +171,40 @@ std::string play_time(double ms)
     return text;
 }
 
+float cover_shape(App &app, const Game *g, float fallback)
+{
+    double since = 0;
+    const float own = g && !g->cover.empty() ? app.cover_aspect(g->cover, &since) : 0.0f;
+    if (own <= 0)
+        return fallback;
+    const float t = tween::smoothstep(tween::clamp01(static_cast<float>(app.clock() - since) / 0.3f));
+    return fallback + (std::clamp(own, kNarrowest, kWidest) - fallback) * t;
+}
+
+Rect fit_cover(float shape, const Rect &box)
+{
+    shape = std::clamp(shape, kNarrowest, kWidest);
+    float w = box.h * shape, h = box.h;
+    if (w > box.w)
+        w = box.w, h = box.w / shape;
+    return {box.x + (box.w - w) * 0.5f, box.y + (box.h - h) * 0.5f, w, h};
+}
+
 void draw_cover(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, const Look &look, App &app, const Game *g,
                 const Rect &rect, float alpha, float radius, bool name)
 {
-    const std::uint32_t texture = g ? app.cover(g->cover).texture : 0;
-    if (texture)
+    static const Cover kNone;
+    const Cover &c = g ? app.cover(g->cover) : kNone;
+    if (c.texture)
     {
-        list.image(texture, rect, hui::gfx::kFullUv, Color::rgb(0xffffff, alpha), radius);
+        // The middle of the cover in the rectangle's shape: cropped, never stretched.
+        Rect uv = hui::gfx::kFullUv;
+        const float want = rect.h > 0 ? rect.w / rect.h : 1.0f;
+        if (c.aspect > want)
+            uv.w = want / c.aspect, uv.x = (1.0f - uv.w) * 0.5f;
+        else if (c.aspect > 0 && c.aspect < want)
+            uv.h = c.aspect / want, uv.y = (1.0f - uv.h) * 0.5f;
+        list.image(c.texture, rect, uv, Color::rgb(0xffffff, alpha), radius);
         return;
     }
     // No cover (yet): a tinted card with the name.
@@ -263,7 +329,8 @@ bool LibraryPage::update(App &app, const hui::InputFrame &input, float dt, hui::
     if (tile_row > tiles_scroll_.target + static_cast<float>(tile_rows - 1))
         tiles_scroll_.target = static_cast<float>(tile_row - tile_rows + 1);
     tiles_scroll_.update(dt, 14.0f);
-    grid_scroll_.target = static_cast<float>(std::max(0, index_ / kCols - 1));
+    if (mode_ == kGrid)
+        grid_scroll_.target = static_cast<float>(std::max(0, index_ / grid_layout(grid(app)).cols - 1));
     grid_scroll_.update(dt, 14.0f);
     const Game *g = focused(app);
     const int id = g ? g->id : -1;
@@ -379,8 +446,10 @@ void LibraryPage::draw_platforms(hui::gfx::DrawList &list, const hui::ui::Fonts 
             const Game *g = games.at(k);
             if (!g)
                 continue;
-            const Rect c{r.x + r.w - 128 - static_cast<float>(k) * 40, r.y + 28 + static_cast<float>(k) * 10, 100,
-                         133};
+            // Each its own shape, as tall as fits 120 wide, standing on the same line.
+            const float shape = cover_shape(app, g);
+            const float h = std::min(133.0f, 120.0f / shape), w = h * shape;
+            const Rect c{r.x + r.w - 28 - w - static_cast<float>(k) * 40, r.y + 161 + static_cast<float>(k) * 10 - h, w, h};
             list.shadow({c.x, c.y + 8, c.w, c.h}, 10, 16, Color::rgb(0x000000, 0.35f));
             draw_cover(list, fonts, look, app, g, c, 1.0f - 0.15f * static_cast<float>(k), 10, false);
         }
@@ -409,7 +478,7 @@ void LibraryPage::open_grid(App &app, int platform_id, const std::string &search
     index_ = 0;
     on_letters_ = false;
     grid_scroll_.snap(0.0f);
-    app.ensure(grid(app), 0, kCols * 4);
+    app.ensure(grid(app), 0, kMaxCols * 4);
 }
 
 int LibraryPage::letter_at(const GameList &l, int index) const
@@ -445,6 +514,7 @@ void LibraryPage::update_grid(App &app, const hui::InputFrame &input, hui::ui::F
         index_ = l.shown(focus_raw_);
     if (l.ready())
         index_ = std::min(index_, std::max(0, l.total - 1)); // the list can come out shorter than first thought
+    settle_shape(app, l);
     move_in_grid(app, input, feedback, details);
     GameList &now = grid(app);
     focus_list_ = &now;
@@ -452,13 +522,39 @@ void LibraryPage::update_grid(App &app, const hui::InputFrame &input, hui::ui::F
     focus_hidden_ = now.hidden.size();
 }
 
+void LibraryPage::settle_shape(App &app, GameList &l) const
+{
+    if (l.shape_settled || !l.ready())
+        return;
+    // The covers of the first rows: the grid takes their middle shape.
+    std::vector<float> seen;
+    int wanted = 0;
+    for (int i = 0; i < std::min(l.total, 2 * kMaxCols); ++i)
+        if (const Game *g = l.at(i); g && !g->cover.empty())
+        {
+            ++wanted;
+            if (const float a = app.cover_aspect(g->cover); a > 0)
+                seen.push_back(std::clamp(a, kNarrowest, kWidest));
+        }
+    if (!seen.empty())
+    {
+        std::nth_element(seen.begin(), seen.begin() + static_cast<std::ptrdiff_t>(seen.size() / 2), seen.end());
+        l.shape = seen[seen.size() / 2];
+    }
+    // It settles once those covers are all here, or enough of them are and
+    // the grid is in use, so it never changes under the focus.
+    const int known = static_cast<int>(seen.size());
+    l.shape_settled = known >= wanted || (known >= 4 && (index_ > 0 || mode_age_ > 1.5f)) || mode_age_ > 4.0f;
+}
+
 void LibraryPage::move_in_grid(App &app, const hui::InputFrame &input, hui::ui::Feedback &feedback, bool &details)
 {
     GameList &l = grid(app);
+    const int cols = grid_layout(l).cols;
     // The games around where the grid is going, not the rows it scrolls past
     // on the way (a jump to a letter animates through everything between).
-    const int target_row = std::max(0, index_ / kCols - 2);
-    app.ensure(l, target_row * kCols, (target_row + 7) * kCols);
+    const int target_row = std::max(0, index_ / cols - 2);
+    app.ensure(l, target_row * cols, (target_row + 7) * cols);
     const int total = std::max(0, l.total);
     const Slots slots = slots_of(l);
     const bool repeat = input.nav_repeat;
@@ -511,7 +607,7 @@ void LibraryPage::move_in_grid(App &app, const hui::InputFrame &input, hui::ui::
     switch (input.nav)
     {
     case Direction::left:
-        if (index_ % kCols > 0)
+        if (index_ % cols > 0)
         {
             --index_;
             feedback.play(Cue::focus);
@@ -520,7 +616,7 @@ void LibraryPage::move_in_grid(App &app, const hui::InputFrame &input, hui::ui::
             refuse(feedback);
         break;
     case Direction::right:
-        if (index_ % kCols < kCols - 1 && index_ + 1 < total)
+        if (index_ % cols < cols - 1 && index_ + 1 < total)
         {
             ++index_;
             feedback.play(Cue::focus);
@@ -535,21 +631,21 @@ void LibraryPage::move_in_grid(App &app, const hui::InputFrame &input, hui::ui::
             refuse(feedback);
         break;
     case Direction::up:
-        if (index_ - kCols >= 0)
+        if (index_ - cols >= 0)
         {
-            index_ -= kCols;
+            index_ -= cols;
             feedback.play(Cue::focus);
         }
         else if (!repeat)
             refuse(feedback);
         break;
     case Direction::down:
-        if (index_ + kCols < total)
+        if (index_ + cols < total)
         {
-            index_ += kCols;
+            index_ += cols;
             feedback.play(Cue::focus);
         }
-        else if (index_ / kCols < (total - 1) / kCols)
+        else if (index_ / cols < (total - 1) / cols)
         {
             index_ = total - 1;
             feedback.play(Cue::focus);
@@ -669,26 +765,33 @@ void LibraryPage::draw_grid(hui::gfx::DrawList &list, const hui::ui::Fonts &font
     list.push_opacity(appear);
     const float shake = ui::shake(nudge_.value, clock, 10.0f, 9.0f);
     const int total = std::max(0, l.total);
+    const GridLayout layout = grid_layout(l);
+    const int cols = layout.cols;
     const int first_row = std::max(0, static_cast<int>(grid_scroll_.value) - 1);
+    const int rows = static_cast<int>((1080.0f - kGridTop) / layout.row_pitch) + 3;
     list.push_clip({0, kGridTop - 30, kBarX - 10, 1080 - kGridTop + 30});
     Rect focus_rect{};
-    for (int row = first_row; row < first_row + 5; ++row)
-        for (int col = 0; col < kCols; ++col)
+    for (int row = first_row; row < first_row + rows; ++row)
+        for (int col = 0; col < cols; ++col)
         {
-            const int i = row * kCols + col;
+            const int i = row * cols + col;
             if (i >= total)
                 break;
-            const float y = kGridTop + (static_cast<float>(row) - grid_scroll_.value) * kRowPitch + 24 * (1.0f - appear);
-            if (y > 1080 || y + kCardH < kGridTop - 40)
+            const float y = kGridTop + (static_cast<float>(row) - grid_scroll_.value) * layout.row_pitch + 24 * (1.0f - appear);
+            if (y > 1080 || y + layout.card_h < kGridTop - 40)
                 continue;
-            const Rect r{kMargin + static_cast<float>(col) * kColPitch, y, kCardW, kCardH};
+            const Game *game = l.at(i);
+            const Rect card{kMargin + static_cast<float>(col) * layout.col_pitch, y, layout.card_w, layout.card_h};
+            const Rect r = game ? in_card(cover_shape(app, game, layout.shape), card) : card;
             if (i == index_)
             {
                 focus_rect = r;
                 continue; // drawn last, on top
             }
-            const Game *game = l.at(i);
-            const float dim = y < kGridTop - 4 ? 0.35f : 0.85f;
+            // Rows above where the grid is going are dimmed: one scrolling in
+            // brightens as soon as the move starts, not once it has settled.
+            const float above = tween::clamp01(grid_scroll_.target - static_cast<float>(row));
+            const float dim = 0.85f - 0.5f * above;
             if (game)
             {
                 draw_cover(list, fonts, look, app, game, r, dim, 14);
@@ -715,7 +818,7 @@ void LibraryPage::draw_grid(hui::gfx::DrawList &list, const hui::ui::Fonts &font
     list.pop_clip();
     // The covers of the two rows below are asked for too (after the ones on
     // screen), so scrolling down finds them ready.
-    for (int i = (first_row + 5) * kCols; i < (first_row + 7) * kCols && i < total; ++i)
+    for (int i = (first_row + rows) * cols; i < (first_row + rows + 2) * cols && i < total; ++i)
         if (const Game *game = l.at(i))
             app.cover(game->cover);
     // The row below fades out under the button hints.
@@ -825,12 +928,16 @@ void LibraryPage::draw_search(hui::gfx::DrawList &list, const hui::ui::Fonts &fo
              Align::right);
     if (l)
     {
+        float x = kMargin;
         for (int i = 0; i < 9; ++i)
         {
             const Game *g = l->at(i);
             if (!g)
                 break;
-            const Rect r{kMargin + static_cast<float>(i) * 192.0f, 340, 168, 224};
+            const Rect r{x, 340, kResultH * cover_shape(app, g), kResultH};
+            if (r.x + r.w > kResultsEnd)
+                break;
+            x += r.w + kResultGap;
             draw_cover(list, fonts, look, app, g, r, 1.0f, 14);
             draw_badge(list, look, app, g, r, accent);
             draw_version(list, fonts, look, g, r);

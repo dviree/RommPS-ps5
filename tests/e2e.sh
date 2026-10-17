@@ -58,7 +58,7 @@ EOF
 # An installed payload in a stand-in etaHEN folder, for the update test.
 mkdir -p "$T/etaHEN/payloads"; echo "old-payload" > "$T/etaHEN/payloads/romm-sync.elf"
 ROMM_SYNC_HOMEBREW="$T/homebrew" ROMM_SYNC_DATA="$T/data" ROMM_SYNC_AUTOSTART="$T/etaHEN/payloads" \
-  ROMM_SYNC_CATALOG="$T/catalog.json" ROMM_SYNC_APP_DIRS="$T/apps" ROMM_SYNC_FS_ROOTS="$T" ROMM_SYNC_COVERS_TICK=1 \
+  ROMM_SYNC_CATALOG="$T/catalog.json" ROMM_SYNC_APP_DIRS="$T/apps" ROMM_SYNC_FS_ROOTS="$T" ROMM_SYNC_COVERS_TICK=1 ROMM_SYNC_RA2_EVERY=1 \
   ROMM_SYNC_UPDATE_URL="http://127.0.0.1:$MOCK_PORT/_github/release" "$ROOT/build/host/romm-sync" >"$T/daemon.log" 2>&1 &
 sleep 6   # let the (unpaired, skipped) startup sync pass
 
@@ -834,5 +834,51 @@ curl -sf "$API/api/events?rom_id=73" | grep -q "Missing here" || fail "the sync 
 rm -f "$stdir/No Sync Game (USA).state1"
 syncnow
 [[ "$(cat "$stdir/No Sync Game (USA).state1" 2>/dev/null)" == "emu-state" ]] || fail "a deleted state must come back"
+
+echo "26. RetroArch 2.0: games go to the folders named after libretro's databases, and the ones already here move there"
+PS2N="$HB/content/Sony - PlayStation 2"; SNESN="$HB/content/Nintendo - Super Nintendo Entertainment System"
+post /api/setup/emulators "{\"roots\":[\"$HB\"]}" >/dev/null || fail "setting up RetroArch refused"
+dirs_of() { curl -sf "$API/api/paths" | python3 -c "import json,sys; print(sorted(m['rom_dir'] for m in json.load(sys.stdin) if m['platforms'].split(',')[0] == '$1'))"; }
+to_move() { curl -sf "$API/api/status" | python3 -c "import json,sys; print(json.load(sys.stdin).get('retroarch_move',{}).get('games',0))"; }
+[[ "$(dirs_of ps2)" == "['$HB/content/ps2']" ]] || fail "before 2.0, PS2 games go to content/ps2: $(dirs_of ps2)"
+mkdir -p "$HB/content/ps2/Folder Game (USA)" "$HB/content/snes" "$HB/webui" "$PS2N" "$SNESN"
+echo iso > "$HB/content/ps2/Gran Turismo 4 (USA).iso"
+echo bin > "$HB/content/ps2/Folder Game (USA)/game.bin"
+echo old > "$HB/content/ps2/Both (USA).iso"; echo new > "$PS2N/Both (USA).iso"
+echo part > "$HB/content/ps2/Arriving (USA).iso.part"
+echo sfc > "$HB/content/snes/Super Metroid (USA).sfc"
+echo '{"release": "v1.0.0-beta.1"}' > "$HB/webui/version.json"
+sleep 1.1
+[[ "$(to_move)" == 0 ]] || fail "nothing moves before 2.0"
+# 2.0 plays PS2 with PS5SX2 (an upgrade can leave LRPS2 behind), on two shared cards.
+printf 'corename = "PS5SX2"\ndatabase = "Sony - PlayStation 2"\n' > "$HB/cores/ps5sx2_libretro.info"
+mkdir -p "$HB/system/pcsx2/memcards"; echo card1 > "$HB/system/pcsx2/memcards/Mcd001.ps2"; echo card2 > "$HB/system/pcsx2/memcards/Mcd002.ps2"
+echo '{"release": "v2.0.0-beta-2"}' > "$HB/webui/version.json"
+sleep 1.1
+waiting=$(curl -sf "$API/api/status" | python3 -c "import json,sys; print(sorted((f['from'].split('/')[-1], f['games']) for f in json.load(sys.stdin)['retroarch_move']['folders']))")
+snes_games=$(ls "$HB/content/snes" | wc -l)
+[[ "$waiting" == "[('ps2', 2), ('snes', $snes_games)]" ]] || fail "waiting to move: $waiting"
+[[ "$(dirs_of ps2)" == "['$PS2N']" && "$(dirs_of snes)" == "['$SNESN']" ]] || fail "with 2.0, games go to the new folders: $(dirs_of ps2) $(dirs_of snes)"
+ps2core=$(curl -sf "$API/api/config" | python3 -c "import json,sys; print([(e['emulator'], e['core_name'], 'sync_requires_option' in e) for p in json.load(sys.stdin)['profiles'] if p.get('root')=='$HB' for e in p['platforms'] if e['romm'][0]=='ps2'])")
+[[ "$ps2core" == "[('ps5sx2', 'PS5SX2', False)]" ]] || fail "with 2.0, PS2 plays with PS5SX2: $ps2core"
+cards=$(curl -sf "$API/api/memcards" | python3 -c "import json,sys; print(sorted((s['emulator'], s['card']) for s in json.load(sys.stdin)['slots']))")
+[[ "$cards" == *"('RetroArch PS5SX2', 1)"*"('RetroArch PS5SX2', 2)"* ]] || fail "PS5SX2's two shared cards are backed up: $cards"
+# RetroArch's history names games as it sees them, under /app0.
+mkdir -p "$HB/playlists/builtin"
+cat > "$HB/playlists/builtin/content_history.lpl" <<'LPL'
+{"version": "1.5", "items": [
+ {"path": "/app0/content/snes/Super Metroid (USA).sfc", "label": "Super Metroid", "core_path": "DETECT", "core_name": "DETECT"},
+ {"path": "/app0/content/Saturn/Other.chd", "label": "Not ours", "core_path": "DETECT", "core_name": "DETECT"}]}
+LPL
+r=$(post /api/retroarch/move) || fail "moving refused"
+[[ "$r" == *"\"moved\":$((snes_games + 2))"* ]] || fail "moved: $r"
+[[ -f "$PS2N/Gran Turismo 4 (USA).iso" && -f "$PS2N/Folder Game (USA)/game.bin" && -f "$SNESN/Super Metroid (USA).sfc" ]] || fail "the games didn't move"
+[[ ! -e "$HB/content/snes" ]] || fail "an emptied old folder must go"
+[[ "$(cat "$PS2N/Both (USA).iso")" == new && "$(cat "$HB/content/ps2/Both (USA).iso")" == old ]] || fail "a game in both folders must stay as it is"
+[[ -f "$HB/content/ps2/Arriving (USA).iso.part" ]] || fail "a download still arriving must stay"
+[[ "$(to_move)" == 0 ]] || fail "nothing should be left to move: $(to_move)"
+hist=$(python3 -c "import json,sys; print([i['path'] for i in json.load(open(sys.argv[1]))['items']])" "$HB/playlists/builtin/content_history.lpl")
+[[ "$hist" == "['/app0/content/Nintendo - Super Nintendo Entertainment System/Super Metroid (USA).sfc', '/app0/content/Saturn/Other.chd']" ]] || fail "the history must follow the moved games, and only them: $hist"
+curl -s -X POST "$API/api/retroarch/move" | grep -q error || fail "a second move must say there's nothing to move"
 
 echo "PASS"

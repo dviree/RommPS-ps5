@@ -26,6 +26,7 @@
 #include "pair.h"
 #include "platform.h"
 #include "profiles.h"
+#include "ra2.h"
 #include "state.h"
 #include "sync.h"
 #include "ui_index.h" /* generated from ui/index.html */
@@ -280,6 +281,9 @@ static cJSON *status_json(void) {
     cJSON_AddItemToObject(j, "sync", sync_status_json());
     cJSON_AddItemToObject(j, "pairing", pair_status());
     cJSON_AddItemToObject(j, "covers", covers_status());
+    ra2_check(0);
+    cJSON *move = ra2_pending();
+    if (move) cJSON_AddItemToObject(j, "retroarch_move", move);
     return j;
 }
 
@@ -1152,13 +1156,13 @@ static void route(request *r) {
             }
             config_unlock();
         }
-        cJSON_Delete(j);
         if (!found) send_error(fd, 400, "unknown emulator or choice");
         else if (rc) send_error(fd, 500, "could not save config");
         else {
             LOGI("save sync for %s: %s", at, mode);
             send_ok(fd);
         }
+        cJSON_Delete(j); /* at and mode are in it */
         return;
     }
     if (is_get && !strcmp(r->path, "/api/setup/preview")) {
@@ -1236,6 +1240,19 @@ static void route(request *r) {
         cJSON_Delete(j);
         if (rc) send_error(fd, 400, err);
         else send_ok(fd);
+        return;
+    }
+    if (is_post && !strcmp(r->path, "/api/retroarch/move")) {
+        int moved = 0;
+        int rc = ra2_move_games(&moved, err, sizeof err);
+        if (rc && !moved) {
+            send_error(fd, 400, err);
+            return;
+        }
+        cJSON *j = cJSON_CreateObject();
+        cJSON_AddNumberToObject(j, "moved", moved);
+        if (rc) cJSON_AddStringToObject(j, "error", err);
+        send_json(fd, 200, j);
         return;
     }
     if (is_post && !strcmp(r->path, "/api/strays/move")) {

@@ -131,6 +131,11 @@ if (/PlayStation/.test(navigator.userAgent)) document.documentElement.className 
 
 <section id="home" class="active">
   <div class="notice" id="updNotice" style="display:none"></div>
+  <div class="card" id="raMoveCard" style="display:none">
+    <h2 class="warn" style="margin-top:0">RetroArch 2.0 has new game folders</h2>
+    <p class="muted" id="raMoveText"></p>
+    <button id="raMove">Move them</button>
+  </div>
   <div class="card" id="syncOff" style="display:none"><h2 style="margin:0">Save sync is off</h2><p class="muted">RomM is only for games. Turn it on in Settings.</p></div>
   <div class="card syncCard">
     <div class="row">
@@ -388,6 +393,10 @@ function renderStatus(s) {
   if (document.querySelector("#pair.active") && !wz.editing) showTab("home");
   var sy = s.sync;
   $("syncOff").style.display = s.save_sync === false ? "" : "none";
+  var mv = s.retroarch_move;
+  $("raMoveCard").style.display = mv ? "" : "none";
+  if (mv) $("raMoveText").textContent = "It no longer sees " + mv.games + " game" + (mv.games === 1 ? "" : "s") + " in its old folders (" +
+    mv.folders.map(function (f) { return f.from.split("/").pop(); }).join(", ") + "). Move " + (mv.games === 1 ? "it" : "them") + " to the new ones?";
   each("#home .syncCard", function (x) { x.style.display = s.save_sync === false ? "none" : ""; });
   if (sy.sync_count !== state.shownSyncs && !sy.running) { state.shownSyncs = sy.sync_count; loadActivity(); loadTracked(); }
   $("syncNow").disabled = sy.running;
@@ -444,6 +453,13 @@ $("strays").onclick = function (ev) {
   if (!confirm("Move this save to the folder the emulator reads? A backup is kept.")) return;
   b.disabled = true;
   api("POST", "/api/strays/move", { path: b.dataset.stray }).then(function () { toast("Moved"); setTimeout(poll, 1500); }).catch(function (e) { b.disabled = false; toast(e.message, 1); });
+};
+$("raMove").onclick = function () {
+  var b = this; b.disabled = true;
+  api("POST", "/api/retroarch/move").then(function (r) {
+    toast("Moved " + r.moved + " game" + (r.moved === 1 ? "" : "s") + (r.error ? ", " + r.error : ""), !!r.error);
+    poll();
+  }).catch(function (e) { toast(e.message, 1); }).then(function () { b.disabled = false; });
 };
 $("rescan").onclick = function () { api("POST", "/api/rescan").then(function () { toast("Checking again"); }); };
 

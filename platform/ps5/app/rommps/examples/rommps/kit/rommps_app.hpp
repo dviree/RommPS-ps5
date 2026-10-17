@@ -38,6 +38,7 @@ struct Palette
 struct Cover
 {
     std::uint32_t texture = 0; // 0 until it's loaded (or if there is none)
+    float aspect = 0;          // its width over its height, 0 until it's loaded
     Palette palette;
     bool requested = false;
     bool failed = false;
@@ -94,6 +95,10 @@ struct GameList
     std::vector<std::pair<std::string, int>> raw_letters; // the same, by RomM's offset
     std::vector<int> hidden;          // RomM offsets of the files that aren't games, sorted
     std::string error;
+    // The shape of the grid's cards (width over height), from the covers at
+    // the top; 0 until the library has seen some. Settled: it stays.
+    float shape = 0;
+    bool shape_settled = false;
     bool ready() const { return total >= 0; }
     // Positions in the list as shown, which skips what isn't a game, and
     // RomM's offsets. What isn't a game is known once its page is here.
@@ -173,6 +178,10 @@ struct Status
     // Pairing in progress (/api/pair/start): "pending" while RomM waits for
     // the code to be approved, "error" when it failed, "" otherwise.
     std::string pairing, pairing_message, user_code, verification_url;
+    // Games left in the folders RetroArch used before 2.0, and those
+    // folders' names (/api/retroarch/move moves them to the new ones).
+    int retroarch_move = 0;
+    std::string retroarch_folders;
 };
 
 // The payload's settings that RommPS shows (/api/config).
@@ -218,7 +227,7 @@ class App
     // (assets/rommps/romm-sync.elf, version kMinPayload): it starts it when
     // none is running, puts it in place of an older one (never of a newer
     // one), and keeps the copies the console starts it from up to date.
-    static constexpr const char *kMinPayload = "1.2.0";
+    static constexpr const char *kMinPayload = "1.2.1";
     bool payload_too_old() const;
     void start_payload(); // sends the payload to the HEN's loader
     // Sending it, or RomM Sync is running and not answering yet (starting up,
@@ -252,6 +261,10 @@ class App
     }
     // A cover's texture and palette; asks for it the first time.
     const Cover &cover(const std::string &path);
+    // A cover's width over its height, kept after its texture is let go;
+    // 0 until it has been loaded once. since: when it became known.
+    float cover_aspect(const std::string &path, double *since = nullptr) const;
+    double clock() const { return clock_; }
 
     void download(int rom_id, const std::string &name);
     void cancel_download(int job_id);
@@ -340,6 +353,12 @@ class App
     float update_timer_ = 0;
     bool update_busy_ = false;
     std::unordered_map<std::string, Cover> covers_;
+    struct Shape
+    {
+        float aspect = 0;
+        double since = 0;
+    };
+    std::unordered_map<std::string, Shape> shapes_; // every cover loaded this launch
     struct Pending
     {
         std::string path, bytes;
