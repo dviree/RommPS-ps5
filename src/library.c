@@ -392,7 +392,9 @@ static void run_firmware_job(job *j) {
         if (cancelled(j)) break;
         const char *fn = jget_str(f, "file_name", "");
         char dest[PATH_MAX_LEN];
-        path_join(dest, sizeof dest, m->firmware_dir, fn);
+        char dir[PATH_MAX_LEN];
+        path_join(dir, sizeof dir, m->bios_dir, m->firmware_subdir);
+        path_join(dest, sizeof dest, m->firmware_subdir[0] ? dir : m->bios_dir, fn);
         if (file_size(dest) == (int64_t)jget_num(f, "file_size_bytes", -1)) continue;
         char *q = http_escape(fn);
         snprintf(path, sizeof path, "/api/firmware/%d/content/%s", (int)jget_num(f, "id", 0), q);

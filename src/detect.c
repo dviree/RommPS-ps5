@@ -227,6 +227,9 @@ static cJSON *retroarch_candidate(const char *root) {
 
     char name[128] = "RetroArch", title_id[16] = "";
     app_title(root, name, sizeof name, title_id, sizeof title_id);
+    /* No app folder to name it (the PS4's builds): told apart by their folder. */
+    if (!title_id[0] && strcmp(path_basename(root), "retroarch") != 0)
+        snprintf(name, sizeof name, "RetroArch (%s)", path_basename(root));
     if (!strstr(name, "RetroArch") && !strstr(name, "retroarch") && !has_cfg) return NULL;
 
     cJSON *plats = cJSON_CreateArray(), *cores = cJSON_CreateArray();

@@ -369,6 +369,8 @@ each(".tab", function (t) { t.onclick = function () { showTab(t.dataset.tab); };
 
 // Status
 function renderStatus(s) {
+  // The PS4's browser can't keep up with the frosted glass blur: it goes, the theme stays.
+  if (s.platform === "ps4" && !renderStatus.flat) { renderStatus.flat = true; document.documentElement.style.setProperty("--glass", "none"); }
   state.status = s;
   $("conn").innerHTML = s.paired
     ? '<span class="ok">&#9679;</span> ' + esc(s.username || "") + " at " + esc(s.server_url.replace(/^https?:\/\//, ""))
@@ -422,10 +424,19 @@ function renderStatus(s) {
   $("unmatchedCard").style.display = sy.unmatched.length ? "" : "none";
   $("unmatched").innerHTML = sy.unmatched.map(function (u) { return "<li>" + esc(u) + "</li>"; }).join("");
 }
-function poll() {
+function poll(timer) {
   poll.n = (poll.n || 0) + 1;
+  if (timer !== true) poll.last = null; // called after an action: always redrawn
   if (poll.n % 10 === 0) loadUpdate();
-  api("GET", "/api/status").then(renderStatus).catch(function () { $("conn").innerHTML = '<span class="err">&#9679;</span> Can\'t reach RommPS'; });
+  api("GET", "/api/status").then(function (s) {
+    // Redrawn only when something changed (the uptime always does): on the
+    // PS4's browser every redraw holds up button presses.
+    poll.slow = s.platform === "ps4";
+    var key = JSON.stringify(s, function (k, v) { return k === "uptime" ? undefined : v; });
+    if (key === poll.last) return;
+    poll.last = key;
+    renderStatus(s);
+  }).catch(function () { poll.last = null; $("conn").innerHTML = '<span class="err">&#9679;</span> Can\'t reach RommPS'; });
   if (document.querySelector("#downloads.active")) loadDownloads();
   if (document.querySelector("#library.active") && $("romCard").style.display !== "none") pollLibraryDownloads();
 }
@@ -1331,7 +1342,8 @@ api("GET", "/api/status").then(function (s) {
   api("GET", "/api/config").then(function (c) { $("wzInsecure").checked = !c.tls_verify; }).catch(function () {});
   loadUpdate().then(function () { if (state.update && updBusy(state.update)) watchUpdate(); });
 }).catch(function () { $("conn").textContent = "Can't reach RommPS"; });
-setInterval(poll, 3000);
+// Every 3 s, or 10 s on the PS4, whose browser is slow to redraw.
+(function next() { setTimeout(function () { poll(true); next(); }, poll.slow ? 10000 : 3000); })();
 </script>
 </body>
 </html>

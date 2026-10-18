@@ -38,8 +38,11 @@ typedef struct {
     char serial[24];      /* a PS1 disc's, "SCUS-94194" */
     char fnv64[17];       /* FNV-1a 64 of the game file */
     char safe_stem[256];  /* stems[0], non-alphanumerics as "_" */
+    char game_id[16];     /* a disc's, "GAFE01" (DolphinPS4 names states by it) */
     rom_rules rules;
 } local_rom;
+
+static int rom_game_id(const local_rom *r, char *out, size_t n);
 
 typedef struct {
     char path[PATH_MAX_LEN];
@@ -170,9 +173,9 @@ static int map_uses(const profile_map *m, const char *var) {
 }
 
 /* The template variables a game's file names can use. */
-static void name_vars(const local_rom *r, const char *ext, const char *vars[13]) {
+static void name_vars(const local_rom *r, const char *ext, const char *vars[15]) {
     const char *v[] = {"rom_stem", r->stems[0], "ext", ext ? ext : "", "rom_md5", r->md5, "serial", r->serial,
-                       "rom_fnv64", r->fnv64, "rom_stem_safe", r->safe_stem, NULL};
+                       "rom_fnv64", r->fnv64, "rom_stem_safe", r->safe_stem, "game_id", r->game_id, NULL};
     memcpy(vars, v, sizeof v);
 }
 
@@ -208,7 +211,7 @@ static void add_derived_stems(local_rom *r, cJSON *e) {
             if (need_fnv) jset_str(e, "fnv64", r->fnv64);
         }
     }
-    const char *vars[13];
+    const char *vars[15];
     name_vars(r, "", vars);
     for (int pass = 0; pass < 2; pass++) {
         char list[256], *save = NULL;
@@ -531,6 +534,7 @@ static void scan_rom_dir(scan_ctx *c, const profile_map *m) {
             if (sd) closedir(sd);
         }
         r.rom_id = rom_id;
+        if (map_uses(m, "{game_id}") && rom_game_id(&r, r.game_id, sizeof r.game_id) != 0) r.game_id[0] = 0;
         if (m->save_stems[0] || m->state_stems[0] || map_uses(m, "{rom_stem_safe}")) {
             state_lock();
             add_derived_stems(&r, state_entry("roms", path));
@@ -550,8 +554,6 @@ static void scan_rom_dir(scan_ctx *c, const profile_map *m) {
 
 /* The folder the emulator reads this game's saves (or states) from. Returns 0
  * when saves are sorted by core and the core name isn't known. */
-static int rom_game_id(const local_rom *r, char *out, size_t n);
-
 static int expected_dir(const local_rom *r, int states, char *out, size_t n) {
     const rom_rules *ru = &r->rules;
     /* A folder per game, by its id (Porpoise's states/GAFE01). */
@@ -1516,7 +1518,7 @@ static void download_target(const local_rom *r, const char *server_name, const c
         if (comma) *comma = 0;
         str_copy(ext, sizeof ext, first[0] ? first : path_ext(server_name));
     }
-    const char *vars[13];
+    const char *vars[15];
     name_vars(r, ext, vars);
     char name[512], dir[PATH_MAX_LEN], tmpl[128];
     save_name_now(r->map, tmpl, sizeof tmpl);
@@ -1910,22 +1912,24 @@ static void state_upload_name(const char *path, char *out, size_t n) {
  * container, uncompressed. *core becomes the core a bare state comes from
  * when its signature says (PSXS5 runs several). */
 static int state_for_romm(const char *path, char *tmp, size_t n, const char **core) {
-    size_t len = 0, out_n = 0;
-    unsigned char *data = (unsigned char *)read_file(path, &len);
-    if (!data) return -1;
-    const char *sig = state_core_of(data, len);
-    if (sig && core) *core = sig;
-    unsigned char *out = state_to_rastate(data, len, &out_n);
-    free(data);
-    if (!out) {
-        LOGW("can't read the state %s", path);
-        return -1;
-    }
     static int seq;
     snprintf(tmp, n, "%s/tmp/state-up-%d.bin", plat_data_dir(), __sync_add_and_fetch(&seq, 1));
-    int rc = write_file_atomic(tmp, out, out_n);
-    free(out);
-    return rc;
+    /* File to file, never whole in memory: states run to tens of MB (a
+     * GameCube one), more than the PS4's payload can hold. */
+    unsigned char head[64] = {0};
+    FILE *f = fopen(path, "rb");
+    size_t got = f ? fread(head, 1, sizeof head, f) : 0;
+    if (f) fclose(f);
+    state_kind kind = state_kind_of(head, got);
+    if (kind == STATE_RAW) {
+        const char *sig = state_core_of(head, got); /* a core's signature opens its state */
+        if (sig && core) *core = sig;
+    }
+    int rc = kind == STATE_RZIP ? state_unrzip_file(path, tmp)
+             : kind == STATE_RASTATE ? copy_file(path, tmp)
+                                     : state_wrap_file(path, tmp);
+    if (rc) LOGW("can't read the state %s", path);
+    return rc ? -1 : 0;
 }
 
 static int sync_states_up(scan_ctx *c, int only_rom) {
@@ -2011,7 +2015,7 @@ static void state_local_name(const local_rom *r, const char *server_name, char *
             return;
         }
     }
-    const char *ext = path_ext(server_name), *vars[13];
+    const char *ext = path_ext(server_name), *vars[15];
     if (!strcmp(ext, ".state")) ext = r->map->state_slot0;
     name_vars(r, ext, vars);
     str_template(out, n, r->map->state_name, vars);
@@ -2062,17 +2066,15 @@ static int fetch_state(const scan_ctx *c, const cJSON *s, const char *path, cons
         return -1;
     }
     if (!strcmp(r->map->state_format, "raw")) {
-        size_t len = 0, raw_n = 0;
-        unsigned char *data = (unsigned char *)read_file(tmp, &len);
-        unsigned char *raw = data ? state_to_raw(data, len, &raw_n) : NULL;
-        free(data);
-        if (!raw || write_file_atomic(tmp, raw, raw_n) != 0) {
+        /* File to file: a state can be tens of MB, more than the PS4 holds. */
+        char raw[PATH_MAX_LEN + 8];
+        snprintf(raw, sizeof raw, "%s.raw", tmp);
+        if (state_unwrap_file(tmp, raw) != 0 || rename(raw, tmp) != 0) {
             LOGW("state %d: can't unpack it for %s", id, path);
-            free(raw);
+            unlink(raw);
             unlink(tmp);
             return -1;
         }
-        free(raw);
     }
     backup_file(c, path, rom_id);
     if (move_file(tmp, path) != 0) return -1;

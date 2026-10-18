@@ -46,7 +46,8 @@ static const char *const HOMEBREW_DIRS[] = {
     "/data/homebrew", "/mnt/usb0/homebrew", "/mnt/usb1/homebrew", NULL};
 /* RetroArch keeps its config, saves and core .info files here; the cores
  * themselves are in /data/self/retroarch/cores (see retroarch.cfg). */
-static const char *const EMULATOR_DIRS[] = {"/data/retroarch", NULL};
+/* RetroArch builds: OsirizX's (/data/retroarch) and gen04177's RArch (/data/rarch). */
+static const char *const EMULATOR_DIRS[] = {"/data/retroarch", "/data/rarch", NULL};
 
 static const plat_info_t INFO = {
     .name = "ps4",

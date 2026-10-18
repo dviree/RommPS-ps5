@@ -225,6 +225,17 @@ static void check_requirement(const profile_map *m, const char *game, const char
         snprintf(note, nn, "saves sync when core option %s is \"%s\" (now \"%s\")", m->req_key, m->req_value, val);
 }
 
+int profile_ra_dir(const profile_map *m, const char *key, char *out, size_t n) {
+    char path[PATH_MAX_LEN];
+    out[0] = 0;
+    if (!m->ra_cfg_dir[0]) return 0;
+    path_join(path, sizeof path, m->ra_cfg_dir, "retroarch.cfg");
+    char *cfg = read_file(path, NULL);
+    if (cfg) ra_apply(cfg, key, m->root, out, n);
+    free(cfg);
+    return out[0] != 0;
+}
+
 void profile_rules_for(const profile_map *m, const char *rom_path, rom_rules *out) {
     memset(out, 0, sizeof *out);
     str_copy(out->save_dir, sizeof out->save_dir, m->save_dir);
@@ -286,7 +297,6 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
         str_copy(root, sizeof root, jstr(p, NULL, "root", ""));
 
         char ra_save[PATH_MAX_LEN] = "", ra_state[PATH_MAX_LEN] = "", ra_sys[PATH_MAX_LEN] = "";
-        char ra_playlists[PATH_MAX_LEN] = "";
         int ra_in_content[2] = {0, 0}, ra_by_content[2] = {0, 0}, ra_by_core[2] = {0, 0};
         char ra_cfg_dir[PATH_MAX_LEN] = "";
         const char *ra_tpl = jstr(p, NULL, "retroarch_cfg", NULL);
@@ -304,7 +314,6 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
                 if (slash) *slash = 0;
                 apply_ra_cfg(cfg, root, none, ra_save, ra_state, sizeof ra_save, ra_in_content, ra_by_content, ra_by_core);
                 ra_apply(cfg, "system_directory", root, ra_sys, sizeof ra_sys);
-                ra_apply(cfg, "playlist_directory", root, ra_playlists, sizeof ra_playlists);
                 free(cfg);
                 break;
             }
@@ -315,8 +324,24 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
         cJSON_ArrayForEach(e, plats) {
             if (profiles_excludes(p, profiles_system_key(e))) continue; /* another emulator plays it */
             if (cnt == cap) {
-                cap = cap ? cap * 2 : 16;
-                maps = realloc(maps, sizeof *maps * (size_t)cap);
+                /* Room for every entry at once: each is 13 KB, and the PS4's
+                 * payload can't always find room to grow a big array. */
+                int want = 0;
+                const cJSON *q, *f;
+                cJSON_ArrayForEach(q, profiles) {
+                    if (!jbool(q, NULL, "enabled", 1)) continue;
+                    cJSON_ArrayForEach(f, cJSON_GetObjectItemCaseSensitive(q, "platforms"))
+                        want += !profiles_excludes(q, profiles_system_key(f));
+                }
+                profile_map *grown = realloc(maps, sizeof *maps * (size_t)(want > cap ? want : cap + 1));
+                if (!grown) {
+                    LOGE("no memory for %d emulator platforms", want);
+                    free(maps);
+                    *out = NULL;
+                    return 0;
+                }
+                maps = grown;
+                cap = want > cap ? want : cap + 1;
             }
             profile_map *m = &maps[cnt];
             memset(m, 0, sizeof *m);
@@ -350,8 +375,7 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
             const char *core = jstr(p, e, "core_name", "");
             const int pcsx2 = str_ieq(core, "LRPS2") || str_ieq(core, "PCSX2") || str_ieq(core, "PS5SX2");
             const char *sub = jstr(p, e, "firmware_subdir", pcsx2 && ra_tpl ? "pcsx2/bios" : "");
-            if (sub[0]) path_join(m->firmware_dir, sizeof m->firmware_dir, m->bios_dir, sub);
-            else str_copy(m->firmware_dir, sizeof m->firmware_dir, m->bios_dir);
+            str_copy(m->firmware_subdir, sizeof m->firmware_subdir, sub);
             for (int k = 0; k < 2; k++) {
                 m->explicit_dir[k] = cJSON_GetObjectItemCaseSensitive(e, k ? "state_dir" : "save_dir") != NULL;
                 if (m->explicit_dir[k]) continue;
@@ -360,7 +384,6 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
                 m->by_core[k] = ra_by_core[k];
             }
             str_copy(m->core_name, sizeof m->core_name, jstr(p, e, "core_name", ""));
-            str_copy(m->playlist_dir, sizeof m->playlist_dir, ra_playlists);
             str_copy(m->save_layout, sizeof m->save_layout, jstr(p, e, "save_layout", ""));
             str_copy(m->bundle_dirs, sizeof m->bundle_dirs, jstr(p, e, "bundle_dirs", ""));
 

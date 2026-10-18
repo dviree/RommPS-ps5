@@ -56,9 +56,9 @@ typedef struct {
     char save_dir[PATH_MAX_LEN];
     char state_dir[PATH_MAX_LEN];
     char bios_dir[PATH_MAX_LEN];
-    /* Where RomM's firmware goes: bios_dir, or a folder in it the core reads
+    /* Where RomM's firmware goes in bios_dir: "" or a folder the core reads
      * ("firmware_subdir": "pcsx2/bios" for RetroArch's PS2 cores). */
-    char firmware_dir[PATH_MAX_LEN];
+    char firmware_subdir[32];
     char save_exts[128];
     char state_exts[128];
     char save_name[128];
@@ -106,7 +106,6 @@ typedef struct {
      * by_core = <dir>/<core_name>/. Both sort flags nest content then core. */
     int in_content[2], by_content[2], by_core[2];
     char core_name[64]; /* core library name, e.g. "mGBA" */
-    char playlist_dir[PATH_MAX_LEN]; /* RetroArch's, "" for <root>/playlists */
     char save_layout[8];    /* "" for one file per game, or psp, gci, wii (see bundle.h) */
     char bundle_dirs[512];  /* candidate folders for bundled saves, comma separated */
     /* Why saves aren't synced for this platform, shown in the UI. */
@@ -131,6 +130,10 @@ typedef struct {
 } rom_rules;
 
 void profile_rules_for(const profile_map *m, const char *rom_path, rom_rules *out);
+
+/* A folder setting from the emulator's retroarch.cfg ("playlist_directory"),
+ * as a path; 0 if it has none (or isn't RetroArch). */
+int profile_ra_dir(const profile_map *m, const char *key, char *out, size_t n);
 
 /* Built-in default profiles (caller owns the returned array). */
 cJSON *profiles_default(void);

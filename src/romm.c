@@ -45,15 +45,23 @@ cJSON *romm_call_raw(const char *base, const char *auth, const char *method, con
 }
 
 int romm_list(const char *path, int offset, int limit, romm_list_cb cb, void *ctx, long *status) {
-    int seen = 0;
+    int seen = 0, page_size = ROMM_LIST_PAGE;
     if (status) *status = 0;
     while (seen < limit) {
         char url[2048];
-        int want = limit - seen < ROMM_LIST_PAGE ? limit - seen : ROMM_LIST_PAGE;
+        int want = limit - seen < page_size ? limit - seen : page_size;
         snprintf(url, sizeof url, "%s%soffset=%d&limit=%d", path, strchr(path, '?') ? "&" : "?", offset + seen, want);
         long st = 0;
         cJSON *page = romm_call("GET", url, NULL, &st);
         if (status) *status = st;
+        /* A page too big to take in (games with a lot of metadata, where memory
+         * is tight): the same games again, fewer at a time. */
+        if ((st == 0 || (st == 200 && !page)) && want > 1) {
+            cJSON_Delete(page);
+            page_size = want / 2;
+            LOGI("%s: trying %d games at a time", path, page_size);
+            continue;
+        }
         if (st != 200 || !page) {
             cJSON_Delete(page);
             return -1;

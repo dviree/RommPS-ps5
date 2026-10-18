@@ -32,7 +32,8 @@ cJSON *romm_call(const char *method, const char *path, const cJSON *body, long *
 
 /* GETs a paged RomM list such as /api/roms?..., limit items from offset,
  * ROMM_LIST_PAGE at a time. RomM's game lists carry each game's full metadata,
- * so a page of 30 can be too much to parse in the PS4's memory. cb gets each
+ * so a page of 30 can be too much to parse in the PS4's memory; a page that
+ * can't be taken in is asked for again, fewer games at a time. cb gets each
  * item with its page (first is set for the first page, and cb is called once
  * with a NULL item for an empty list); nonzero stops. Returns how many items
  * were seen, -1 on an error (status holds the HTTP status). */

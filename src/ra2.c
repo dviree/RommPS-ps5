@@ -152,7 +152,9 @@ void ra2_check(int now) {
         cJSON_AddStringToObject(o, "from", from);
         cJSON_AddStringToObject(o, "to", m->rom_dir);
         cJSON_AddStringToObject(o, "root", m->root);
-        cJSON_AddStringToObject(o, "playlists", m->playlist_dir);
+        char playlists[PATH_MAX_LEN] = "";
+        profile_ra_dir(m, "playlist_directory", playlists, sizeof playlists);
+        cJSON_AddStringToObject(o, "playlists", playlists);
         cJSON_AddNumberToObject(o, "games", games);
         cJSON_AddItemToArray(folders, o);
         total += games;
