@@ -23,16 +23,14 @@ A clear and concise description of what you expected to happen.
 **Screenshots**
 If applicable, add screenshots to help explain your problem.
 
-**Desktop (please complete the following information):**
- - OS: [e.g. iOS]
- - Browser [e.g. chrome, safari]
- - Version [e.g. 22]
+**Firmware Version:**
+Which firmware version is your console on? (e.g 13.62)
 
-**Smartphone (please complete the following information):**
- - Device: [e.g. iPhone6]
- - OS: [e.g. iOS8.1]
- - Browser [e.g. stock browser, safari]
- - Version [e.g. 22]
+**PS5 Hardware Model:**
+ Which console revision do you have? (e.g CFI-1215A)
 
 **Additional context**
 Add any other context about the problem here.
+
+**Diagnostic Log**
+- Retrieve a diagnostic log from settings after replicating the issue and attach it to the ticket.
