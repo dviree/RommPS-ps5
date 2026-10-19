@@ -1,7 +1,7 @@
 ---
 name: Emulator/App Submission
 about: Request that RommPS includes an Emulator/App profile for your PS4/PS5 application
-title: ''
+title: '[App Profile] Create Sync Profile for "Your App"'
 labels: ''
 assignees: s0liton
 type: Task
@@ -12,7 +12,7 @@ type: Task
 ### Application Name
 - What do you call it?
 
-## Title ID
+### Title ID
 - What is your app's title ID?
 
 ### GitHub URL
@@ -20,6 +20,9 @@ type: Task
 
 ### Describe Your App
 - Give a brief description of what your app does.
+
+### Logo URL
+- We will soon start including a square icon for each profile.
 
 # Directories
 ### ROMs Directory
