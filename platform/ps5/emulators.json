@@ -182,11 +182,12 @@
   },
   {
     "id": "prosperoeden", "name": "ProsperoEden",
-    "title_ids": ["PPSA99008"],
-    "detect": ["/data/prosperoeden", "/data/homebrew/PPSA99008"],
-    "note": "Games and keys only: saves are kept per Switch user profile.",
+    "title_ids": ["PPSA99008", "PPSA99186"],
+    "detect": ["/data/prosperoeden", "/data/homebrew/PPSA99008", "/data/homebrew/PPSA99186"],
+    "note": "Games (with their updates and DLC) and keys only: saves are kept per Switch user profile. Its Switch UI app shares the same folders.",
     "profile": {
-      "root": "/data/prosperoeden", "rom_dir": "{root}/roms", "bios_dir": "{root}", "sync_saves": false,
+      "root": "/data/prosperoeden", "rom_dir": "{root}/roms", "update_dir": "{root}/updates", "dlc_dir": "{root}/updates",
+      "bios_dir": "{root}", "sync_saves": false,
       "firmware": {"by_ext": {".keys": "keys", ".nca": "firmware"}},
       "platforms": [{"romm": ["switch"], "dir": "switch", "emulator": "prosperoeden"}]
     }

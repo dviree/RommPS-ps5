@@ -56,7 +56,8 @@ struct Game
     double size = 0;
     bool installed = false;
     bool multi = false;
-    bool not_game = false; // a file RomM scanned beside the games (metadata.txt...): hidden
+    bool not_game = false; // a file RomM scanned beside the games (metadata.txt...), or a Switch update or DLC: hidden
+    bool archived = false; // a .rar (or any archive, for Switch) nothing here plays: not downloaded
     std::string version;   // what sets this version apart, when RomM has others of the game
     int versions = 0;      // how many versions RomM has, this one included; 0 if just one
 };
@@ -72,6 +73,15 @@ struct Details
     double main_story_s = 0; // How Long to Beat, the main story
     double play_ms = 0;      // every device's sessions RomM has
     int sessions = 0, completion = 0, my_rating = 0;
+    std::string archived;    // why it can't be downloaded: it's an archive
+    int updates = 0, dlc = 0; // a Switch game's, downloaded with it
+    struct Addon
+    {
+        bool update = false; // else DLC
+        std::string name;
+        double size = 0;
+    };
+    std::vector<Addon> addons; // the update first, then the DLC
 };
 
 struct Platform

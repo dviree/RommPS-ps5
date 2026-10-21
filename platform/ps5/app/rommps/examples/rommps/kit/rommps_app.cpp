@@ -685,6 +685,7 @@ void App::send_page(const std::string &key, int page)
                 game.installed = flag(g, "installed");
                 game.multi = flag(g, "multi");
                 game.not_game = flag(g, "not_game");
+                game.archived = flag(g, "archived");
                 game.version = plain(str(g, "version"));
                 game.versions = static_cast<int>(num(g, "versions"));
             }
@@ -726,6 +727,12 @@ const Details &App::details(int rom_id)
         out.sessions = static_cast<int>(num(j.get(), "sessions"));
         out.completion = static_cast<int>(num(j.get(), "completion"));
         out.my_rating = static_cast<int>(num(j.get(), "my_rating"));
+        out.archived = plain(str(j.get(), "archived"));
+        out.updates = static_cast<int>(num(j.get(), "updates"));
+        out.dlc = static_cast<int>(num(j.get(), "dlc"));
+        const cJSON *a;
+        cJSON_ArrayForEach(a, cJSON_GetObjectItemCaseSensitive(j.get(), "addons"))
+            out.addons.push_back({std::strcmp(str(a, "kind"), "update") == 0, plain(str(a, "name")), num(a, "size")});
     });
     return d;
 }

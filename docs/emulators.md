@@ -108,7 +108,7 @@ Wii U (Cemu), 3DS (Azahar) and DS (melonDS). Wii U and 3DS saves sync; 3DS save 
 
 ### ProsperoEden
 
-Games and keys only: saves are kept per Switch user profile.
+Games (with their updates and DLC) and keys only: saves are kept per Switch user profile. Its Switch UI app shares the same folders.
 
 | System | Games | Saves | Save files | Saved as | States | State files | Memory cards |
 |---|---|---|---|---|---|---|---|

@@ -919,6 +919,7 @@ static void route(request *r) {
             send_error(fd, 400, "invalid JSON");
             return;
         }
+        const int profiles = cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(j, "profiles"));
         config_lock();
         config_apply_json(j);
         http_set_tls_verify(g_cfg.tls_verify);
@@ -926,6 +927,7 @@ static void route(request *r) {
         config_unlock();
         cJSON_Delete(j);
         library_wake();
+        if (profiles && !rc) library_link_extras(); /* the folders follow the new profiles */
         if (rc) send_error(fd, 500, "could not save config");
         else send_ok(fd);
         return;

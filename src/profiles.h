@@ -43,6 +43,10 @@
  * mount can show it the main
  * emulator's (see profile_map.mount_games).
  *
+ * "update_dir" and "dlc_dir" are where a Switch game's update and DLC go,
+ * downloaded with the game (library.c); the game's own files go straight
+ * into rom_dir, never a folder of their own.
+ *
  * "firmware" says how RomM's BIOS files for a platform reach the emulator
  * (firmware.h).
  *
@@ -61,6 +65,10 @@ typedef struct {
     char platform_dir[64];  /* {platform} value */
     char romm_slugs[256];   /* comma separated RomM slugs / fs_slugs */
     char rom_dir[PATH_MAX_LEN];
+    /* Where a Switch game's update and DLC go ("update_dir", "dlc_dir"; the
+     * DLC's defaults to the update's, and both to rom_dir). */
+    char update_dir[PATH_MAX_LEN];
+    char dlc_dir[PATH_MAX_LEN];
     char save_dir[PATH_MAX_LEN];
     char state_dir[PATH_MAX_LEN];
     char bios_dir[PATH_MAX_LEN];

@@ -374,6 +374,7 @@ class RommPS final : public app::Concept
         sheet_game_ = *g;
         app_.check_on_console(g->id);
         sheet_open_ = true;
+        addons_open_ = false;
         action_ = 0;
         action_position_.snap(0.0f);
     }
@@ -383,7 +384,7 @@ class RommPS final : public app::Concept
     {
         std::string label;
         bool enabled;
-        int kind; // 0 download, 1 cancel, 3 remove, 4 saves and states (Circle closes the sheet)
+        int kind; // 0 download, 1 cancel, 3 remove, 4 saves and states, 5 updates and DLC (Circle closes the sheet)
     };
 
     std::vector<SheetAction> sheet_actions() const
@@ -392,6 +393,7 @@ class RommPS final : public app::Concept
         const rommps::Game *g = &sheet_game_;
         const rommps::Platform *p = app_.platform_by_id(sheet_game_.platform_id);
         const rommps::Download *d = g ? app_.download_for(g->id) : nullptr;
+        const rommps::Details &info = app_.details(sheet_game_.id);
         if (d && d->syncing())
             actions.push_back({"Syncing saves", false, 0});
         else if (d && d->active())
@@ -403,8 +405,13 @@ class RommPS final : public app::Concept
         }
         else if (p && p->profile.empty())
             actions.push_back({"No emulator for this platform", false, 0});
+        else if (g->archived || !info.archived.empty())
+            actions.push_back({"Archived: can't download", false, 0});
         else
             actions.push_back({"Download", true, 0});
+        // A Switch game's update and DLC, which come with it.
+        if (!info.addons.empty())
+            actions.push_back({"Updates and DLC (" + std::to_string(info.addons.size()) + ")", true, 5});
         return actions;
     }
 
@@ -477,8 +484,31 @@ class RommPS final : public app::Concept
         return true;
     }
 
+    // Rows of the update and DLC list that fit the sheet at once.
+    static constexpr int kAddonRows = 6;
+
     void update_sheet(const InputFrame &input, float dt, app::Feedback &feedback)
     {
+        if (addons_open_)
+        {
+            const int n = static_cast<int>(app_.details(sheet_game_.id).addons.size());
+            if (input.nav == Direction::up || input.nav == Direction::down)
+            {
+                const int next = std::clamp(addons_top_ + (input.nav == Direction::down ? 1 : -1), 0,
+                                            std::max(0, n - kAddonRows));
+                if (next != addons_top_)
+                {
+                    addons_top_ = next;
+                    feedback.play(audio::Cue::focus, 1.0f, 0.35f);
+                }
+            }
+            if (input.is_pressed(Action::back) || input.is_pressed(Action::confirm))
+            {
+                feedback.play(audio::Cue::back);
+                addons_open_ = false;
+            }
+            return;
+        }
         const std::vector<SheetAction> actions = sheet_actions();
         const int count = static_cast<int>(actions.size());
         if (input.nav == Direction::up || input.nav == Direction::down)
@@ -521,6 +551,12 @@ class RommPS final : public app::Concept
                 feedback.play(audio::Cue::select);
                 sheet_open_ = false;
                 view_.open(app_, rommps::SyncView::kGame, g->id, g->name);
+            }
+            else if (a.kind == 5)
+            {
+                feedback.play(audio::Cue::modal_open);
+                addons_open_ = true;
+                addons_top_ = 0;
             }
             else
             {
@@ -927,8 +963,44 @@ class RommPS final : public app::Concept
             ui::text(list, fonts.semibold, fonts.semibold.font->fit(v, 22, 660), x, y, 22, L.panel_text.with_alpha(0.7f));
             y += 38;
         }
-        // RomM's details: year, publisher, genres; the summary; then the numbers.
         const rommps::Details &info = app_.details(g->id);
+        if (addons_open_)
+            draw_addons(list, info, x, y, sheet.y + 480.0f, acc);
+        else
+            draw_about(list, info, g, p, x, y, sheet);
+        draw_sheet_actions(list, g);
+        list.pop_opacity();
+    }
+
+    // A Switch game's update and DLC, a row each.
+    void draw_addons(gfx::DrawList &list, const rommps::Details &info, float x, float y, float bottom, Color acc) const
+    {
+        const ui::Fonts &fonts = context_.fonts;
+        const rommps::Look &L = look();
+        ui::text(list, fonts.semibold, "UPDATES AND DLC", x, y, 20, acc, gfx::Align::left, 4.0f);
+        y += 46;
+        const int n = static_cast<int>(info.addons.size());
+        for (int i = addons_top_; i < n && i < addons_top_ + kAddonRows && y < bottom; ++i, y += 40)
+        {
+            const rommps::Details::Addon &a = info.addons[static_cast<std::size_t>(i)];
+            ui::text(list, fonts.semibold, a.update ? "Update" : "DLC", x, y, 20, acc);
+            ui::text(list, fonts.regular, fonts.regular.font->fit(a.name, 20, 440), x + 100, y, 20, L.panel_text);
+            ui::text(list, fonts.regular, rommps::human_size(a.size), x + 660, y, 20, L.panel_muted, gfx::Align::right);
+        }
+        if (n > kAddonRows)
+            ui::text(list, fonts.regular,
+                     std::to_string(addons_top_ + 1) + "-" + std::to_string(std::min(n, addons_top_ + kAddonRows)) +
+                         " of " + std::to_string(n),
+                     x, y + 6, 20, L.panel_muted);
+    }
+
+    // RomM's details: year, publisher, genres; the summary; then the numbers.
+    void draw_about(gfx::DrawList &list, const rommps::Details &info, const rommps::Game *g, const rommps::Platform *p,
+                    float x, float y, const Rect &sheet) const
+    {
+        const ui::Fonts &fonts = context_.fonts;
+        const rommps::Look &L = look();
+        const Color acc = cover_accent(app_.cover(g->cover).palette);
         const std::string about = rommps::details_line(info);
         if (!about.empty())
         {
@@ -961,10 +1033,17 @@ class RommPS final : public app::Concept
         std::string line;
         for (const std::string &f : facts)
             line += (line.empty() ? "" : "  \xC2\xB7  ") + f;
-        // The file and emulator, last.
+        // The file and emulator, last; for an archive, why it can't come down.
         std::string file = rommps::human_size(g->size) + (g->multi ? ", several files" : "");
+        if (info.updates || info.dlc)
+            file += " + " + std::string(info.updates ? "update" : "") + (info.updates && info.dlc ? " and " : "") +
+                    (info.dlc ? std::to_string(info.dlc) + " DLC" : "");
         if (p && !p->profile.empty())
             file += "  \xC2\xB7  plays with " + p->profile;
+        const bool archived = g->archived || !info.archived.empty();
+        if (archived)
+            file = info.archived.empty() ? "This download is archived. Decompress it on your RomM server first."
+                                         : info.archived;
         y = std::max(y, sheet.y + 330.0f);
         if (!line.empty())
         {
@@ -972,8 +1051,16 @@ class RommPS final : public app::Concept
             y += 60;
         }
         ui::text(list, fonts.regular, context_.fonts.regular.font->fit(file, 20, 660), x, std::min(y, sheet.y + 470.0f), 20,
-                 L.panel_muted);
+                 archived ? L.danger : L.panel_muted);
+    }
 
+    void draw_sheet_actions(gfx::DrawList &list, const rommps::Game *g) const
+    {
+        const ui::Fonts &fonts = context_.fonts;
+        const rommps::Look &L = look();
+        const float t = sheet_.value;
+        constexpr float kHeight = 520.0f;
+        const Rect sheet{120, gfx::kVirtualHeight - kHeight * t - 40.0f * t + 60.0f * (1.0f - t), 1680, kHeight};
         const std::vector<SheetAction> actions = sheet_actions();
         const float ax = sheet.x + sheet.w - 56 - 460;
         const float ay = sheet.y + 76;
@@ -994,7 +1081,6 @@ class RommPS final : public app::Concept
             ui::text(list, fonts.semibold, context_.fonts.semibold.font->fit(a.label, 26, 400), ax + 36, y + 46, 26,
                      (focused ? L.on_highlight : L.panel_text).with_alpha(a.enabled ? 1.0f : 0.5f));
         }
-        list.pop_opacity();
     }
 
     void draw_toast(gfx::DrawList &list) const
@@ -1092,6 +1178,8 @@ class RommPS final : public app::Concept
     ui::Pulse nudge_;
     float nudge_direction_ = 0.0f;
     bool sheet_open_ = false;
+    bool addons_open_ = false; // the sheet lists the game's update and DLC
+    int addons_top_ = 0;       // the first of them shown
     tween::Spring sheet_;
     int action_ = 0;
     tween::Spring action_position_;

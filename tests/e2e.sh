@@ -1242,4 +1242,91 @@ for _ in $(seq 1 40); do [[ "$(romm_name)" == "Den PS5" ]] && break; sleep 0.25;
 post /api/config '{"device_name":""}' >/dev/null
 [[ "$(devname)" == "PlayStation 5" ]] || fail "clearing the name: $(devname)"
 
+echo "28. Switch: the library shows the game, its update and DLC come with it; archives are turned down"
+SV=$(server)
+nxrom() { curl -skf -X POST "$SV/_admin/rom" -d "$1" >/dev/null || fail "mock rom: $1"; }
+curl -skf -X POST "$SV/_admin/platform" -d '{"id":90,"slug":"switch","name":"Nintendo Switch"}' >/dev/null
+nxrom '{"id":900,"platform_id":90,"name":"Poke","fs_name":"Poke [0100000011D90000][v0].nsp"}'
+nxrom '{"id":901,"platform_id":90,"name":"Poke","fs_name":"Poke [0100000011D90800][v65536].nsp"}'
+nxrom '{"id":902,"platform_id":90,"name":"Poke","fs_name":"Poke [0100000011D90800][v393216].nsp"}'
+nxrom '{"id":903,"platform_id":90,"name":"Poke DLC","fs_name":"Poke DLC [0100000011D91001][v0].nsp"}'
+# Another game whose title id starts the same: not Poke's.
+nxrom '{"id":904,"platform_id":90,"name":"Poke Spinoff","fs_name":"Poke Spinoff [0100000011D96000][v0].nsp"}'
+nxrom '{"id":905,"platform_id":90,"name":"Sword","fs_name":"Sword","files":[
+  {"id":9051,"file_name":"Sword [0100ABCD12340000][v0].nsp","content":"ROM:sword"},
+  {"id":9052,"file_name":"Sword [0100ABCD12340800][v65536].nsp","content":"ROM:sword-update"},
+  {"id":9053,"file_name":"Sword Expansion.nsp","category":"dlc","content":"ROM:sword-dlc"}]}'
+nxrom '{"id":906,"platform_id":90,"name":"Mansion","fs_name":"Mansion (NSZ).rar"}'
+nxrom '{"id":907,"platform_id":90,"name":"Mystery","fs_name":"Mystery","files":[{"id":9071,"file_name":"Mystery (Base Game).rar","content":"RAR"}]}'
+NX="$T/nxemu"; mkdir -p "$NX"
+python3 - "$API" "$NX" <<'PY' >/dev/null
+import json, sys, urllib.request
+api, root = sys.argv[1], sys.argv[2]
+cfg = json.load(urllib.request.urlopen(api + "/api/config"))
+profiles = [p for p in cfg["profiles"] if p.get("id") != "nxlike"] + [{
+    "id": "nxlike", "name": "NX-like", "enabled": True, "root": root, "rom_dir": "{root}/roms",
+    "update_dir": "{root}/updates", "dlc_dir": "{root}/updates", "bios_dir": "{root}", "sync_saves": False,
+    "platforms": [{"romm": ["switch"], "dir": "switch", "emulator": "nxlike"}]}]
+req = urllib.request.Request(api + "/api/config", json.dumps({"profiles": profiles}).encode(), {"Content-Type": "application/json"})
+urllib.request.urlopen(req)
+PY
+lib=$(curl -sf "$API/api/roms?platform_id=90&limit=60" | python3 -c "
+import json,sys
+for g in json.load(sys.stdin)['items']: print(g['id'], bool(g.get('not_game')), g.get('addon',''), bool(g.get('archived')))")
+for want in "900 False  False" "901 True update False" "902 True update False" "903 True dlc False" "904 False  False" \
+            "905 False  False" "906 False  True"; do
+  grep -qx "$want" <<<"$lib" || fail "Switch library listing, '$want': $lib"
+done
+det=$(curl -sf "$API/api/roms/900/details" | python3 -c "
+import json,sys; d=json.load(sys.stdin); print(d.get('updates'), d.get('dlc'), [(a['kind'], a['name']) for a in d.get('addons', [])])")
+[[ "$det" == "1 1 [('update', 'Poke [0100000011D90800][v393216].nsp'), ('dlc', 'Poke DLC [0100000011D91001][v0].nsp')]" ]] \
+  || fail "a Switch game's details list its newest update and its DLC: $det"
+[[ "$(curl -sf "$API/api/roms/906/details" | python3 -c "import json,sys; print(json.load(sys.stdin).get('archived',''))")" == *"archived (.rar)"* ]] \
+  || fail "the details say an archive can't be downloaded"
+r=$(curl -s -X POST "$API/api/download" -d '{"rom_id":906}')
+[[ "$r" == *"archived (.rar). Decompress it"* ]] || fail "an archived game must be turned down at once: $r"
+r=$(curl -s -X POST "$API/api/download" -d '{"rom_id":907}')
+[[ "$r" == *"archived (.rar)"* ]] || fail "a folder holding an archive too: $r"
+nxdone() { for _ in $(seq 1 60); do st=$(curl -sf "$API/api/downloads" | python3 -c "import json,sys; d=[d for d in json.load(sys.stdin) if d.get('rom_id') == $1]; print(d[0]['status'] if d else '')"); [[ "$st" == done || "$st" == error ]] && break; sleep 0.25; done; echo "$st"; }
+post /api/download '{"rom_id":900,"name":"Poke"}' >/dev/null
+[[ "$(nxdone 900)" == done ]] || fail "the Switch download didn't finish: $(curl -sf "$API/api/downloads")"
+[[ -f "$NX/roms/Poke [0100000011D90000][v0].nsp" ]] || fail "the game goes in the games folder: $(find "$NX" -type f)"
+[[ -f "$NX/updates/Poke [0100000011D90800][v393216].nsp" && -f "$NX/updates/Poke DLC [0100000011D91001][v0].nsp" ]] \
+  || fail "its newest update and its DLC go in updates: $(find "$NX" -type f)"
+[[ ! -e "$NX/updates/Poke [0100000011D90800][v65536].nsp" && ! -e "$NX/roms/Poke Spinoff [0100000011D96000][v0].nsp" ]] \
+  || fail "not the older update, nor another game: $(find "$NX" -type f)"
+inst=$(curl -sf "$API/api/installed?limit=100" | python3 -c "import json,sys; print(sorted(g['id'] for g in json.load(sys.stdin) if g['platform_id'] == 90))")
+[[ "$inst" == "[900]" ]] || fail "the update and DLC aren't games of their own on the console: $inst"
+post /api/download '{"rom_id":905,"name":"Sword"}' >/dev/null
+[[ "$(nxdone 905)" == done ]] || fail "the Switch folder game didn't finish"
+[[ -f "$NX/roms/Sword [0100ABCD12340000][v0].nsp" && ! -d "$NX/roms/Sword" ]] || fail "a folder game's own file goes straight in the games folder: $(find "$NX" | sort)"
+[[ -f "$NX/updates/Sword [0100ABCD12340800][v65536].nsp" && -f "$NX/updates/Sword Expansion.nsp" ]] \
+  || fail "its update, and its DLC by RomM's category, go in updates: $(find "$NX" -type f)"
+post /api/delete '{"rom_id":900}' >/dev/null
+[[ ! -e "$NX/roms/Poke [0100000011D90000][v0].nsp" && ! -e "$NX/updates/Poke DLC [0100000011D91001][v0].nsp" && \
+   ! -e "$NX/updates/Poke [0100000011D90800][v393216].nsp" ]] || fail "removing the game removes its update and DLC: $(find "$NX" -type f)"
+[[ -f "$NX/updates/Sword Expansion.nsp" ]] || fail "another game's DLC stays"
+# Games an older version downloaded as a folder, matched to RomM by a sync: unfolded once the
+# profiles are saved (or the payload starts); an empty one, a download that never finished, goes.
+mkdir -p "$NX/roms/Old" "$NX/roms/Empty"
+printf 'ROM:old' > "$NX/roms/Old/Old [0100AAAA00000000][v0].nsp"; printf 'ROM:old-up' > "$NX/roms/Old/Old [0100AAAA00000800][v1].nsp"
+nxrom '{"id":908,"platform_id":90,"name":"Old","fs_name":"Old","files":[
+  {"id":9081,"file_name":"Old [0100AAAA00000000][v0].nsp","content":"ROM:old"},{"id":9082,"file_name":"Old [0100AAAA00000800][v1].nsp","content":"ROM:old-up"}]}'
+nxrom '{"id":909,"platform_id":90,"name":"Empty","fs_name":"Empty","files":[{"id":9091,"file_name":"Empty [0100BBBB00000000][v0].nsp","content":"ROM:e"}]}'
+syncnow
+onc() { curl -sf "$API/api/roms/$1/on_console" | python3 -c "import json,sys; print(json.load(sys.stdin)['installed'])"; }
+[[ "$(onc 908)/$(onc 909)" == "True/True" ]] || fail "the old folders must be matched first: $(onc 908)/$(onc 909)"
+python3 - "$API" <<'PY' >/dev/null
+import json, sys, urllib.request
+api = sys.argv[1]
+cfg = json.load(urllib.request.urlopen(api + "/api/config"))
+req = urllib.request.Request(api + "/api/config", json.dumps({"profiles": cfg["profiles"]}).encode(), {"Content-Type": "application/json"})
+urllib.request.urlopen(req)
+PY
+for _ in $(seq 1 40); do [[ ! -d "$NX/roms/Old" && ! -d "$NX/roms/Empty" ]] && break; sleep 0.25; done
+[[ -f "$NX/roms/Old [0100AAAA00000000][v0].nsp" && -f "$NX/updates/Old [0100AAAA00000800][v1].nsp" && ! -d "$NX/roms/Old" ]] \
+  || fail "an old folder download must be unfolded: $(find "$NX" | sort)"
+[[ ! -d "$NX/roms/Empty" ]] || fail "an empty folder must go"
+[[ "$(onc 908)/$(onc 909)" == "True/False" ]] || fail "the unfolded game stays on the console, the empty one doesn't: $(onc 908)/$(onc 909)"
+
 echo "PASS"
