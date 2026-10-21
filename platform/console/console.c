@@ -7,6 +7,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <pthread.h>
 #include <fcntl.h>
 #include <ifaddrs.h>
 #include <netinet/in.h>
@@ -274,15 +275,51 @@ void console_describe(char *buf, size_t n, const char *host_title) {
              (int)getpid(), (int)getuid(), host_title && host_title[0] ? host_title : "none");
 }
 
-void plat_notify(const char *fmt, ...) {
-    notify_request_t req;
-    va_list ap;
+/* Notifications go through the shell, and a request waits until the shell
+ * takes it: with the shell hung (it has been, with the HEN's hooks in it), the
+ * caller would hang too. So they're handed to a thread of their own, a few
+ * at a time; when the shell isn't taking them, the newest are dropped, and
+ * nothing else ever waits on it (the mount guard least of all). */
+#define NOTIFY_QUEUE 8
+static pthread_mutex_t g_notify_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_notify_cond = PTHREAD_COND_INITIALIZER;
+static char g_notify_queue[NOTIFY_QUEUE][256];
+static int g_notify_head, g_notify_count, g_notify_started;
 
-    memset(&req, 0, sizeof req);
+static void *notify_thread(void *arg) {
+    (void)arg;
+    for (;;) {
+        notify_request_t req;
+        memset(&req, 0, sizeof req);
+        pthread_mutex_lock(&g_notify_lock);
+        while (!g_notify_count) pthread_cond_wait(&g_notify_cond, &g_notify_lock);
+        snprintf(req.message, sizeof req.message, "%s", g_notify_queue[g_notify_head]);
+        g_notify_head = (g_notify_head + 1) % NOTIFY_QUEUE;
+        g_notify_count--;
+        pthread_mutex_unlock(&g_notify_lock);
+        sceKernelSendNotificationRequest(0, &req, sizeof req, 0);
+    }
+    return NULL;
+}
+
+void plat_notify(const char *fmt, ...) {
+    char msg[256];
+    va_list ap;
     va_start(ap, fmt);
-    vsnprintf(req.message, sizeof req.message, fmt, ap);
+    vsnprintf(msg, sizeof msg, fmt, ap);
     va_end(ap);
-    sceKernelSendNotificationRequest(0, &req, sizeof req, 0);
+    pthread_mutex_lock(&g_notify_lock);
+    if (!g_notify_started) {
+        pthread_t t;
+        g_notify_started = pthread_create(&t, NULL, notify_thread, NULL) == 0;
+        if (g_notify_started) pthread_detach(t);
+    }
+    if (g_notify_started && g_notify_count < NOTIFY_QUEUE) {
+        snprintf(g_notify_queue[(g_notify_head + g_notify_count) % NOTIFY_QUEUE], sizeof g_notify_queue[0], "%s", msg);
+        g_notify_count++;
+        pthread_cond_signal(&g_notify_cond);
+    }
+    pthread_mutex_unlock(&g_notify_lock);
 }
 
 const char *plat_data_dir(void) {
@@ -297,6 +334,20 @@ const char *plat_ca_bundle(void) {
 }
 
 const char *plat_name(void) { return plat_info()->name; }
+
+/* libSceSystemService, the same on both consoles (OpenOrbis SystemService.h). */
+#define SYSTEM_SERVICE_PARAM_ID_SYSTEM_NAME 6
+int sceSystemServiceParamGetString(int param_id, char *buf, size_t n);
+
+void plat_console_name(char *buf, size_t n) {
+    char name[128] = "";
+    buf[0] = 0;
+    if (sceSystemServiceParamGetString(SYSTEM_SERVICE_PARAM_ID_SYSTEM_NAME, name, sizeof name) != 0) return;
+    name[sizeof name - 1] = 0;
+    for (const char *c = name; *c; c++)
+        if ((unsigned char)*c < 0x20) return; /* not a name */
+    snprintf(buf, n, "%s", name);
+}
 
 void plat_local_ip(char *buf, size_t n) {
     struct ifaddrs *ifaddr = NULL;

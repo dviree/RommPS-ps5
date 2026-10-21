@@ -168,6 +168,11 @@ static void *app_main(void *arg) {
         plat_notify("RommPS: open http://%s:%d to pair with RomM", ip[0] ? ip : "127.0.0.1", port);
     }
 
+    /* The extras' mounts are watched for from the start: an emulator opened
+     * right after boot gets them too, and ones an earlier copy left on come
+     * off when it closes. */
+    library_link_extras();
+
     sleep(5); /* wait for the network after boot */
     if (config_is_paired()) {
         char base[512], version[32] = "";
@@ -257,6 +262,7 @@ static void *app_main(void *arg) {
             now - sync_last_run() >= (time_t)interval * 60) {
             sync_request("periodic");
         }
+        if (!sync_is_running() && sync_retry_due()) sync_request("retry");
         update_tick();
     }
     return NULL;

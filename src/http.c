@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
@@ -106,9 +107,44 @@ static size_t mem_write(char *ptr, size_t size, size_t nmemb, void *ud) {
     return n;
 }
 
-static CURL *easy_new(const char *url, struct curl_slist **hdrs, const char *auth, int verify) {
+#ifdef ROMM_NETLOG
+/* NETLOG=1 builds: curl's running commentary (DNS, connect, TLS, headers) goes
+ * to the network log only, so a timeout says which step it died in. Headers
+ * that carry credentials or session cookies are left out. */
+static int curl_trace(CURL *c, curl_infotype type, char *data, size_t size, void *ud) {
+    static const char *const tags[] = {[CURLINFO_TEXT] = "*", [CURLINFO_HEADER_IN] = "<", [CURLINFO_HEADER_OUT] = ">"};
+    char line[300];
+    (void)c;
+    (void)ud;
+    if (type != CURLINFO_TEXT && type != CURLINFO_HEADER_IN && type != CURLINFO_HEADER_OUT) return 0;
+    while (size > 0) {
+        size_t n = 0;
+        while (n < size && data[n] != '\n') n++;
+        size_t take = n;
+        while (take > 0 && data[take - 1] == '\r') take--;
+        int secret = !strncasecmp(data, "Authorization:", 14) || !strncasecmp(data, "Cookie:", 7) ||
+                     !strncasecmp(data, "Set-Cookie:", 11);
+        if (take && !(type != CURLINFO_TEXT && secret)) {
+            snprintf(line, sizeof line, "curl %s %.*s", tags[type], (int)(take > 280 ? 280 : take), data);
+            netlog_send(line);
+        }
+        if (n < size) n++;
+        data += n;
+        size -= n;
+    }
+    return 0;
+}
+#endif
+
+/* errbuf, CURL_ERROR_SIZE bytes or NULL, gets curl's own account of a
+ * failure: which host, which phase, how long it waited. */
+static CURL *easy_new(const char *url, struct curl_slist **hdrs, const char *auth, int verify, char *errbuf) {
     CURL *c = curl_easy_init();
     if (!c) return NULL;
+    if (errbuf) {
+        errbuf[0] = 0;
+        curl_easy_setopt(c, CURLOPT_ERRORBUFFER, errbuf);
+    }
     if (g_share) curl_easy_setopt(c, CURLOPT_SHARE, g_share);
     curl_easy_setopt(c, CURLOPT_URL, url);
     curl_easy_setopt(c, CURLOPT_USERAGENT, g_user_agent);
@@ -119,6 +155,10 @@ static CURL *easy_new(const char *url, struct curl_slist **hdrs, const char *aut
     /* Give up on stalled transfers rather than using a total timeout. */
     curl_easy_setopt(c, CURLOPT_LOW_SPEED_LIMIT, 1L);
     curl_easy_setopt(c, CURLOPT_LOW_SPEED_TIME, 60L);
+#ifdef ROMM_NETLOG
+    curl_easy_setopt(c, CURLOPT_DEBUGFUNCTION, curl_trace);
+    curl_easy_setopt(c, CURLOPT_VERBOSE, 1L);
+#endif
     if (g_ca_blob) {
         struct curl_blob blob = {g_ca_blob, g_ca_blob_len, CURL_BLOB_NOCOPY};
         curl_easy_setopt(c, CURLOPT_CAINFO_BLOB, &blob);
@@ -138,11 +178,17 @@ static CURL *easy_new(const char *url, struct curl_slist **hdrs, const char *aut
     return c;
 }
 
-static int finish(CURL *c, CURLcode rc, membuf *m, http_resp *out, const char *url) {
+static int finish(CURL *c, CURLcode rc, membuf *m, http_resp *out, const char *url, const char *errbuf) {
     memset(out, 0, sizeof *out);
     if (rc != CURLE_OK) {
         snprintf(out->error, sizeof out->error, "%s", curl_easy_strerror(rc));
-        LOGW("HTTP %s: %s", url, out->error);
+        /* "Timeout was reached" alone can't tell a server that never answered
+         * from one that went quiet halfway, or a console with no network. */
+        long os_err = 0;
+        curl_easy_getinfo(c, CURLINFO_OS_ERRNO, &os_err);
+        const char *detail = errbuf && errbuf[0] ? errbuf : out->error;
+        if (os_err) LOGW("HTTP %s: %s (errno %ld: %s)", url, detail, os_err, strerror((int)os_err));
+        else LOGW("HTTP %s: %s", url, detail);
         free(m ? m->buf : NULL);
         return -1;
     }
@@ -163,7 +209,8 @@ static int request_impl(const char *method, const char *url, const char *auth, c
     memset(out, 0, sizeof *out);
     struct curl_slist *hdrs = NULL;
     membuf m = {0};
-    CURL *c = easy_new(url, &hdrs, auth, verify);
+    char errbuf[CURL_ERROR_SIZE];
+    CURL *c = easy_new(url, &hdrs, auth, verify, errbuf);
     if (!c) return -1;
     if (content_type) {
         char h[256];
@@ -183,7 +230,7 @@ static int request_impl(const char *method, const char *url, const char *auth, c
     curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, mem_write);
     curl_easy_setopt(c, CURLOPT_WRITEDATA, &m);
     CURLcode rc = curl_easy_perform(c);
-    int r = finish(c, rc, &m, out, url);
+    int r = finish(c, rc, &m, out, url, errbuf);
     curl_slist_free_all(hdrs);
     curl_easy_cleanup(c);
     return r;
@@ -200,7 +247,7 @@ int http_get_verified(const char *url, http_resp *out) {
 
 int http_tls_untrusted(const char *url) {
     struct curl_slist *hdrs = NULL;
-    CURL *c = easy_new(url, &hdrs, NULL, 1);
+    CURL *c = easy_new(url, &hdrs, NULL, 1, NULL);
     if (!c) return 0;
     curl_easy_setopt(c, CURLOPT_NOBODY, 1L);
     curl_easy_setopt(c, CURLOPT_TIMEOUT, 20L);
@@ -214,7 +261,8 @@ int http_upload_file(const char *method, const char *url, const char *auth, cons
                      const char *file_path, const char *upload_name, http_resp *out) {
     struct curl_slist *hdrs = NULL;
     membuf m = {0};
-    CURL *c = easy_new(url, &hdrs, auth, g_tls_verify);
+    char errbuf[CURL_ERROR_SIZE];
+    CURL *c = easy_new(url, &hdrs, auth, g_tls_verify, errbuf);
     if (!c) return -1;
     curl_mime *mime = curl_mime_init(c);
     curl_mimepart *part = curl_mime_addpart(mime);
@@ -230,7 +278,7 @@ int http_upload_file(const char *method, const char *url, const char *auth, cons
     curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, mem_write);
     curl_easy_setopt(c, CURLOPT_WRITEDATA, &m);
     CURLcode rc = curl_easy_perform(c);
-    int r = finish(c, rc, &m, out, url);
+    int r = finish(c, rc, &m, out, url, errbuf);
     curl_mime_free(mime);
     curl_slist_free_all(hdrs);
     curl_easy_cleanup(c);
@@ -288,7 +336,8 @@ static int download_impl(const char *url, const char *auth, const char *dest, in
     setvbuf(f, NULL, _IOFBF, DOWNLOAD_BUFFER);
 
     struct curl_slist *hdrs = NULL;
-    CURL *c = easy_new(url, &hdrs, auth, verify);
+    char errbuf[CURL_ERROR_SIZE];
+    CURL *c = easy_new(url, &hdrs, auth, verify, errbuf);
     if (!c) {
         fclose(f);
         return -1;
@@ -312,7 +361,7 @@ static int download_impl(const char *url, const char *auth, const char *dest, in
     if (rc == CURLE_OK && got > 1024 * 1024 && secs > 0)
         LOGI("downloaded %.1f MB in %.1fs (%.2f MB/s)", got / 1048576.0, secs, got / 1048576.0 / secs);
 
-    int r = finish(c, rc, NULL, out, url);
+    int r = finish(c, rc, NULL, out, url, errbuf);
     if (r == 0 && out->status == 200 && offset > 0) {
         /* The server ignored Range, so start over. */
         LOGW("server ignored Range for %s; restarting download", url);

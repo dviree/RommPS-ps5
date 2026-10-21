@@ -177,7 +177,7 @@ static int have(const char *p) {
 
 int covers_fetch(const char *p, char **out, size_t *out_len, const char **type) {
     char base[512], auth[300], url[3200], cached[PATH_MAX_LEN], missing[PATH_MAX_LEN];
-    if (!valid_path(p)) return -1;
+    if (!valid_path(p)) return -2;
     *type = image_type(p);
     cache_path(p, "", cached, sizeof cached);
     cache_path(p, ".missing", missing, sizeof missing);

@@ -14,7 +14,7 @@ tools/ps5-app-build.sh bash -c 'cd /repo/platform/ps5/app/rommps && bash ps5/too
 tools/release-app.sh v1.2.3                                                                           # the release zip
 ```
 
-The menu sounds aren't in git. Put them in `platform/ps5/app/assets/sounds/` (`focus_01.wav`, `back_01.wav` and so on, named after the kit's cues) before building; without them the kit's own sounds are used.
+The menu sounds are in `platform/ps5/app/assets/primary-menu-sounds/`, one WAV per kit cue (`focus_01.wav`, `back_01.wav` and so on).
 
 ## Licences
 

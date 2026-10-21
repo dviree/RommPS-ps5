@@ -11,6 +11,8 @@
 #include <unistd.h>
 
 #include "config.h"
+#include "events.h"
+#include "firmware.h"
 #include "http.h"
 #include "platform.h"
 #include "profiles.h"
@@ -62,6 +64,10 @@ static double mono_now(void) {
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 }
+
+/* A game came or went through us: the installed fingerprint (library_installed_sig) is worked out again. */
+static volatile int g_sig_stale = 1;
+static void installed_changed(void) { g_sig_stale = 1; }
 
 static int progress_cb(void *ud, int64_t done, int64_t total) {
     job *j = ud;
@@ -224,6 +230,7 @@ static void record_rom(job *j, const cJSON *rom, const profile_map *m, const cha
     cJSON_AddItemToObject(e, "stems", stems);
     state_save();
     state_unlock();
+    installed_changed();
 }
 
 static void run_rom_job(job *j) {
@@ -322,6 +329,9 @@ static void run_rom_job(job *j) {
         for (int i = 0; i < n; i++) {
             const profile_map *x = &maps[i];
             if (x == m || !x->extra || !profile_map_handles(x, slug, jget_str(rom, "platform_fs_slug", ""))) continue;
+            int covered = plat_is_mount(x->rom_dir);
+            for (int k = 0; k < n && !covered; k++) covered = maps[k].mount_title[0] && !strcmp(maps[k].own_rom_dir, x->rom_dir);
+            if (covered) continue; /* an extra's mount shows it the game */
             char other[PATH_MAX_LEN];
             path_join(other, sizeof other, x->rom_dir, fs_name);
             if (!strcmp(other, dest)) continue;
@@ -339,19 +349,23 @@ static void run_rom_job(job *j) {
                 LOGW("could not put %s in %s", j->name, x->rom_dir);
             }
         }
+        /* The emulators get the platform's BIOS files with its first game. */
+        firmware_sync(maps, n, NULL, (int)jget_num(rom, "platform_id", 0), NULL);
         /* The game's saves land before it shows as ready, so it isn't
          * started without them. */
         pthread_mutex_lock(&g_q_lock);
         j->status = JOB_SYNCING;
         pthread_mutex_unlock(&g_q_lock);
-        char name[256];
+        char name[256], system[128], head[400];
         str_copy(name, sizeof name, j->name);
+        str_copy(system, sizeof system, j->platform);
         sync_game_result saves;
-        if (sync_game(j->target_id, name, &saves) != 0) { /* save sync off: just the game */
+        if (sync_game(j->target_id, name, system, &saves) != 0) { /* save sync off: just the game */
             config_lock();
             const int notify = g_cfg.notify;
             config_unlock();
-            if (notify) plat_notify("RommPS: %s downloaded", name);
+            download_notice(head, sizeof head, name, system);
+            if (notify) plat_notify("RommPS: %s", head);
         }
         pthread_mutex_lock(&g_q_lock);
         j->saves = saves;
@@ -366,57 +380,32 @@ static void run_rom_job(job *j) {
 }
 
 static void run_firmware_job(job *j) {
-    char path[1024];
+    char path[64];
     profile_map *maps = NULL;
-    int n = load_maps(&maps);
-
+    int n = load_maps(&maps), failed = 0;
     long st = 0;
     snprintf(path, sizeof path, "/api/platforms/%d", j->target_id);
     cJSON *plat = romm_call("GET", path, NULL, &st);
     pthread_mutex_lock(&g_q_lock);
     str_copy(j->platform, sizeof j->platform, jget_str(plat, "display_name", jget_str(plat, "name", "")));
     pthread_mutex_unlock(&g_q_lock);
-    const profile_map *m =
-        plat ? profile_find_for_platform(maps, n, jget_str(plat, "slug", ""), jget_str(plat, "fs_slug", "")) : NULL;
-    if (!m) {
+    if (st != 200 || !profile_find_for_platform(maps, n, jget_str(plat, "slug", ""), jget_str(plat, "fs_slug", ""))) {
         job_end(j, JOB_ERROR, "no emulator is set up for %s", plat ? jget_str(plat, "slug", "") : "this platform");
         cJSON_Delete(plat);
         free(maps);
         return;
     }
-    snprintf(path, sizeof path, "/api/firmware?platform_id=%d", j->target_id);
-    cJSON *fw = romm_call("GET", path, NULL, &st);
-    int count = 0, failed = 0;
-    const cJSON *f;
-    cJSON_ArrayForEach(f, fw) {
-        if (cancelled(j)) break;
-        const char *fn = jget_str(f, "file_name", "");
-        char dest[PATH_MAX_LEN];
-        char dir[PATH_MAX_LEN];
-        path_join(dir, sizeof dir, m->bios_dir, m->firmware_subdir);
-        path_join(dest, sizeof dest, m->firmware_subdir[0] ? dir : m->bios_dir, fn);
-        if (file_size(dest) == (int64_t)jget_num(f, "file_size_bytes", -1)) continue;
-        char *q = http_escape(fn);
-        snprintf(path, sizeof path, "/api/firmware/%d/content/%s", (int)jget_num(f, "id", 0), q);
-        free(q);
-        http_resp r;
-        if (romm_download(path, dest, progress_cb, j, &r) == 0) {
-            count++;
-            LOGI("downloaded BIOS %s", fn);
-        } else {
-            LOGW("BIOS %s didn't download: %s", fn, r.error);
-            discard_partial(dest, 0);
-            failed++;
-        }
-    }
+    /* Every emulator that plays it gets them, as a sync does. */
+    cJSON *one = cJSON_CreateArray();
+    cJSON_AddItemToArray(one, plat);
+    int count = firmware_sync(maps, n, one, j->target_id, &failed);
+    cJSON_Delete(one);
     pthread_mutex_lock(&g_q_lock);
-    snprintf(j->name, sizeof j->name, "BIOS files (%d new)", count);
+    snprintf(j->name, sizeof j->name, "BIOS files (%d new)", count > 0 ? count : 0);
     pthread_mutex_unlock(&g_q_lock);
     char msg[32];
     snprintf(msg, sizeof msg, "%d file(s) failed", failed);
-    job_end(j, failed ? JOB_ERROR : JOB_DONE, "%s", msg);
-    cJSON_Delete(fw);
-    cJSON_Delete(plat);
+    job_end(j, failed || count < 0 ? JOB_ERROR : JOB_DONE, "%s", msg);
     free(maps);
 }
 
@@ -567,7 +556,14 @@ int library_clear_finished(void) {
     return n;
 }
 
+/* A game that's already gone (deleted by hand, or its drive unplugged) counts
+ * as removed: there's nothing left to fail on. */
 int library_delete_rom(int rom_id, char *err, int en) {
+    /* 0 is what files RomM didn't match are recorded as: never theirs to delete. */
+    if (rom_id <= 0) {
+        snprintf(err, (size_t)en, "no game given");
+        return -1;
+    }
     int removed = 0;
     state_lock();
     cJSON *roms = state_section("roms"), *e = roms ? roms->child : NULL;
@@ -583,22 +579,21 @@ int library_delete_rom(int rom_id, char *err, int en) {
     }
     state_save();
     state_unlock();
-    if (removed) {
-        /* Can't leave a finished download in the downloads page if we removed that title. */
-        pthread_mutex_lock(&g_q_lock);
-        for (job **pp = &g_jobs; *pp;) {
-            job *dead = *pp;
-            if (dead->type == JOB_ROM && dead->target_id == rom_id && finished(dead)) {
-                *pp = dead->next;
-                free(dead);
-            } else {
-                pp = &dead->next;
-            }
+    installed_changed();
+    if (!removed) LOGI("rom %d: nothing of it on the console to remove", rom_id);
+    /* Can't leave a finished download in the downloads page if we removed that title. */
+    pthread_mutex_lock(&g_q_lock);
+    for (job **pp = &g_jobs; *pp;) {
+        job *dead = *pp;
+        if (dead->type == JOB_ROM && dead->target_id == rom_id && finished(dead)) {
+            *pp = dead->next;
+            free(dead);
+        } else {
+            pp = &dead->next;
         }
-        pthread_mutex_unlock(&g_q_lock);
     }
-    if (!removed) snprintf(err, (size_t)en, "game is not on this console");
-    return removed ? 0 : -1;
+    pthread_mutex_unlock(&g_q_lock);
+    return 0;
 }
 
 cJSON *library_downloads(void) {
@@ -693,6 +688,238 @@ static void record_link(const char *from, const char *to, const profile_map *x) 
     state_unlock();
 }
 
+/* The extras that play the main emulator's games through a mount (see
+ * profile_map.mount_games), for the console to put on when they start. */
+static void update_mounts(const profile_map *maps, int n) {
+    plat_mount *want = calloc((size_t)(n > 0 ? n : 1), sizeof *want);
+    int nw = 0;
+    for (int i = 0; want && i < n; i++) {
+        const profile_map *x = &maps[i];
+        if (!x->mount_title[0]) continue;
+        int dup = 0;
+        for (int k = 0; k < nw && !dup; k++) dup = !strcmp(want[k].title, x->mount_title) && !strcmp(want[k].into, x->mount_into);
+        if (dup) continue;
+        mkdir_p(x->own_rom_dir); /* to mount on */
+        str_copy(want[nw].title, sizeof want[nw].title, x->mount_title);
+        str_copy(want[nw].name, sizeof want[nw].name, x->profile_name);
+        str_copy(want[nw].from, sizeof want[nw].from, x->rom_dir);
+        str_copy(want[nw].into, sizeof want[nw].into, x->mount_into);
+        nw++;
+    }
+    plat_mounts_set(want, nw);
+    free(want);
+}
+
+/* An extra that could play the main emulator's games through a mount but
+ * has games of its own in its folder (it was the main one before): the ones
+ * RommPS downloaded move to the main one's folder, a rename on the same
+ * drive, so the mount can go on. Files it didn't download stay, and so does
+ * the copy. Returns how many moved. */
+static int move_to_main(const profile_map *maps, int n) {
+    int moved = 0;
+    for (int i = 0; i < n; i++) {
+        const profile_map *x = &maps[i];
+        if (!x->mount_blocked || plat_is_mount(x->rom_dir)) continue;
+        char sys[64];
+        str_copy(sys, sizeof sys, x->romm_slugs);
+        sys[strcspn(sys, ",")] = 0;
+        const profile_map *m = profile_find_for_platform(maps, n, sys, NULL);
+        if (!m || m == x || m->extra) continue;
+        DIR *d = opendir(x->rom_dir);
+        struct dirent *de;
+        int here = 0;
+        while (d && (de = readdir(d))) {
+            if (de->d_name[0] == '.' || ext_in_list(de->d_name, ".part,.tmp")) continue;
+            char from[PATH_MAX_LEN], to[PATH_MAX_LEN];
+            path_join(from, sizeof from, x->rom_dir, de->d_name);
+            path_join(to, sizeof to, m->rom_dir, de->d_name);
+            if (file_exists(to) || dir_exists(to)) continue; /* a copy: cleared once the mount is on */
+            state_lock();
+            const cJSON *rec = cJSON_GetObjectItemCaseSensitive(state_section("roms"), from);
+            const int ours = rec && jget_num(rec, "rom_id", 0) > 0;
+            state_unlock();
+            if (!ours || mkdir_p(m->rom_dir) != 0 || rename(from, to) != 0) continue;
+            state_lock();
+            cJSON *e = cJSON_DetachItemFromObjectCaseSensitive(state_section("roms"), from);
+            const int rom_id = e ? (int)jget_num(e, "rom_id", 0) : 0;
+            if (e) {
+                jset_str(e, "profile", m->profile_id);
+                jset_str(e, "platform_dir", m->platform_dir);
+                cJSON_DeleteItemFromObjectCaseSensitive(state_section("roms"), to);
+                cJSON_AddItemToObject(state_section("roms"), to, e);
+            }
+            state_save();
+            state_unlock();
+            LOGI("moved %s to %s: %s plays it from there now", from, to, m->profile_name);
+            char why[160];
+            snprintf(why, sizeof why, "From %s's folder to %s's", x->profile_name, m->profile_name);
+            events_add("game", "moved", rom_id, to, x->profile_name, why);
+            here++;
+        }
+        if (d) closedir(d);
+        if (here) {
+            events_save();
+            plat_notify("RommPS: %d %s game%s moved to %s", here, x->profile_name, here == 1 ? "" : "s", m->profile_name);
+        }
+        moved += here;
+    }
+    return moved;
+}
+
+int library_own_games(const char *root, const char *system, const char *action, char *err, int en) {
+    const int move = !strcmp(action, "move");
+    if (!move && strcmp(action, "delete") != 0) {
+        snprintf(err, (size_t)en, "action is move or delete");
+        return -1;
+    }
+    profile_map *maps = NULL;
+    int n = load_maps(&maps), done = 0;
+    const profile_map *x = NULL, *m = NULL;
+    for (int i = 0; i < n && !x; i++) {
+        char sys[64];
+        str_copy(sys, sizeof sys, maps[i].romm_slugs);
+        sys[strcspn(sys, ",")] = 0;
+        if (maps[i].extra && maps[i].mount_blocked && !strcmp(maps[i].root, root) && !strcmp(sys, system)) x = &maps[i];
+    }
+    if (x) {
+        char sys[64];
+        str_copy(sys, sizeof sys, x->romm_slugs);
+        sys[strcspn(sys, ",")] = 0;
+        m = profile_find_for_platform(maps, n, sys, NULL);
+    }
+    if (!x || !m || m == x || m->extra) {
+        snprintf(err, (size_t)en, "no extra emulator at %s for %s with games in the way of its mount", root, system);
+        free(maps);
+        return -1;
+    }
+    if (plat_is_mount(x->rom_dir)) {
+        snprintf(err, (size_t)en, "close %s first", x->profile_name);
+        free(maps);
+        return -1;
+    }
+    DIR *d = opendir(x->rom_dir);
+    struct dirent *de;
+    while (d && (de = readdir(d))) {
+        if (de->d_name[0] == '.' || ext_in_list(de->d_name, ".part,.tmp")) continue;
+        char from[PATH_MAX_LEN], to[PATH_MAX_LEN];
+        path_join(from, sizeof from, x->rom_dir, de->d_name);
+        path_join(to, sizeof to, m->rom_dir, de->d_name);
+        if (file_exists(to) || dir_exists(to)) continue; /* a copy */
+        if (move && (mkdir_p(m->rom_dir) != 0 || rename(from, to) != 0)) {
+            LOGW("could not move %s to %s", from, to);
+            continue;
+        }
+        if (!move) remove_tree(from);
+        state_lock();
+        cJSON *e = cJSON_DetachItemFromObjectCaseSensitive(state_section("roms"), from);
+        const int rom_id = e ? (int)jget_num(e, "rom_id", 0) : 0;
+        if (e && move) {
+            jset_str(e, "profile", m->profile_id);
+            jset_str(e, "platform_dir", m->platform_dir);
+            cJSON_DeleteItemFromObjectCaseSensitive(state_section("roms"), to);
+            cJSON_AddItemToObject(state_section("roms"), to, e);
+        } else {
+            cJSON_Delete(e);
+        }
+        state_save();
+        state_unlock();
+        char why[160];
+        snprintf(why, sizeof why, move ? "From %s's folder to %s's" : "Deleted from %s's folder", x->profile_name,
+                 m->profile_name);
+        events_add("game", move ? "moved" : "removed", rom_id, move ? to : from, x->profile_name, why);
+        LOGI("%s %s%s%s", move ? "moved" : "deleted", from, move ? " to " : "", move ? to : "");
+        done++;
+    }
+    if (d) closedir(d);
+    events_save();
+    free(maps);
+    library_link_extras(); /* the mount can go on now */
+    return done;
+}
+
+/* Whether b holds the same game as a: the same size, file by file. */
+static int same_game(const char *a, const char *b) {
+    if (!dir_exists(a)) return file_exists(b) && file_size(a) == file_size(b);
+    if (!dir_exists(b)) return 0;
+    DIR *d = opendir(a);
+    struct dirent *de;
+    int same = d != NULL;
+    while (same && (de = readdir(d))) {
+        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+        char x[PATH_MAX_LEN], y[PATH_MAX_LEN];
+        path_join(x, sizeof x, a, de->d_name);
+        path_join(y, sizeof y, b, de->d_name);
+        same = same_game(x, y);
+    }
+    if (d) closedir(d);
+    return same;
+}
+
+static int64_t game_size(const char *path) {
+    if (!dir_exists(path)) return file_size(path) > 0 ? file_size(path) : 0;
+    DIR *d = opendir(path);
+    struct dirent *de;
+    int64_t total = 0;
+    while (d && (de = readdir(d))) {
+        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+        char sub[PATH_MAX_LEN];
+        path_join(sub, sizeof sub, path, de->d_name);
+        total += game_size(sub);
+    }
+    if (d) closedir(d);
+    return total;
+}
+
+/* Copies made for an extra before it had a mount: the main emulator has the
+ * same game, so they go, and so do their records. */
+static void clear_old_copies(const profile_map *maps, int n) {
+    for (int i = 0; i < n; i++) {
+        const profile_map *x = &maps[i];
+        if (!x->mount_title[0]) continue;
+        int dup = 0;
+        for (int k = 0; k < i && !dup; k++) dup = !strcmp(maps[k].own_rom_dir, x->own_rom_dir);
+        /* Our mount on it while the app runs: those are the main one's
+         * games. A folder another emulator plays from keeps its games. */
+        for (int k = 0; k < n && !dup; k++) dup = !strcmp(maps[k].rom_dir, x->own_rom_dir);
+        if (dup || plat_is_mount(x->own_rom_dir)) continue;
+        DIR *d = opendir(x->own_rom_dir);
+        struct dirent *de;
+        int gone = 0;
+        int64_t freed = 0;
+        while (d && (de = readdir(d))) {
+            if (de->d_name[0] == '.') continue;
+            char copy[PATH_MAX_LEN], game[PATH_MAX_LEN];
+            path_join(copy, sizeof copy, x->own_rom_dir, de->d_name);
+            path_join(game, sizeof game, x->rom_dir, de->d_name);
+            if (!same_game(copy, game)) {
+                LOGW("%s: %s isn't the same as %s, kept", x->profile_name, copy, game);
+                continue;
+            }
+            const int64_t size = game_size(copy);
+            remove_tree(copy);
+            if (file_exists(copy) || dir_exists(copy)) {
+                LOGW("%s: could not remove the copy %s", x->profile_name, copy);
+                continue;
+            }
+            state_lock();
+            const cJSON *rec = cJSON_GetObjectItemCaseSensitive(state_section("roms"), copy);
+            const int rom_id = rec ? (int)jget_num(rec, "rom_id", 0) : 0;
+            cJSON_DeleteItemFromObjectCaseSensitive(state_section("roms"), copy);
+            state_save();
+            state_unlock();
+            events_add("game", "removed", rom_id, copy, x->profile_name, "A copy: it plays the main emulator's now");
+            gone++;
+            freed += size;
+        }
+        if (d) closedir(d);
+        if (gone) {
+            LOGI("%s plays %s's games now: removed %d copies (%lld bytes)", x->profile_name, x->rom_dir, gone, (long long)freed);
+            events_save();
+            plat_notify("RommPS: %s now plays the same game files. %.1f GB freed.", x->profile_name, (double)freed / 1e9);
+        }
+    }
+}
+
 static pthread_mutex_t g_link_lock = PTHREAD_MUTEX_INITIALIZER;
 static int g_link_running, g_link_again;
 
@@ -701,6 +928,13 @@ static void *link_extras_thread(void *arg) {
 again:;
     profile_map *maps = NULL;
     int n = load_maps(&maps), linked = 0;
+    if (move_to_main(maps, n)) { /* now it can have a mount */
+        free(maps);
+        maps = NULL;
+        n = load_maps(&maps);
+    }
+    update_mounts(maps, n);
+    clear_old_copies(maps, n);
     for (int i = 0; i < n; i++) {
         const profile_map *x = &maps[i];
         if (!x->extra) continue;
@@ -710,6 +944,10 @@ again:;
         if (comma) *comma = 0;
         const profile_map *m = profile_find_for_platform(maps, n, first, NULL);
         if (!m || m == x || m->extra || !strcmp(m->rom_dir, x->rom_dir)) continue;
+        /* A folder an extra's mount covers gets no copies. */
+        int covered = plat_is_mount(x->rom_dir);
+        for (int k = 0; k < n && !covered; k++) covered = maps[k].mount_title[0] && !strcmp(maps[k].own_rom_dir, x->rom_dir);
+        if (covered) continue;
         /* A folder several of the main emulator's systems share (Porpoise's
          * games: GameCube and Wii): only the games matched for this system. */
         int shared = 0;
@@ -751,6 +989,7 @@ again:;
             linked += here;
         }
     }
+    if (config_is_paired()) firmware_sync(maps, n, NULL, 0, NULL); /* emulators just turned on */
     free(maps);
     if (linked) {
         LOGI("extra emulators: %d games linked in", linked);
@@ -1012,19 +1251,72 @@ cJSON *library_installed(int limit) {
     return sorted;
 }
 
-/* Whether a game is downloaded: a local file or folder the state maps to it. */
-static int rom_installed(int id) {
+/* Whether a game is downloaded: a local file or folder the state maps to it.
+ * Looked at after the state lock, like the fingerprint below. */
+#define ROM_PLACES 8 /* one per emulator that has it, a few at most */
+int library_on_console(int id) {
+    char paths[ROM_PLACES][PATH_MAX_LEN];
+    int n = 0;
     const cJSON *e;
-    int installed = 0;
+    state_lock();
+    cJSON_ArrayForEach(e, state_section("roms"))
+        if ((int)jget_num(e, "rom_id", -1) == id && n < ROM_PLACES) str_copy(paths[n++], PATH_MAX_LEN, e->string);
+    state_unlock();
+    for (int i = 0; i < n; i++)
+        if (file_exists(paths[i]) || dir_exists(paths[i])) return 1;
+    return 0;
+}
+
+/* The installed fingerprint, worked out lazily and kept: the status that
+ * carries it is asked for every few seconds, and that never touches the
+ * disk. It's looked at again at most every INSTALLED_SIG_SEC, never while a
+ * game is running, and at once after our own downloads and deletes. The
+ * paths are copied out under the state lock and looked at after it, so a
+ * slow or sleeping drive never holds anyone else up. */
+#define INSTALLED_SIG_SEC 15
+static pthread_mutex_t g_sig_lock = PTHREAD_MUTEX_INITIALIZER;
+static unsigned g_sig;
+static double g_sig_at;
+
+unsigned library_installed_sig(void) {
+    /* Someone else is working it out: theirs will do, this one says the last. */
+    if (pthread_mutex_trylock(&g_sig_lock) != 0) return g_sig;
+    const double now = mono_now();
+    const char *env = getenv("ROMM_SYNC_INSTALLED_SIG_SEC"); /* shorter in tests */
+    const double every = env && atof(env) > 0 ? atof(env) : INSTALLED_SIG_SEC;
+    if (!g_sig_stale && (now - g_sig_at < every || sync_game_running())) {
+        pthread_mutex_unlock(&g_sig_lock);
+        return g_sig;
+    }
+    g_sig_stale = 0;
+    int n = 0, cap = 0;
+    struct { int id; char *path; } *all = NULL;
+    const cJSON *e;
     state_lock();
     cJSON_ArrayForEach(e, state_section("roms")) {
-        if ((int)jget_num(e, "rom_id", -1) == id && (file_exists(e->string) || dir_exists(e->string))) {
-            installed = 1;
-            break;
+        int id = (int)jget_num(e, "rom_id", 0);
+        if (id <= 0) continue;
+        if (n == cap) {
+            cap = cap ? cap * 2 : 64;
+            void *grown = realloc(all, sizeof *all * (size_t)cap);
+            if (!grown) break;
+            all = grown;
         }
+        all[n].id = id;
+        all[n].path = strdup(e->string);
+        if (all[n].path) n++;
     }
     state_unlock();
-    return installed;
+    unsigned h = 2166136261u;
+    for (int i = 0; i < n; i++) {
+        if (file_exists(all[i].path) || dir_exists(all[i].path)) h = (h ^ (unsigned)all[i].id) * 16777619u;
+        free(all[i].path);
+    }
+    free(all);
+    g_sig = h;
+    g_sig_at = now;
+    pthread_mutex_unlock(&g_sig_lock);
+    return h;
 }
 
 /* Recent library pages, so going back, changing letters or reopening the UI
@@ -1088,7 +1380,7 @@ static int add_library_rom(const cJSON *it, const cJSON *page, int first, void *
         covers_warm(jget_str(it, "path_cover_small", "")); /* fetched ahead, in the background */
     cJSON_AddNumberToObject(o, "platform_id", jget_num(it, "platform_id", 0));
     cJSON_AddBoolToObject(o, "multi", cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(it, "has_multiple_files")));
-    cJSON_AddBoolToObject(o, "installed", rom_installed(id));
+    cJSON_AddBoolToObject(o, "installed", library_on_console(id));
     if (library_not_game(jget_str(it, "fs_name", ""))) cJSON_AddBoolToObject(o, "not_game", 1);
     add_version(o, it);
     cJSON_AddItemToArray(cJSON_GetObjectItemCaseSensitive(out, "items"), o);
@@ -1186,7 +1478,7 @@ cJSON *library_roms(int platform_id, const char *search, int offset, int limit, 
     cJSON *out = page_cache_get(key), *it;
     if (out) {
         cJSON_ArrayForEach(it, cJSON_GetObjectItemCaseSensitive(out, "items"))
-            cJSON_ReplaceItemInObjectCaseSensitive(it, "installed", cJSON_CreateBool(rom_installed((int)jget_num(it, "id", 0))));
+            cJSON_ReplaceItemInObjectCaseSensitive(it, "installed", cJSON_CreateBool(library_on_console((int)jget_num(it, "id", 0))));
         fetch_near_pages(path, platform_id, search, offset, limit, (int)jget_num(out, "total", 0));
         return out;
     }

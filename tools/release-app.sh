@@ -5,9 +5,8 @@
 #   tools/release-app.sh v1.1.0 --upload   and attach it to the release v1.1.0
 #
 # The release workflow can't build RommPS: it needs the PS5 stack beside this
-# repository (tools/ps5-app-build.sh), and the menu sounds aren't in git. So it
-# is built here, from the tagged commit, once the workflow has published the
-# payloads. The homebrew catalog picks the release up from the asset's name,
+# repository (tools/ps5-app-build.sh). So it is built here, from the tagged
+# commit, once the workflow has published the payloads. The homebrew catalog picks the release up from the asset's name,
 # so it stays PPSA76677.zip, and an asset already published is never replaced.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -25,7 +24,6 @@ have=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["contentV
 cd "$ROOT"
 git diff --quiet && git diff --cached --quiet || die "commit or stash your changes first"
 [[ "$(git rev-parse HEAD)" == "$(git rev-parse "$TAG^{commit}" 2>/dev/null)" ]] || die "check out $TAG first"
-ls platform/ps5/app/assets/sounds/*.wav >/dev/null 2>&1 || die "the menu sounds aren't in platform/ps5/app/assets/sounds"
 for art in pic0 pic1; do # the home screen art, made by platform/ps5/app/tools/title-art.sh
     [[ -s "$APP/ps5/sce_sys/$art.dds" ]] || die "$art.dds is missing: run platform/ps5/app/tools/title-art.sh"
 done

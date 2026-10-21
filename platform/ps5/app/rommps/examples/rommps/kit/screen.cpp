@@ -372,6 +372,7 @@ class RommPS final : public app::Concept
         if (!g)
             return;
         sheet_game_ = *g;
+        app_.check_on_console(g->id);
         sheet_open_ = true;
         action_ = 0;
         action_position_.snap(0.0f);
@@ -395,7 +396,7 @@ class RommPS final : public app::Concept
             actions.push_back({"Syncing saves", false, 0});
         else if (d && d->active())
             actions.push_back({"Hold to cancel download", true, 1});
-        else if (g && g->installed)
+        else if (g && app_.on_console(*g))
         {
             actions.push_back({"Hold to delete this game", true, 3});
             actions.push_back({"Saves and states", true, 4});

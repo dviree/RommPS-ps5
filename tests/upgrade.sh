@@ -41,7 +41,7 @@ snapshot() { # every save and state here, with its hash
 }
 start() { # binary
     ROMM_SYNC_DATA="$T/data" ROMM_SYNC_HOMEBREW="$T/none" ROMM_SYNC_AUTOSTART="$T/autostart" ROMM_SYNC_APP_DIRS="$T/none" \
-      ROMM_SYNC_CATALOG="$T/catalog.json" ROMM_SYNC_FS_ROOTS="$T" "$1" >>"$T/daemon.log" 2>&1 &
+      ROMM_SYNC_CATALOG="$T/catalog.json" ROMM_SYNC_FS_ROOTS="$T" ROMM_SYNC_CONSOLE_NAME="${CONSOLE_NAME:-}" "$1" >>"$T/daemon.log" 2>&1 &
     PID=$!
     up
 }
@@ -90,8 +90,8 @@ EOF
     saves_before=$(dump | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d['saves']), len(d['states']))")
     kill "$PID"; wait "$PID" 2>/dev/null || true
 
-    # This build takes over.
-    start "$NEW"
+    # This build takes over, on a console named in its settings.
+    CONSOLE_NAME="Living Room" start "$NEW"
     for _ in $(seq 1 40); do [[ "$(count)" -ge 1 ]] && break; sleep 0.5; done # its startup sync
     syncnow
     v=$(status | python3 -c "import json,sys; print(json.load(sys.stdin)['version'])")
@@ -114,6 +114,12 @@ import json,sys; t=json.load(sys.stdin)
 print(sorted((f['status']) for p in t['platforms'] for g in p['games'] for f in g['files']))")
     [[ "$tr" != *"changed"* && "$tr" != *"conflict"* && "$tr" == *"synced"* ]] || fail "tracked saves after the upgrade: $tr"
     curl -sf "$API/api/events" | python3 -c "import json,sys; assert isinstance(json.load(sys.stdin), list)" || fail "no sync log"
+    # The old default name ("PlayStation 5", even on a PS4) gives way to the
+    # console's own, here and on RomM, and follows it from then on.
+    dn=$(curl -sf "$API/api/config" | python3 -c "import json,sys; print(json.load(sys.stdin)['device_name'])")
+    [[ "$dn" == "Living Room" ]] || fail "the device name after the upgrade: $dn"
+    [[ "$(dump | python3 -c "import json,sys; print(json.load(sys.stdin)['device_name'])")" == "Living Room" ]] || fail "RomM wasn't told the console's name"
+    grep -q '"device_name":[[:space:]]*""' "$T/data/config.json" || fail "the name isn't saved as following the console: $(grep device_name "$T/data/config.json")"
     # And it keeps syncing.
     sleep 1.1; echo "local-save-v2" > "$RA/saves/Snes9x/Chrono Trigger (USA).srm"
     syncnow

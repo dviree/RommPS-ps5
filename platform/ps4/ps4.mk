@@ -33,7 +33,7 @@ build/ps4/gen/emulators_json.h: platform/ps4/emulators.json tools/embed.py
 	python3 -c "import json,sys; json.load(open(sys.argv[1]))" $<
 	python3 tools/embed.py $< $@ EMULATORS_JSON
 
-$(PS4_ELF): $(SRCS) $(PS4_PLAT) platform/console/console.h $(HDRS) $(UI_HEADER) build/ps4/gen/cacert_pem.h build/ps4/gen/emulators_json.h
+$(PS4_ELF): $(SRCS) $(PS4_PLAT) platform/console/console.h $(HDRS) $(GEN_HEADERS) build/ps4/gen/cacert_pem.h build/ps4/gen/emulators_json.h
 	@mkdir -p $(dir $@)
 	$(PS4_CC) $(COMMON_CFLAGS) -Ibuild/ps4/gen -Iplatform/console -DROMM_EMBED_CA $$($(PS4_PKGCONF) --cflags libcurl) -DCURL_STATICLIB \
 		-o $@ $(SRCS) $(PS4_PLAT) \
@@ -64,7 +64,7 @@ ps4-pkg: $(PS4_PKG)
 build/ps4/launcher.elf: platform/ps4/app/launcher.c
 	@mkdir -p $(dir $@)
 	clang --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -O2 -Wall -Wextra -Wno-unused-parameter \
-		-isysroot $(OO) -isystem $(OO)/include -DAPP_VERSION='"$(or $(VERSION),dev)"' -c -o build/ps4/launcher.o $<
+		-isysroot $(OO) -isystem $(OO)/include -DAPP_VERSION='"$(or $(VERSION),dev)"' $(if $(NETLOG),-DROMM_NETLOG) -c -o build/ps4/launcher.o $<
 	ld.lld -m elf_x86_64 -pie --script $(OO)/link.x --eh-frame-hdr -L$(OO)/lib $(PS4_APP_LIBS) $(OO)/lib/crt1.o \
 		-o $@ build/ps4/launcher.o
 

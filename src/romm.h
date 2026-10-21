@@ -30,6 +30,10 @@ typedef enum { POLL_OK, POLL_PENDING, POLL_SLOW_DOWN, POLL_DENIED, POLL_EXPIRED,
 /* JSON request to the paired server. Returns the parsed body (free it) or NULL. */
 cJSON *romm_call(const char *method, const char *path, const cJSON *body, long *status);
 
+/* Tells RomM the console's name when it changed (or was never sent): the
+ * console was renamed, or its name set in the web UI. One request, only then. */
+void romm_update_device_name(void);
+
 /* GETs a paged RomM list such as /api/roms?..., limit items from offset,
  * ROMM_LIST_PAGE at a time. RomM's game lists carry each game's full metadata,
  * so a page of 30 can be too much to parse in the PS4's memory; a page that

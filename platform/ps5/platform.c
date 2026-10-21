@@ -20,6 +20,7 @@
 #include <ps5/kernel.h>
 
 #include "console.h"
+#include "ps5.h"
 #include "util.h" /* APP_VERSION */
 
 /* The "RomM Sync" tile versions before 1.1.1 installed, opening the web UI,
@@ -31,8 +32,9 @@
 #define ROMM_AUTHID     0x4801000000000013L
 
 
-/* libkernel: layout from sdk/samples/ps/main.c */
-typedef struct app_info {
+/* libkernel: layout from sdk/samples/ps/main.c. Packed: the title starts at
+ * byte 16 (unpadded, it would land at 20 and read 4 bytes late). */
+typedef struct __attribute__((packed)) app_info {
     uint32_t app_id;
     uint64_t unknown1;
     uint32_t app_type;
@@ -86,6 +88,7 @@ static plat_info_t INFO = {
     .retroarch_root = "/data/homebrew/PPSA99169",
     .mednafen_root = "/data/homebrew/Mednafen",
     .can_relaunch = 1,
+    .can_mount = 1,
     .self_update = 0,
 };
 
@@ -123,17 +126,23 @@ int plat_init(void) {
     return 0;
 }
 
+int ps5_proc_app(pid_t pid, char title[16], uint32_t *app_id) {
+    app_info_t info;
+    memset(&info, 0, sizeof info);
+    if (sceKernelGetAppInfo(pid, &info)) return -1;
+    memcpy(title, info.title_id, sizeof info.title_id);
+    title[sizeof info.title_id] = 0;
+    if (app_id) *app_id = info.app_id;
+    return 0;
+}
+
 struct appid_ctx { int app_id; char title_id[16]; };
 
 static int appid_cb(pid_t pid, const char *tdname, void *vctx) {
     struct appid_ctx *c = vctx;
-    app_info_t info;
+    uint32_t app_id;
     (void)tdname;
-    memset(&info, 0, sizeof info);
-    if (sceKernelGetAppInfo(pid, &info)) return 0;
-    if ((int)info.app_id != c->app_id) return 0;
-    memcpy(c->title_id, info.title_id, sizeof info.title_id);
-    c->title_id[sizeof info.title_id] = 0;
+    if (ps5_proc_app(pid, c->title_id, &app_id) || (int)app_id != c->app_id) return 0;
     return 1;
 }
 

@@ -47,7 +47,6 @@ static void get_int(const cJSON *j, const char *key, int *dst) {
 
 static void set_defaults(void) {
     memset(&g_cfg, 0, sizeof g_cfg);
-    str_copy(g_cfg.device_name, sizeof g_cfg.device_name, "PlayStation 5");
     g_cfg.tls_verify = 1;
     g_cfg.web_port = 8780;
     g_cfg.sync_interval_min = 15;
@@ -65,8 +64,29 @@ static void set_defaults(void) {
     g_cfg.download_concurrency = 3;
     g_cfg.conflicts = CONFLICT_ASK;
     str_copy(g_cfg.slot, sizeof g_cfg.slot, "autosave");
-    str_copy(g_cfg.ps2_cards, sizeof g_cfg.ps2_cards, "per_game");
     str_copy(g_cfg.ui_theme, sizeof g_cfg.ui_theme, "acrylic");
+}
+
+/* The console's own name, or else "PlayStation 4" or "PlayStation 5". */
+static void auto_device_name(char *out, size_t n) {
+    plat_console_name(out, n);
+    if (!out[0]) str_copy(out, n, plat_info()->console);
+}
+
+/* A device name given in a config, or "" to follow the console's. The
+ * defaults older versions saved ("PlayStation 5" even on a PS4, where it
+ * collided with a real PS5's states) count as never chosen. */
+static void set_device_name(const char *name) {
+    char autoname[64];
+    auto_device_name(autoname, sizeof autoname);
+    if (!name[0] || !strcmp(name, "PlayStation 5") || !strcmp(name, "PlayStation 4") ||
+        (g_cfg.device_name_auto && !strcmp(name, autoname))) {
+        g_cfg.device_name_auto = 1;
+        str_copy(g_cfg.device_name, sizeof g_cfg.device_name, autoname);
+    } else {
+        g_cfg.device_name_auto = 0;
+        str_copy(g_cfg.device_name, sizeof g_cfg.device_name, name);
+    }
 }
 
 void config_apply_json(const cJSON *j) {
@@ -74,7 +94,8 @@ void config_apply_json(const cJSON *j) {
     get_str(j, "server_url", g_cfg.server_url, sizeof g_cfg.server_url);
     size_t l = strlen(g_cfg.server_url);
     while (l && g_cfg.server_url[l - 1] == '/') g_cfg.server_url[--l] = 0;
-    get_str(j, "device_name", g_cfg.device_name, sizeof g_cfg.device_name);
+    const cJSON *dn = cJSON_GetObjectItemCaseSensitive(j, "device_name");
+    if (cJSON_IsString(dn)) set_device_name(dn->valuestring);
     get_int(j, "tls_verify", &g_cfg.tls_verify);
     get_int(j, "web_port", &g_cfg.web_port);
     get_int(j, "sync_interval_min", &g_cfg.sync_interval_min);
@@ -92,7 +113,6 @@ void config_apply_json(const cJSON *j) {
     get_int(j, "notify", &g_cfg.notify);
     get_int(j, "update_check", &g_cfg.update_check);
     get_int(j, "cover_cache", &g_cfg.cover_cache);
-    get_int(j, "autostart_chosen", &g_cfg.autostart_chosen);
     get_int(j, "keep_backups", &g_cfg.keep_backups);
     get_int(j, "server_versions", &g_cfg.server_versions);
     if (g_cfg.server_versions < 0) g_cfg.server_versions = 0;
@@ -102,7 +122,9 @@ void config_apply_json(const cJSON *j) {
     if (g_cfg.download_concurrency > 8) g_cfg.download_concurrency = 8;
     get_str(j, "slot", g_cfg.slot, sizeof g_cfg.slot);
     get_str(j, "ps2_cards", g_cfg.ps2_cards, sizeof g_cfg.ps2_cards);
-    if (strcmp(g_cfg.ps2_cards, "backup") != 0) str_copy(g_cfg.ps2_cards, sizeof g_cfg.ps2_cards, "per_game");
+    /* Before 1.3: "backup" (the shared cards, backed up) or "per_game". */
+    if (!strcmp(g_cfg.ps2_cards, "backup")) str_copy(g_cfg.ps2_cards, sizeof g_cfg.ps2_cards, "shared");
+    else if (strcmp(g_cfg.ps2_cards, "shared") != 0 && strcmp(g_cfg.ps2_cards, "per_game") != 0) g_cfg.ps2_cards[0] = 0;
     /* Written into the page as an attribute, so only [a-z0-9-] gets through. */
     char theme[sizeof g_cfg.ui_theme] = "";
     get_str(j, "ui_theme", theme, sizeof theme);
@@ -139,6 +161,7 @@ int config_load(void) {
             get_str(j, "device_id", g_cfg.device_id, sizeof g_cfg.device_id);
             get_str(j, "username", g_cfg.username, sizeof g_cfg.username);
             get_str(j, "server_version", g_cfg.server_version, sizeof g_cfg.server_version);
+            get_str(j, "romm_device_name", g_cfg.romm_device_name, sizeof g_cfg.romm_device_name);
             get_str(j, "client_device_identifier", g_cfg.client_device_identifier,
                     sizeof g_cfg.client_device_identifier);
             /* Installs paired before the wizard existed are already set up. */
@@ -156,6 +179,7 @@ int config_load(void) {
             LOGE("config.json is not valid JSON; using defaults");
         }
     }
+    if (!g_cfg.device_name[0]) set_device_name("");
     if (!g_cfg.profiles) g_cfg.profiles = profiles_default();
     if (!g_cfg.client_device_identifier[0]) random_uuid(g_cfg.client_device_identifier);
     return config_save();
@@ -164,7 +188,9 @@ int config_load(void) {
 cJSON *config_to_json(int include_secrets) {
     cJSON *j = cJSON_CreateObject();
     cJSON_AddStringToObject(j, "server_url", g_cfg.server_url);
-    cJSON_AddStringToObject(j, "device_name", g_cfg.device_name);
+    /* Saved as "" while it follows the console, so a new Console Name is picked up. */
+    cJSON_AddStringToObject(j, "device_name", include_secrets && g_cfg.device_name_auto ? "" : g_cfg.device_name);
+    if (include_secrets) cJSON_AddStringToObject(j, "romm_device_name", g_cfg.romm_device_name);
     cJSON_AddStringToObject(j, "device_id", g_cfg.device_id);
     cJSON_AddStringToObject(j, "username", g_cfg.username);
     cJSON_AddStringToObject(j, "client_device_identifier", g_cfg.client_device_identifier);
@@ -181,7 +207,6 @@ cJSON *config_to_json(int include_secrets) {
     cJSON_AddBoolToObject(j, "notify", g_cfg.notify);
     cJSON_AddBoolToObject(j, "update_check", g_cfg.update_check);
     cJSON_AddBoolToObject(j, "cover_cache", g_cfg.cover_cache);
-    cJSON_AddBoolToObject(j, "autostart_chosen", g_cfg.autostart_chosen);
     cJSON_AddNumberToObject(j, "keep_backups", g_cfg.keep_backups);
     cJSON_AddNumberToObject(j, "server_versions", g_cfg.server_versions);
     cJSON_AddNumberToObject(j, "download_concurrency", g_cfg.download_concurrency);
@@ -208,6 +233,8 @@ int config_save(void) {
     if (rc != 0) LOGE("failed to write %s", path);
     return rc;
 }
+
+const char *config_card_mode(const char *system) { return !strcmp(system, "ps2") ? g_cfg.ps2_cards : ""; }
 
 int config_is_paired(void) { return g_cfg.server_url[0] && g_cfg.token[0] && g_cfg.device_id[0]; }
 

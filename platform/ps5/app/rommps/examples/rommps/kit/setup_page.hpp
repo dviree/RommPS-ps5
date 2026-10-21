@@ -99,6 +99,8 @@ class SetupPage
             kOwnFolder,
             kFolders,   // a system's folders in an emulator: as found, or picked
             kSysFolder, // one of them (emulator: 0 games, 1 saves, 2 states)
+            kOwnMove,   // an extra's games of its own: to the main emulator
+            kOwnDelete, // or deleted
             kContinue
         } kind = kNone;
         int emulator = -1; // or, for kOwnFolder, which folder (0 games, 1 saves, 2 states)
@@ -128,8 +130,10 @@ class SetupPage
     void update_preview(App &app, const hui::InputFrame &input, float dt, hui::ui::Feedback &feedback);
     void update_finish(App &app, const hui::InputFrame &input, float dt, hui::ui::Feedback &feedback);
     void load_emulators(App &app);
+    // Whether each extra plays the main emulator's games through a mount, or
+    // why not (/api/paths), by "system|root".
+    void load_mounts(App &app);
     void load_preview(App &app);
-    void load_autostart(App &app);
     std::vector<Conflict> conflicts() const; // systems several emulators on play
     std::vector<Conflict> systems() const;   // every system an emulator on plays, by name
     // The root of the emulator that keeps a system: the one picked ("" when
@@ -166,6 +170,23 @@ class SetupPage
                       float clock) const;
     void draw_heading(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, const Look &look, const char *title,
                       const std::string &text) const;
+
+    struct MountStatus
+    {
+        bool mounted = false;
+        std::string note;
+        int own = 0; // games of its own in the way
+    };
+    std::map<std::string, MountStatus> mounts_;
+    // Each system's memory card method (/api/paths): "shared" or "per_game",
+    // and why an emulator's cards don't sync (it keeps the other).
+    struct CardMethod
+    {
+        std::string method;
+        std::string note;
+    };
+    std::map<std::string, CardMethod> cards_;
+    std::string confirm_delete_; // "system|root" after the first Cross on Delete
 
     Step step_ = kServer;
     float step_age_ = 0.0f;
@@ -217,8 +238,6 @@ class SetupPage
     // 5
     Config finish_;
     bool finish_known_ = false;
-    bool autostart_supported_ = false, autostart_installed_ = false, autostart_on_ = false;
-    bool autostart_defaulted_ = false; // turned on for a first setup already
 };
 
 } // namespace rommps

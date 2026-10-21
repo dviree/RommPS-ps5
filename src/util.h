@@ -8,7 +8,7 @@
 
 #define APP_NAME    "romm-sync"
 #ifndef APP_VERSION
-#define APP_VERSION "1.2.2"
+#define APP_VERSION "1.3.0"
 #endif
 #ifndef APP_BUILD /* git describe of the build, from the Makefile */
 #define APP_BUILD "unknown"
@@ -27,6 +27,12 @@ void log_init(const char *file_path);
 void log_msg(int level, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 /* Recent log lines, newline separated. Free the result. */
 char *log_recent(void);
+/* Sends one line to tools/netlog.py in NETLOG=1 builds; a no-op otherwise.
+ * log_msg already does; this is for what runs before the log is open. */
+void netlog_send(const char *line);
+#ifndef ROMM_NETLOG_PORT
+#define ROMM_NETLOG_PORT 8781 /* UDP; the web UI's port plus one */
+#endif
 
 #define LOGD(...) log_msg(LOG_DEBUG, __VA_ARGS__)
 #define LOGI(...) log_msg(LOG_INFO, __VA_ARGS__)

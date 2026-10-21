@@ -190,6 +190,34 @@ int romm_pair_exchange(const char *base, const char *code, char *token, int tn) 
     return rc;
 }
 
+void romm_update_device_name(void) {
+    char name[64], id[64], path[128];
+    config_lock();
+    int same = !strcmp(g_cfg.device_name, g_cfg.romm_device_name);
+    str_copy(name, sizeof name, g_cfg.device_name);
+    str_copy(id, sizeof id, g_cfg.device_id);
+    config_unlock();
+    if (same || !name[0] || !id[0]) return;
+    char *q = http_escape(id);
+    snprintf(path, sizeof path, "/api/devices/%s", q);
+    free(q);
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddStringToObject(body, "name", name);
+    long st = 0;
+    cJSON_Delete(romm_call("PUT", path, body, &st));
+    cJSON_Delete(body);
+    /* No such device or no renaming on this RomM: nothing to retry. */
+    if (st != 200 && st != 404 && st != 405) {
+        if (st) LOGW("could not rename the device on RomM (HTTP %ld)", st);
+        return;
+    }
+    if (st == 200) LOGI("device is called \"%s\" on RomM now", name);
+    config_lock();
+    str_copy(g_cfg.romm_device_name, sizeof g_cfg.romm_device_name, name);
+    config_save();
+    config_unlock();
+}
+
 int romm_register_device(const char *base, const char *token, char *device_id, int dn) {
     char auth[300], ip[64] = "";
     snprintf(auth, sizeof auth, "Bearer %s", token);

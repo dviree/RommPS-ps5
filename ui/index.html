@@ -75,14 +75,14 @@ if (/PlayStation/.test(navigator.userAgent)) document.documentElement.className 
       </div>
       <div id="ps2Choice" style="display:none">
         <h3>PlayStation 2 memory cards</h3>
-        <p class="muted">LRPS2 keeps every game on one shared memory card by default, and RomM stores saves per game. Pick how PS2 saves are handled.</p>
+        <p class="muted">LRPS2 can keep one memory card per game or shared cards for every game. RomM Sync syncs one of the two, never both.</p>
         <label class="choice"><input type="radio" name="ps2" value="per_game" checked><div>
           <b>One memory card per game</b>
           <span class="muted">Works with any RomM version. In RetroArch, open the LRPS2 core options and turn off Shared Memory Cards. Saves already on the shared card stay there.</span>
         </div></label>
-        <label class="choice" id="ps2BackupChoice"><input type="radio" name="ps2" value="backup"><div>
-          <b>Back up the shared memory card</b>
-          <span class="muted">Needs RomM 5.3.0 or newer. The whole card is uploaded when it changes and can be restored from Settings. It is not merged with other devices.</span>
+        <label class="choice" id="ps2BackupChoice"><input type="radio" name="ps2" value="shared"><div>
+          <b>Shared memory cards</b>
+          <span class="muted">Needs RomM 5.3.0 or newer. The whole cards sync with your other consoles as they change; when both changed, the newer wins and the other is kept.</span>
           <div class="warn" id="ps2BackupNote"></div>
         </div></label>
       </div>
@@ -232,7 +232,7 @@ if (/PlayStation/.test(navigator.userAgent)) document.documentElement.className 
   <div class="card">
     <h2>Sync</h2>
     <div class="toggle"><input type="checkbox" id="saveSync"><label for="saveSync">Sync saves and states with RomM</label></div>
-    <label for="devname">Device name</label><input id="devname">
+    <label for="devname">Device name</label><input id="devname" placeholder="Empty: the console's own name">
     <div class="toggle"><input type="checkbox" id="notify"><label for="notify">Notifications</label></div>
     <div class="toggle"><input type="checkbox" id="tls"><label for="tls">Verify TLS certificate</label></div>
     <label for="concurrency">Downloads at once</label><select id="concurrency"></select>
@@ -266,7 +266,7 @@ if (/PlayStation/.test(navigator.userAgent)) document.documentElement.className 
     <label for="ps2Mode">Mode</label>
     <select id="ps2Mode">
       <option value="per_game">One memory card per game</option>
-      <option value="backup">Back up the shared memory card (RomM 5.3.0+)</option>
+      <option value="shared">Shared memory cards, synced (RomM 5.3.0+)</option>
     </select>
     <div id="ps2Status" style="margin-top:12px"></div>
   </div>
@@ -802,14 +802,13 @@ function loadAutostart() {
     var h, ld = esc(a.loader), pl = "<code>" + esc(a.payload) + "</code>";
     if (!a.supported) h = '<p class="muted">' + ld + " can't start payloads with the console. Send " + pl + " again after each boot.</p>";
     else if (!a.loader_found) h = '<p class="muted">' + ld + " not found. Load the payload after each boot.</p>";
-    else if (a.enabled && a.hint) h = '<p class="ok">Copied to <code>' + esc(a.path) + "</code>.</p><p>" + esc(a.hint) + '</p><button id="asOff">Remove it</button>';
-    else if (a.enabled) h = '<p class="ok">Starts with ' + ld + '.</p><button id="asOff">Turn off</button>';
+    else if (a.enabled && a.hint) h = '<p class="ok">Copied to <code>' + esc(a.path) + "</code>.</p><p>" + esc(a.hint) + "</p>";
+    else if (a.enabled) h = '<p class="ok">Starts with ' + ld + ".</p>";
     else if (a.installed) h = '<p class="muted">Installed at <code>' + esc(a.path) + '</code></p><button class="primary" id="asOn">Start with the console</button>';
     else h = '<p class="muted">' + ld + " needs a copy of " + pl + "." + (state.status && state.status.platform === "ps5" ? " Open RommPS on the console and it sets this up, or pick the file from a computer." : " Pick the file from a computer.") +
       '</p><div class="row"><input type="file" id="asFile" accept=".elf"><button class="primary" id="asUpload">Upload</button></div>';
     $("autostart").innerHTML = h;
-    if ($("asOn")) $("asOn").onclick = function () { api("POST", "/api/autostart", { enable: true }).then(loadAutostart).catch(function (e) { toast(e.message, 1); }); };
-    if ($("asOff")) $("asOff").onclick = function () { api("POST", "/api/autostart", { enable: false }).then(loadAutostart); };
+    if ($("asOn")) $("asOn").onclick = function () { api("POST", "/api/autostart", {}).then(loadAutostart).catch(function (e) { toast(e.message, 1); }); };
     if ($("asUpload")) $("asUpload").onclick = function () {
       var f = $("asFile").files[0]; if (!f) { toast("Pick the payload file first", 1); return; }
       $("asUpload").disabled = true; $("asUpload").textContent = "Uploading";
@@ -1040,15 +1039,16 @@ $("histBody").onclick = function (ev) {
 };
 
 // Activity and tracked saves
-var ACTION_PILL = { uploaded: "ok", downloaded: "ok", restored: "ok", resolved: "ok", "backed up": "ok", conflict: "warn", skipped: "off", failed: "err" };
+var ACTION_PILL = { uploaded: "ok", downloaded: "ok", restored: "ok", resolved: "ok", "backed up": "ok", moved: "ok", removed: "off", conflict: "warn", skipped: "off", failed: "err" };
 var STATUS_LABEL = { synced: ["In sync", "ok"], changed: ["Changed here", "warn"], conflict: ["Conflict", "warn"], missing: ["Missing", "err"], no_game: ["Game not here", "off"] };
 function cap(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : ""; }
+function eventKind(k) { return k === "card" ? "Memory card" : k === "bios" ? "BIOS" : cap(k); }
 function eventRow(e, withGame) {
-  var what = [e.kind === "card" ? "Memory card" : cap(e.kind)];
+  var what = [eventKind(e.kind)];
   if (e.detail) what.push(e.detail);
   if (e.emulator && e.action !== "skipped") what.push(e.emulator);
   return "<tr><td>" + ago(e.t) + "</td>" +
-    (withGame ? "<td>" + esc(e.game || (e.kind === "card" ? "Memory card" : "Game " + e.rom_id)) + "</td>" : "") +
+    (withGame ? "<td>" + esc(e.game || (e.kind === "card" || !e.rom_id ? eventKind(e.kind) : "Game " + e.rom_id)) + "</td>" : "") +
     "<td>" + pill(cap(e.action), ACTION_PILL[e.action]) + '</td><td title="' + esc(e.path) + '">' + esc(what.join(" · ")) + "</td></tr>";
 }
 function loadActivity() {
@@ -1174,8 +1174,9 @@ function loadSystems() {
 }
 function loadPs2(map) {
   api("GET", "/api/memcards").then(function (mc) {
-    $("ps2Card").style.display = mc.lrps2 ? "" : "none";
-    $("ps2Mode").value = mc.mode;
+    $("ps2Card").style.display = mc.choice || mc.slots.length ? "" : "none";
+    $("ps2Mode").value = mc.mode === "shared" ? "shared" : "per_game";
+    $("ps2Mode").disabled = !mc.choice;
     $("ps2Mode").options[1].disabled = !mc.supported;
     var h = "";
     if (mc.mode === "per_game") {
@@ -1184,8 +1185,8 @@ function loadPs2(map) {
     } else if (!mc.supported) {
       h = '<p class="warn">Needs RomM 5.3.0 or newer. Your server runs ' + esc(mc.server_version || "an older version") + ".</p>";
     } else {
-      h = "<table><thead><tr><th>Card</th><th>Last backup</th><th></th></tr></thead><tbody>" + mc.slots.map(function (s) {
-        return "<tr><td>Slot " + s.slot + "<br><small class=muted>" + esc(s.path) + "</small></td><td>" + (s.exists ? (s.backed_up_at ? ago(s.backed_up_at) : "Not yet") : '<span class="muted">No card</span>') +
+      h = "<table><thead><tr><th>Card</th><th>Last synced</th><th></th></tr></thead><tbody>" + mc.slots.map(function (s) {
+        return "<tr><td>" + esc(s.emulator) + " " + esc(s.name) + "<br><small class=muted>" + esc(s.path) + "</small></td><td>" + (s.exists ? (s.synced_at ? ago(s.synced_at) : "Not yet") : '<span class="muted">No card</span>') +
           '</td><td><button class="small" data-restore="' + s.slot + '">Restore from RomM</button></td></tr>';
       }).join("") + "</tbody></table>";
     }
@@ -1195,7 +1196,7 @@ function loadPs2(map) {
 $("ps2Mode").onchange = function () { api("POST", "/api/config", { ps2_cards: this.value }).then(function () { toast("Saved"); loadSettings(); }); };
 $("ps2Status").onclick = function (ev) {
   var b = ev.target.closest("button[data-restore]"); if (!b) return;
-  if (!confirm("Replace this memory card with the latest backup on RomM? The current card is backed up first.")) return;
+  if (!confirm("Replace this memory card with the latest one on RomM? The current card is kept in backups first.")) return;
   b.disabled = true;
   api("POST", "/api/memcards/restore", { slot: +b.dataset.restore }).then(function () { toast("Memory card restored"); loadSettings(); }).catch(function (e) { b.disabled = false; toast(e.message, 1); });
 };

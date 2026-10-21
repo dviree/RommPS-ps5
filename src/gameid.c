@@ -8,6 +8,8 @@
 #include <strings.h>
 #include <zlib.h>
 
+#include "cJSON.h"
+#include "state.h" /* jget_str */
 #include "util.h"
 
 #define SECTOR 2048
@@ -245,8 +247,8 @@ static int psx_open_file(psx_disc *d, const char *path) {
     return 0;
 }
 
-/* The first data file a .cue names, beside it. */
-static int cue_first_file(const char *cue, char *out, size_t n) {
+/* The file a .cue names index-th (0 for its first), beside it. */
+static int cue_file(const char *cue, int index, char *out, size_t n) {
     char *txt = read_file(cue, NULL);
     if (!txt) return -1;
     int rc = -1;
@@ -254,6 +256,10 @@ static int cue_first_file(const char *cue, char *out, size_t n) {
     while ((p = strstr(p, "FILE"))) {
         char *q = strchr(p, '"'), *e = q ? strchr(q + 1, '"') : NULL;
         if (!q || !e) break;
+        if (index--) {
+            p = e + 1;
+            continue;
+        }
         *e = 0;
         char dir[PATH_MAX_LEN];
         str_copy(dir, sizeof dir, cue);
@@ -282,7 +288,7 @@ static int psx_open(psx_disc *d, const char *path) {
     }
     if (str_ends_with_ci(path, ".cue")) {
         char bin[PATH_MAX_LEN];
-        if (cue_first_file(path, bin, sizeof bin) != 0) return -1;
+        if (cue_file(path, 0, bin, sizeof bin) != 0) return -1;
         return psx_open_file(d, bin);
     }
     return psx_open_file(d, path);
@@ -372,4 +378,197 @@ int gameid_psx(const char *path, char *out, size_t n) {
     free(dir);
     psx_close(&d);
     return rc;
+}
+
+/* ---- Dreamcast ----
+ * A disc's product number ("MK-51035") from its IP.BIN, at the start of the
+ * high-density area (a GD-ROM's track 3): a .gdi's third track, a .cue's
+ * third file, or in a CHD, frame by frame from the start, since its tracks
+ * sit end to end and the third is only a little way in. A one-track image
+ * (a CD-ROM game, or an .iso) has it in its first sector. Flycast names each
+ * game's own memory card by it. .cdi images aren't read. */
+#define DC_CHD_FRAMES 30000 /* track 3 starts within the first few thousand */
+
+/* Flycast's game id: the product number, trailing spaces trimmed and the
+ * characters a file name can't hold made "_" ("T13008D 05" -> "T13008D_05"),
+ * as it names the game's own card (oslib.cpp getVmuPath). */
+static void flycast_id(char *id) {
+    for (char *c = id; *c; c++)
+        if (strchr(" /\\:*?|<>\"", *c)) *c = '_';
+}
+
+static int ipbin_product(const unsigned char *s, char *out, size_t n) {
+    if (memcmp(s, "SEGA SEGAKATANA ", 16) != 0) return -1;
+    size_t len = 10;
+    while (len && s[0x40 + len - 1] == ' ') len--;
+    if (!len || len + 1 > n) return -1;
+    for (size_t i = 0; i < len; i++)
+        if (!isprint(s[0x40 + i])) return -1;
+    memcpy(out, s + 0x40, len);
+    out[len] = 0;
+    flycast_id(out);
+    return 0;
+}
+
+/* Track 3's file in a .gdi ("3 45000 4 2352 track03.bin 0", the name maybe
+ * quoted), else its first track's. */
+static int gdi_track_file(const char *gdi, char *out, size_t n) {
+    char *txt = read_file(gdi, NULL);
+    if (!txt) return -1;
+    char dir[PATH_MAX_LEN], first[PATH_MAX_LEN] = "", name[PATH_MAX_LEN];
+    str_copy(dir, sizeof dir, gdi);
+    char *slash = strrchr(dir, '/');
+    if (slash) *slash = 0;
+    else str_copy(dir, sizeof dir, ".");
+    int rc = -1;
+    char *save = NULL;
+    strtok_r(txt, "\r\n", &save); /* the track count */
+    for (char *line = strtok_r(NULL, "\r\n", &save); line; line = strtok_r(NULL, "\r\n", &save)) {
+        int track = 0, used = 0;
+        if (sscanf(line, "%d %*d %*d %*d %n", &track, &used) < 1 || !used) continue;
+        const char *f = line + used;
+        if (*f == '"') {
+            const char *e = strchr(f + 1, '"');
+            if (!e) continue;
+            snprintf(name, sizeof name, "%.*s", (int)(e - f - 1), f + 1);
+        } else if (sscanf(f, "%1023s", name) != 1) {
+            continue;
+        }
+        if (track == 1) path_join(first, sizeof first, dir, name);
+        if (track == 3) {
+            path_join(out, n, dir, name);
+            rc = 0;
+            break;
+        }
+    }
+    free(txt);
+    if (rc && first[0]) {
+        str_copy(out, n, first);
+        rc = 0;
+    }
+    return rc;
+}
+
+static int dc_from_file(const char *path, char *out, size_t n) {
+    psx_disc d;
+    memset(&d, 0, sizeof d);
+    unsigned char s[SECTOR];
+    int rc = psx_open_file(&d, path) == 0 && psx_sector(&d, 0, s) == 0 ? ipbin_product(s, out, n) : -1;
+    psx_close(&d);
+    return rc;
+}
+
+int gameid_dreamcast(const char *path, char *out, size_t n) {
+    char track[PATH_MAX_LEN];
+    if (str_ends_with_ci(path, ".gdi"))
+        return gdi_track_file(path, track, sizeof track) == 0 ? dc_from_file(track, out, n) : -1;
+    if (str_ends_with_ci(path, ".cue"))
+        return cue_file(path, 2, track, sizeof track) == 0 || cue_file(path, 0, track, sizeof track) == 0
+                   ? dc_from_file(track, out, n)
+                   : -1;
+    if (!str_ends_with_ci(path, ".chd")) return str_ends_with_ci(path, ".cdi") ? -1 : dc_from_file(path, out, n);
+    psx_disc d;
+    if (psx_open(&d, path) != 0) {
+        psx_close(&d);
+        return -1;
+    }
+    int rc = -1;
+    for (uint32_t f = 0; f < DC_CHD_FRAMES && rc; f++) {
+        long hunk = (long)(f / d.frames_per_hunk);
+        if (hunk != d.cached_hunk) {
+            if (chd_read(d.chd, (uint32_t)hunk, d.hunk) != CHDERR_NONE) break;
+            d.cached_hunk = hunk;
+        }
+        const unsigned char *frame = d.hunk + (size_t)(f % d.frames_per_hunk) * d.frame_bytes;
+        rc = ipbin_product(frame + 16, out, n) == 0 || ipbin_product(frame, out, n) == 0 ? 0 : -1;
+    }
+    psx_close(&d);
+    return rc;
+}
+
+int gameid_from_list(const char *list, const char *app_root, const char *path, char *out, size_t n) {
+    char *txt = read_file(list, NULL);
+    if (!txt) return -1;
+    int rc = -1;
+    const size_t plen = strlen(path);
+    char *save = NULL;
+    for (char *line = strtok_r(txt, "\r\n", &save); line && rc; line = strtok_r(NULL, "\r\n", &save)) {
+        char *tab = strchr(line, '\t');
+        if (!tab) continue;
+        *tab = 0;
+        const char *id = tab + 1;
+        char file[PATH_MAX_LEN];
+        if (!strncmp(line, "/app0/", 6)) path_join(file, sizeof file, app_root, line + 6);
+        else str_copy(file, sizeof file, line);
+        /* The game's file, or one inside its folder (a game on several files). */
+        if (strcmp(file, path) != 0 && !(!strncmp(file, path, plen) && file[plen] == '/')) continue;
+        size_t len = strlen(id);
+        if (!len || len + 1 > n) continue;
+        str_copy(out, n, id);
+        flycast_id(out); /* it names files */
+        rc = 0;
+    }
+    free(txt);
+    return rc;
+}
+
+static uint64_t le64(const unsigned char *p) {
+    uint64_t v = 0;
+    for (int i = 7; i >= 0; i--) v = v << 8 | p[i];
+    return v;
+}
+
+static int read_at(FILE *f, long off, unsigned char *buf, size_t len) {
+    return fseek(f, off, SEEK_SET) == 0 && fread(buf, 1, len, f) == len ? 0 : -1;
+}
+
+int gameid_3ds(const char *path, char *out, size_t n) {
+    FILE *f = fopen(path, "rb");
+    if (!f || n < 17) {
+        if (f) fclose(f);
+        return -1;
+    }
+    unsigned char h[0x200];
+    uint64_t id = 0;
+    if (read_at(f, 0, h, sizeof h) == 0) {
+        if (!memcmp(h + 0x100, "NCSD", 4)) {
+            id = le64(h + 0x108); /* the media id: the title's */
+        } else if (!memcmp(h + 0x100, "NCCH", 4)) {
+            id = le64(h + 0x118); /* the program id */
+        } else if (le32(h) == 0x2020) {
+            /* CIA: header, certificates, ticket, then the TMD, each 64-byte
+             * aligned; the TMD (RSA-2048 signed) has the title id at 0x18C,
+             * big-endian. */
+            uint32_t cert = le32(h + 0x08), ticket = le32(h + 0x0C);
+            long tmd = (long)(((0x2020 + 63) & ~63u));
+            tmd = (long)((((uint32_t)tmd + cert + 63) & ~63u));
+            tmd = (long)((((uint32_t)tmd + ticket + 63) & ~63u));
+            unsigned char t[8];
+            if (read_at(f, tmd + 0x18C, t, 8) == 0)
+                for (int i = 0; i < 8; i++) id = id << 8 | t[i];
+        }
+    }
+    fclose(f);
+    if (!id) return -1;
+    snprintf(out, n, "%016llX", (unsigned long long)id);
+    return 0;
+}
+
+int gameid_from_library(const char *library_json, const char *system, const char *path, char *out, size_t n) {
+    char *txt = read_file(library_json, NULL);
+    cJSON *lib = txt ? cJSON_Parse(txt) : NULL;
+    free(txt);
+    const cJSON *g;
+    int found = -1;
+    cJSON_ArrayForEach(g, cJSON_GetObjectItemCaseSensitive(lib, system)) {
+        const char *tid = jget_str(g, "titleId", "");
+        if (strcmp(jget_str(g, "path", ""), path) != 0 || strlen(tid) != 16) continue;
+        size_t o = 0;
+        for (; *tid && o + 1 < n; tid++) out[o++] = (char)toupper((unsigned char)*tid);
+        out[o] = 0;
+        found = 0;
+        break;
+    }
+    cJSON_Delete(lib);
+    return found;
 }

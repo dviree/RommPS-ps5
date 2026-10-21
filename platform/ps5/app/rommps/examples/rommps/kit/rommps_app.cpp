@@ -371,28 +371,14 @@ void App::repair_autostart()
         std::unique_ptr<cJSON, void (*)(cJSON *)> j(r.json(), cJSON_Delete);
         if (!r.ok() || !j || !flag(j.get(), "supported"))
             return;
-        // Setup used to leave autostart off unless it was turned on, so most
-        // people never did. It's switched on once for anyone who never chose
-        // either way; after that their choice stands.
-        if (!flag(j.get(), "enabled") && cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(j.get(), "chosen")) &&
-            status_.setup_complete)
-        {
-            install_autostart([this](const Response &a) {
-                if (a.ok())
-                    say("RommPS now starts with the console. You can turn this off in Set up again.");
-            });
-            return;
-        }
-        bool old = false;
+        // RommPS needs RomM Sync running, so it starts with the console, from
+        // a copy no older than the one RommPS carries.
+        bool old = !flag(j.get(), "enabled");
         const cJSON *c;
         cJSON_ArrayForEach(c, cJSON_GetObjectItemCaseSensitive(j.get(), "copies"))
             old |= version_cmp(str(c, "version"), kMinPayload) < 0;
-        if (!old)
-            return;
-        api_.post("/api/autostart/install", bundled_payload(), [this](const Response &a) {
-            if (!a.ok())
-                say("Couldn't update RommPS's autostart: " + a.message());
-        });
+        if (old)
+            install_autostart(nullptr);
     });
 }
 
@@ -520,6 +506,14 @@ void App::refresh_status()
         status_.covers_state = str(covers, "state");
         status_.covers_done = static_cast<int>(num(covers, "done"));
         status_.covers_total = static_cast<int>(num(covers, "total"));
+        // A game came or went (deleted by hand included): the lists load again.
+        const double sig = num(j.get(), "installed_sig", -1);
+        if (sig != installed_sig_ && installed_sig_ >= 0 && sig >= 0)
+        {
+            lists_.clear();
+            refresh_installed();
+        }
+        installed_sig_ = sig;
         const cJSON *pairing = cJSON_GetObjectItemCaseSensitive(j.get(), "pairing");
         if (status_.pairing == "starting")
             pairing = nullptr; // the answer to /api/pair/start says how it went
@@ -743,6 +737,7 @@ void App::refresh_installed()
             return;
         std::unique_ptr<cJSON, void (*)(cJSON *)> j(r.json(), cJSON_Delete);
         std::vector<Game> list;
+        std::unordered_set<int> ids;
         const cJSON *g;
         cJSON_ArrayForEach(g, j.get())
         {
@@ -754,9 +749,36 @@ void App::refresh_installed()
             game.cover = str(g, "cover");
             game.size = num(g, "size");
             game.installed = true;
+            ids.insert(game.id);
             list.push_back(std::move(game));
         }
         installed_ = std::move(list);
+        on_console_ = std::move(ids);
+        installed_known_ = true;
+    });
+}
+
+void App::check_on_console(int rom_id)
+{
+    char path[64];
+    std::snprintf(path, sizeof path, "/api/roms/%d/on_console", rom_id);
+    api_.get(path, [this, rom_id](const Response &r) {
+        std::unique_ptr<cJSON, void (*)(cJSON *)> j(r.json(), cJSON_Delete);
+        if (!r.ok() || !j || !installed_known_) // an older payload doesn't know it
+            return;
+        const bool here = flag(j.get(), "installed");
+        if (here == (on_console_.count(rom_id) > 0))
+            return;
+        if (here)
+        {
+            refresh_installed(); // its size and cover for the shelf
+            on_console_.insert(rom_id);
+            return;
+        }
+        on_console_.erase(rom_id);
+        installed_.erase(std::remove_if(installed_.begin(), installed_.end(),
+                                        [rom_id](const Game &g) { return g.id == rom_id; }),
+                         installed_.end());
     });
 }
 

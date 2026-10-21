@@ -19,9 +19,9 @@
 extern "C" void rommps_set_renderer(void *renderer);
 
 // RommPS's own interface sounds: assets/rommps/sounds/<cue>_NN.wav in the
-// title (platform/ps5/app/assets/sounds in the repository; focus_01.wav,
-// select_01.wav, back_01.wav, ...: the kit's cue names, audio/cues.cpp), 48 kHz
-// 16- or 24-bit PCM. Each cue there replaces the kit's recordings of that cue;
+// title (platform/ps5/app/assets/primary-menu-sounds in the repository;
+// focus_01.wav, select_01.wav, back_01.wav, ...: the kit's cue names,
+// audio/cues.cpp), 48 kHz 16- or 24-bit PCM. Each cue there replaces the kit's recordings of that cue;
 // the cues it leaves out keep them.
 std::string soundPackDir(const ps5ui::Kit &kit)
 {

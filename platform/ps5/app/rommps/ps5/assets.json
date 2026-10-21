@@ -224,7 +224,7 @@
   {
    "path": "rommps/sounds",
    "from": "file",
-   "source": "../assets/sounds",
+   "source": "../assets/primary-menu-sounds",
    "used_by": [
     "*"
    ],
@@ -233,9 +233,7 @@
    "licence": "used with Konami's permission (supplied by s0liton)",
    "url": "https://www.konami.com",
    "changes": "MP3 to 48 kHz 16-bit WAV, one file per interface cue",
-   "licence_file": "SOUNDS-LICENCE.txt",
-   "optional": true,
-   "comment": "Kept out of the public repository: present only in builds made where the files are (release builds). Without them RommPS uses the UI kit's sounds."
+   "licence_file": "SOUNDS-LICENCE.txt"
   },
   {
    "path": "rommps/romm-sync.elf",

@@ -5,21 +5,26 @@
  *
  * When opened it:
  *   1. copies the payload bundled in the package to /data/payloads when it's
- *      missing or older than the bundled one. Versions come from the
- *      ROMM_SYNC_VERSION= tag in each payload (src/main.c), so an older app
- *      never undoes a newer payload from an update or a manual copy. This app
- *      runs as a regular user, so it only relies on /data/payloads being
- *      writable. Files are read in full: stat() is unreliable in the sandbox;
+ *      missing, older, or the same version with different bytes (a test
+ *      build). Versions come from the ROMM_SYNC_VERSION= tag in each payload
+ *      (src/main.c), so an older app never undoes a newer payload from an
+ *      update or a manual copy. Other romm-sync ELFs in /data/payloads (old
+ *      names, PS5 builds copied over by mistake) are removed, and an AutoRun
+ *      entry for one moves to this payload. This app runs as a regular user,
+ *      so it only relies on /data/payloads being writable. Files are read in
+ *      full: stat() is unreliable in the sandbox;
  *   2. checks that RomM Sync answers on its web port;
  *   3. shows the web UI in the system web browser dialog, or the Browser app
  *      if the dialog won't open; if RomM Sync isn't running, says why, from
  *      what it left in its logs, and how to start it.
  *
- * Each step goes to /data/romm-sync/launcher.log, for bug reports.
+ * Each step goes to /data/romm-sync/launcher.log, for bug reports. NETLOG=1
+ * builds also broadcast it, with the payload's own logs, to tools/netlog.py.
  *
  * The web browser dialog has no OpenOrbis types; its layout is Sony's
  * SceWebBrowserDialogParam as used by Nuvio-PS5 and EVO Player. */
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <netinet/in.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -52,6 +57,7 @@
 #define CONFIG_PATH     DATA_DIR "/config.json"
 #define VERSION_TAG     "ROMM_SYNC_VERSION="
 #define DEFAULT_PORT    8780
+#define NETLOG_PORT     8781 /* ROMM_NETLOG_PORT in src/util.h */
 
 /* libSceWebBrowserDialog */
 typedef struct {
@@ -81,18 +87,43 @@ int sceWebBrowserDialogTerminate(void);
 /* OpenOrbis declares it without parameters; this is the real signature. */
 int launch_web_browser(const char *uri, void *param) __asm__("sceSystemServiceLaunchWebBrowser");
 
+#ifdef ROMM_NETLOG
+/* A UDP broadcast per line, as the payload does (src/util.c). */
+static void netlog(const char *tag, const char *text, size_t len) {
+    static int fd = -1;
+    static struct sockaddr_in to;
+    char pkt[1200];
+    if (fd < 0) {
+        int on = 1;
+        if ((fd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) return;
+        setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &on, sizeof on);
+        memset(&to, 0, sizeof to);
+        to.sin_family = AF_INET;
+        to.sin_port = htons(NETLOG_PORT);
+        to.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+    }
+    int n = snprintf(pkt, sizeof pkt, "[%s] %.*s\n", tag, (int)(len > 1100 ? 1100 : len), text);
+    sendto(fd, pkt, (size_t)n, 0, (struct sockaddr *)&to, sizeof to);
+    usleep(2000); /* a burst of broadcasts gets dropped */
+}
+#endif
+
 static void logf_(const char *fmt, ...) {
     FILE *f = fopen(LOG_PATH, "a");
-    char ts[32];
+    char ts[32], line[1024];
     time_t now = time(NULL);
     va_list ap;
-    if (!f) return;
-    strftime(ts, sizeof ts, "%Y-%m-%d %H:%M:%S", localtime(&now));
-    fprintf(f, "%s ", ts);
     va_start(ap, fmt);
-    vfprintf(f, fmt, ap);
+    vsnprintf(line, sizeof line, fmt, ap);
     va_end(ap);
-    fputc('\n', f);
+    strftime(ts, sizeof ts, "%Y-%m-%d %H:%M:%S", localtime(&now));
+#ifdef ROMM_NETLOG
+    char out[1100];
+    snprintf(out, sizeof out, "%s %s", ts, line);
+    netlog("launcher", out, strlen(out));
+#endif
+    if (!f) return;
+    fprintf(f, "%s %s\n", ts, line);
     fclose(f);
 }
 
@@ -220,7 +251,7 @@ static int install_payload(void) {
     else if (same_file(PAYLOAD_PATH, BUNDLED_PAYLOAD)) replace = 0;
     else if (!parse_version(want_ver, wv)) replace = 0; /* an untagged test build: never overwrite */
     else if (!parse_version(have_ver, hv)) replace = 1; /* older than version tags */
-    else replace = compare_versions(wv, hv) > 0;
+    else replace = compare_versions(wv, hv) >= 0;     /* the same version can be a different build */
     if (!replace) {
         logf_("payload %s left as it is (installed %s, this app has %s)", PAYLOAD_PATH, have_ver[0] ? have_ver : "?",
               want_ver[0] ? want_ver : "?");
@@ -232,6 +263,101 @@ static int install_payload(void) {
           have ? (have_ver[0] ? have_ver : "untagged") : "missing", rc == 1 ? "ok" : "failed");
     return rc;
 }
+
+/* Points an AutoRun entry for a removed copy at this payload, unless it's
+ * already queued. GoldHEN only reads the file at jailbreak, so this takes
+ * effect on the next one. */
+static void move_autorun(const char *name) {
+    size_t len = 0;
+    char *ini = (char *)slurp(AUTORUN_INI, &len), *at, path[300];
+    if (!ini) return;
+    ini = realloc(ini, len + 1);
+    ini[len] = 0;
+    snprintf(path, sizeof path, PAYLOAD_DIR "/%s", name);
+    if ((at = strstr(ini, path)) && !strstr(ini, "romm-sync-ps4.elf")) {
+        FILE *f = fopen(AUTORUN_INI ".tmp", "wb");
+        int ok = f != NULL;
+        if (f) {
+            ok = fwrite(ini, 1, (size_t)(at - ini), f) == (size_t)(at - ini) && fputs(PAYLOAD_PATH, f) >= 0 &&
+                 fputs(at + strlen(path), f) >= 0;
+            if (fclose(f) != 0) ok = 0;
+        }
+        ok = ok && rename(AUTORUN_INI ".tmp", AUTORUN_INI) == 0;
+        logf_("AutoRun entry for %s moved to %s: %s", path, PAYLOAD_PATH, ok ? "ok" : "failed");
+    }
+    free(ini);
+}
+
+/* Other romm-sync ELFs in /data/payloads: older names, a PS5 build, a test
+ * build's leftovers. GoldHEN lists them all in its payload menu, and running
+ * the wrong one looks just like RomM Sync failing to start. */
+static void remove_stale_payloads(void) {
+    DIR *d = opendir(PAYLOAD_DIR);
+    struct dirent *e;
+    char names[16][256];
+    int n = 0;
+    if (!d) {
+        logf_("can't list %s", PAYLOAD_DIR);
+        return;
+    }
+    while ((e = readdir(d)) && n < 16) {
+        size_t l = strlen(e->d_name);
+        if (strncmp(e->d_name, "romm-sync", 9) != 0 || !strcmp(e->d_name, "romm-sync-ps4.elf")) continue;
+        if (!(l > 4 && !strcmp(e->d_name + l - 4, ".elf")) && !(l > 8 && !strcmp(e->d_name + l - 8, ".elf.tmp"))) continue;
+        snprintf(names[n++], sizeof names[0], "%s", e->d_name);
+    }
+    closedir(d);
+    for (int i = 0; i < n; i++) {
+        char path[300];
+        snprintf(path, sizeof path, PAYLOAD_DIR "/%s", names[i]);
+        int rc = unlink(path);
+        logf_("removed %s: %s", path, rc == 0 ? "ok" : "failed");
+        if (rc == 0) move_autorun(names[i]);
+    }
+}
+
+#ifdef ROMM_NETLOG
+/* What a bug report would carry, sent line by line: the payload's last start,
+ * its log, GoldHEN's AutoRun queue and what's in /data/payloads. */
+static char *slurp_text(const char *path);
+
+static void netlog_file(const char *path, size_t tail) {
+    char *t = slurp_text(path), *p, *end;
+    size_t len = t ? strlen(t) : 0;
+    char head[300];
+    snprintf(head, sizeof head, "----- %s (%s) -----", path, t ? "" : "missing");
+    netlog("file", head, strlen(head));
+    if (!t) return;
+    p = len > tail ? (char *)memchr(t + len - tail, '\n', tail) : t;
+    p = p ? (p == t ? t : p + 1) : t;
+    for (end = t + len; p < end;) {
+        char *nl = memchr(p, '\n', (size_t)(end - p));
+        size_t l = nl ? (size_t)(nl - p) : (size_t)(end - p);
+        if (l) netlog("file", p, l);
+        p += l + 1;
+    }
+    free(t);
+}
+
+static void netlog_report(void) {
+    char line[400], ver[64];
+    DIR *d = opendir(PAYLOAD_DIR);
+    struct dirent *e;
+    netlog("file", "----- " PAYLOAD_DIR " -----", strlen("----- " PAYLOAD_DIR " -----"));
+    while (d && (e = readdir(d))) {
+        char path[300];
+        if (e->d_name[0] == '.') continue;
+        snprintf(path, sizeof path, PAYLOAD_DIR "/%s", e->d_name);
+        payload_tag(path, ver, sizeof ver);
+        snprintf(line, sizeof line, "%s %s", e->d_name, ver[0] ? ver : "(no version tag)");
+        netlog("file", line, strlen(line));
+    }
+    if (d) closedir(d);
+    netlog_file(AUTORUN_INI, 4096);
+    netlog_file(BOOT_LOG, 8192);
+    netlog_file(PAYLOAD_LOG, 64 * 1024);
+}
+#endif
 
 /* The web_port from RomM Sync's config.json, if it was changed. */
 static int web_port(void) {
@@ -473,6 +599,10 @@ int main(void) {
     sceCommonDialogInitialize();
 
     installed = install_payload();
+    remove_stale_payloads();
+#ifdef ROMM_NETLOG
+    netlog_report();
+#endif
     port = web_port();
     snprintf(url, sizeof url, "http://127.0.0.1:%d/", port);
     int up = payload_version(port, running, sizeof running);

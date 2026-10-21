@@ -2,12 +2,16 @@
  * newest last, the last EVENTS_MAX kept in events.json.
  *
  *   {"t": 1791936000, "sync": "game exited", "rom_id": 878,
- *    "kind": "save" | "state" | "card",
+ *    "kind": "save" | "state" | "card" | "bios" | "game" | "emulator",
  *    "action": "uploaded" | "downloaded" | "conflict" | "resolved" |
- *              "skipped" | "restored" | "backed up" | "failed",
+ *              "skipped" | "restored" | "backed up" | "failed" |
+ *              "moved" | "removed",
  *    "path": "/data/.../Game.srm", "emulator": "mgba", "detail": "..."}
  *
- * The game's name and platform are filled in when the log is read. */
+ * "bios" (rom_id 0): a BIOS file put in or removed, "detail" its name. "game":
+ * a game moved to the main emulator, or an extra's copy removed. "emulator"
+ * (rom_id 0): a mount that couldn't go on. The game's name and platform are
+ * filled in when the log is read. */
 #ifndef ROMM_EVENTS_H
 #define ROMM_EVENTS_H
 

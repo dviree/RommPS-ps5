@@ -182,16 +182,23 @@ static int put_everywhere(const void *data, size_t len, int existing_only) {
     return failed ? -1 : done;
 }
 
-/* Turns autostart on in every installed loader's folder that has the payload. */
+/* Turns autostart on in every installed loader's folder that has the payload.
+ * Some file managers "turn off" a payload by renaming its flag to .off; that
+ * one goes too, so nothing on the console says it's off. */
 static int enable_all(char *err, int en) {
     place p[MAX_PLACES];
     int n = places(p, MAX_PLACES);
     for (int i = 0; i < n; i++) {
-        if (!p[i].present || !p[i].flag[0] || !file_exists(p[i].elf) || file_exists(p[i].flag)) continue;
+        if (!p[i].present || !p[i].flag[0] || !file_exists(p[i].elf)) continue;
+        char off[PATH_MAX_LEN + 8];
+        snprintf(off, sizeof off, "%s.off", p[i].flag);
+        if (file_exists(off) && unlink(off) == 0) LOGI("removed %s", off);
+        if (file_exists(p[i].flag)) continue;
         if (write_file_atomic(p[i].flag, "", 0) != 0) {
             snprintf(err, (size_t)en, "cannot write %s", p[i].flag);
             return -1;
         }
+        LOGI("turned on autostart in %s", p[i].flag);
     }
     return 0;
 }
@@ -204,7 +211,7 @@ static int check_elf(const void *data, size_t len, char *err, int en) {
     return 0;
 }
 
-int autostart_set(int enable, const void *data, size_t len, char *err, int en) {
+int autostart_enable(const void *data, size_t len, char *err, int en) {
     place p[MAX_PLACES];
     int n = places(p, MAX_PLACES);
     if (!n) {
@@ -222,40 +229,15 @@ int autostart_set(int enable, const void *data, size_t len, char *err, int en) {
             return -1;
         }
     }
-    if (enable) {
-        if (!file_exists(p[0].elf)) {
-            snprintf(err, (size_t)en, "upload %s first", plat_info()->payload);
-            return -1;
-        }
-        /* A loader that's installed but has no copy yet gets the running
-         * loader's, so the payload starts whichever one runs. */
-        for (int i = 1; i < n; i++)
-            if (p[i].present && !file_exists(p[i].elf) && copy_file(p[0].elf, p[i].elf) == 0) chmod(p[i].elf, 0777);
-        if (enable_all(err, en)) return -1;
-        LOGI("autostart enabled");
-        return 0;
-    }
-    /* Off: nothing of ours is left in any loader's folder to start later. */
-    for (int i = 0; i < n; i++) {
-        if (p[i].flag[0]) unlink(p[i].flag);
-        if (file_exists(p[i].elf) && unlink(p[i].elf) == 0) LOGI("removed %s", p[i].elf);
-        remove_bak(&p[i]);
-    }
-    LOGI("autostart disabled");
-    return 0;
-}
-
-int autostart_install(const void *data, size_t len, char *err, int en) {
-    place p[MAX_PLACES];
-    int n = places(p, MAX_PLACES);
-    if (check_elf(data, len, err, en)) return -1;
-    int on = 0;
-    for (int i = 0; i < n; i++) on |= p[i].present && enabled_at(&p[i]);
-    if (put_everywhere(data, len, !on) < 0) {
-        snprintf(err, (size_t)en, "cannot write the payload to %s's folder", plat_info()->loader);
+    if (!file_exists(p[0].elf)) {
+        snprintf(err, (size_t)en, "upload %s first", plat_info()->payload);
         return -1;
     }
-    return on ? enable_all(err, en) : 0;
+    /* A loader that's installed but has no copy yet gets the running
+     * loader's, so the payload starts whichever one runs. */
+    for (int i = 1; i < n; i++)
+        if (p[i].present && !file_exists(p[i].elf) && copy_file(p[0].elf, p[i].elf) == 0) chmod(p[i].elf, 0777);
+    return enable_all(err, en);
 }
 
 int autostart_replace(const void *data, size_t len, char *err, int en) {
@@ -273,15 +255,13 @@ void autostart_repair(void) {
     char extra[MAX_PLACES][PATH_MAX_LEN];
     int ne = copies(extra, MAX_PLACES);
 
-    /* The newest copy on the console, and whether autostart is on anywhere. */
+    /* The newest copy on the console. */
     char best[PATH_MAX_LEN] = "", best_v[32] = "";
-    int on = 0;
     for (int i = 0; i < n + ne; i++) {
         const char *path = i < n ? p[i].elf : extra[i - n];
         if (i < n) {
             remove_bak(&p[i]);
             if (!p[i].present) continue;
-            on |= enabled_at(&p[i]);
         }
         if (!file_exists(path)) continue;
         char v[32];
@@ -297,8 +277,8 @@ void autostart_repair(void) {
         const char *path = i < n ? p[i].elf : extra[i - n];
         if (i < n && !p[i].present) continue;
         int have = file_exists(path);
-        /* Missing copies are only added to loaders, and only while it's on. */
-        if (!have && !(i < n && on)) continue;
+        /* Every installed loader gets one; other tools' copies are only kept current. */
+        if (!have && i >= n) continue;
         if (have) {
             char v[32];
             file_version(path, v, sizeof v);
@@ -311,8 +291,6 @@ void autostart_repair(void) {
             LOGW("could not copy %s to %s", best, path);
         }
     }
-    if (on) {
-        char err[256];
-        if (enable_all(err, sizeof err)) LOGW("%s", err);
-    }
+    char err[256];
+    if (enable_all(err, sizeof err)) LOGW("%s", err);
 }

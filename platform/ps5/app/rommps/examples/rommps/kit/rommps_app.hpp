@@ -20,6 +20,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace rommps
@@ -227,7 +228,7 @@ class App
     // (assets/rommps/romm-sync.elf, version kMinPayload): it starts it when
     // none is running, puts it in place of an older one (never of a newer
     // one), and keeps the copies the console starts it from up to date.
-    static constexpr const char *kMinPayload = "1.2.2";
+    static constexpr const char *kMinPayload = "1.3.0";
     bool payload_too_old() const;
     void start_payload(); // sends the payload to the HEN's loader
     // Sending it, or RomM Sync is running and not answering yet (starting up,
@@ -249,6 +250,12 @@ class App
 
     // The games on this console, most recently played first.
     const std::vector<Game> &installed() const { return installed_; }
+    // Whether a game is on the console now. A list's copy can be older than
+    // a game deleted by hand, so this goes by the latest installed list.
+    bool on_console(const Game &g) const { return installed_known_ ? on_console_.count(g.id) > 0 : g.installed; }
+    // Asks the payload about one game, so a sheet's actions are right even
+    // before the next look at every game (the payload does that sparingly).
+    void check_on_console(int rom_id);
     // A game's details; asks for them the first time.
     const Details &details(int rom_id);
     void refresh_installed();
@@ -312,9 +319,8 @@ class App
     // Whether a RomM Sync is running, from the lock it holds while it runs:
     // 1 yes, 0 no, -1 can't tell.
     static int payload_lock();
-    // Brings the copies the console starts RomM Sync from up to the one
-    // RommPS carries, leaving autostart on or off as it is; turns it on once
-    // for anyone who never chose either way (1.1.0's setup left it off).
+    // Turns autostart on wherever it's off and brings the copies the console
+    // starts RomM Sync from up to the one RommPS carries.
     void repair_autostart();
     void evict_covers(hui::gfx::Renderer *renderer);
     void send_page(const std::string &key, int page);
@@ -340,6 +346,9 @@ class App
     std::vector<Platform> platforms_;
     std::vector<Download> downloads_;
     std::vector<Game> installed_;
+    std::unordered_set<int> on_console_; // installed_'s ids
+    bool installed_known_ = false;
+    double installed_sig_ = -1; // the payload's, from /api/status: changes when a game comes or goes
     std::unordered_map<int, Details> details_;
     struct CachedList
     {

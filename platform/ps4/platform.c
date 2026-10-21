@@ -24,6 +24,7 @@
 #include <sys/stat.h>
 
 #include "console.h"
+#include "util.h"
 #include "emulators_json.h" /* generated from platform/ps4/emulators.json */
 
 #define LOCK_FILE CONSOLE_LOCK_FILE
@@ -80,12 +81,14 @@ const plat_info_t *plat_info(void) { return &INFO; }
  * hangs or dies inside the loader still says how far it got. */
 static void boot_step(const char *fmt, ...) {
     FILE *f = fopen(CONSOLE_DATA_DIR "/boot.log", "a");
+    char line[256] = "boot: ";
     va_list ap;
-    if (!f) return;
     va_start(ap, fmt);
-    vfprintf(f, fmt, ap);
+    vsnprintf(line + 6, sizeof line - 6, fmt, ap);
     va_end(ap);
-    fputc('\n', f);
+    netlog_send(line);
+    if (!f) return;
+    fprintf(f, "%s\n", line + 6);
     fclose(f);
 }
 
@@ -149,6 +152,10 @@ void plat_describe(char *buf, size_t n) {
 }
 
 void plat_remove_old_tile(void) {}
+
+int plat_is_mount(const char *path) { (void)path; return 0; }
+
+void plat_mounts_set(const plat_mount *mounts, int n) { (void)mounts; (void)n; }
 
 int plat_app_installed(void) { return 0; }
 

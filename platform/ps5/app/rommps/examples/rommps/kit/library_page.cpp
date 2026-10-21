@@ -223,7 +223,7 @@ void draw_badge(hui::gfx::DrawList &list, const Look &look, App &app, const Game
         list.rounded_rect(bar, 4, Color::rgb(0x000000, 0.55f));
         list.rounded_rect({bar.x, bar.y, std::max(8.0f, bar.w * d->progress()), bar.h}, 4, accent);
     }
-    else if (g->installed || (d && d->status == "done"))
+    else if (app.on_console(*g))
     {
         const float cx = rect.x + rect.w - 24, cy = rect.y + 24;
         list.circle(cx, cy, 14, look.success);
@@ -846,8 +846,8 @@ void LibraryPage::draw_grid(hui::gfx::DrawList &list, const hui::ui::Fonts &font
         }
         else
         {
-            const float w = ui::text(list, fonts.semibold, g->installed ? "Downloaded" : "In your RomM library", kMargin,
-                                     352, 20, g->installed ? look.success : look.muted);
+            const float w = ui::text(list, fonts.semibold, app.on_console(*g) ? "Downloaded" : "In your RomM library", kMargin,
+                                     352, 20, app.on_console(*g) ? look.success : look.muted);
             // With the details on the line above, the file and emulator follow the state.
             if (!about.empty())
                 ui::text(list, fonts.regular, fonts.regular.font->fit("\xC2\xB7  " + meta, 20, 1200), kMargin + w + 14,

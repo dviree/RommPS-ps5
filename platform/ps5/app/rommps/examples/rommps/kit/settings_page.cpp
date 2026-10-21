@@ -58,18 +58,18 @@ std::vector<Row> SettingsPage::rows(const App &app, std::vector<int> *ids) const
     const Look &l = look(current_look());
     r[kSaveSync] = {RowKind::toggle, "Save sync", "", c.save_sync ? "" : "RomM is only for games",
                     c.save_sync};
-    r[kLook] = {RowKind::choice, "Look", l.name, l.family};
+    r[kLook] = {RowKind::choice, "Theme", l.name, l.family};
     r[kInterval] = {RowKind::choice, "Sync every", interval_label(c.sync_interval_min), ""};
     r[kOnExit] = {RowKind::toggle, "Sync when a game closes", "", "", c.sync_on_game_exit};
     r[kOnStart] = {RowKind::toggle, "Sync when a game starts", "", "",
                    c.sync_on_game_start};
     r[kOnChange] = {RowKind::toggle, "Upload saves as they change", "", "While you play", c.sync_on_change};
     r[kStates] = {RowKind::choice, "Save states", label_of(rommps::kStates, c.states), ""};
-    r[kPolicy] = {RowKind::choice, "A save changed in both places", label_of(kPolicies, c.conflict_policy),
-                  ""};
-    r[kConcurrency] = {RowKind::choice, "Downloads at once", std::to_string(c.download_concurrency), ""};
+    r[kPolicy] = {RowKind::choice, "Resolving save conflicts", label_of(kPolicies, c.conflict_policy),
+                  "What RommPS will do by default whenever a save conflict exists between this PS5 and your RomM Server"};
+    r[kConcurrency] = {RowKind::choice, "Concurrent Game Downloads", std::to_string(c.download_concurrency), ""};
     r[kNotify] = {RowKind::toggle, "Notifications", "", "", c.notify};
-    r[kUpdateCheck] = {RowKind::toggle, "Look for updates every day", "", "", c.update_check};
+    r[kUpdateCheck] = {RowKind::toggle, "Check for updates daily", "", "", c.update_check};
     {
         const Status &s = app.status();
         char detail[96];
@@ -129,14 +129,14 @@ std::vector<Row> SettingsPage::rows(const App &app, std::vector<int> *ids) const
                                                : "Up to date";
     }
 
-    r[kEmulators] = {RowKind::action, "Emulators", "", ""};
-    r[kSetup] = {RowKind::action, "Set up again", "", ""};
+    r[kEmulators] = {RowKind::action, "Configure Emulators", "", ""};
+    r[kSetup] = {RowKind::action, "Re-run setup wizard", "", ""};
     r[kForget] = {RowKind::action, "Unpair from RomM", "", "Files on this console are kept"};
     r[kForget].danger = true;
     r[kDiagnostics] = {RowKind::action, "Diagnostic bundle", diag_ == 1 ? "Making" : "",
                        diag_ == 2 ? "Saved to " + diag_where_
                        : diag_ == 3 ? "Couldn't make it"
-                                    : "Logs for a bug report, nothing personal"};
+                                    : "Gather logs to report an issue. The bundle does not collect any personally identifiable information."};
     r[kDiagnostics].enabled = diag_ != 1;
     if (armed_ == kSetup || armed_ == kForget)
         r[static_cast<std::size_t>(armed_)].value = "Press again to confirm";
@@ -152,10 +152,10 @@ std::vector<Row> SettingsPage::rows(const App &app, std::vector<int> *ids) const
     } kSections[] = {
         {"Sync", {kSaveSync, kInterval, kOnExit, kOnStart, kOnChange, kPolicy, kStates}},
         {"Downloads", {kConcurrency, kCovers, -1}},
-        {"Look and notifications", {kLook, kNotify, -1}},
-        {"Emulators", {kEmulators, kSetup, -1}},
+        {"Theme and notifications", {kLook, kNotify, -1}},
+        {"Emulators", {kEmulators, -1}},
         {"Updates", {kUpdate, kUpdateCheck, -1}},
-        {"RomM", {kForget, -1}},
+        {"RomM", {kSetup, kForget, -1}},
         {"Help", {kDiagnostics, -1}},
     };
     std::vector<Row> out;
@@ -359,7 +359,7 @@ void SettingsPage::draw(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, c
     std::snprintf(web, sizeof web, "http://%s:%d", s.ip.c_str(), s.port);
     item("ALSO ON YOUR PHONE OR COMPUTER", s.ip.empty() ? "" : web);
     const Update &u = app.update();
-    item("STARTS WITH THE CONSOLE", !u.known ? "" : u.autostart ? "Yes" : "No: turn it on in Set up again");
+    item("STARTS WITH THE CONSOLE", !u.known ? "" : u.autostart ? "Yes" : "No: reopen RommPS to set it up");
     list.line(panel.x + 36, panel.y + panel.h - 196, panel.x + panel.w - 36, panel.y + panel.h - 196, 1.5f, look.outline);
     draw_credits(list, fonts, look, {x, panel.y + panel.h - 168, panel.w - 72, 136}, on_credits_, clock);
     list.pop_opacity();

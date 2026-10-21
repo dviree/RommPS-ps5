@@ -41,9 +41,6 @@ expect "pldmgr copy" "$(ver "$PLD")" 1.1.0
 [[ ! -e "$ETA/romm-sync.elf.bak" ]] || fail "the .bak wasn't removed"
 [[ ! -e "$T/elsewhere" ]] || fail "a copy that didn't exist was created"
 
-chosen() { curl -sf "$API/api/autostart" | python3 -c "import json,sys; print(json.load(sys.stdin)['chosen'])"; }
-expect "a choice before anyone made one" "$(chosen)" False
-
 echo "2. an older payload never replaces a newer one"
 upload upload 1.0.9 >/dev/null
 expect "etaHEN after an older upload" "$(ver "$ETA/romm-sync.elf")" 1.1.0
@@ -52,41 +49,40 @@ upload upload "" >/dev/null
 expect "etaHEN after an untagged (1.0.x) upload" "$(ver "$ETA/romm-sync.elf")" 1.1.0
 expect "pldmgr after an older upload" "$(ver "$PLD")" 1.1.0
 
-echo "3. install puts the newer payload everywhere and leaves autostart on"
+echo "3. install (1.2's name for upload) puts the newer payload everywhere, autostart on"
 r=$(upload install 1.1.1); [[ "$r" == *'"version":"1.1.1"'* ]] || fail "status after install: $r"
 for d in "$ETA" "$ONION"; do expect "$d" "$(ver "$d/romm-sync.elf")/$(on "$d")" 1.1.1/on; done
 expect "pldmgr" "$(ver "$PLD")" 1.1.1
 n=$(curl -sf "$API/api/autostart" | python3 -c "import json,sys; print(len(json.load(sys.stdin)['copies']))")
 expect "copies reported" "$n" 3
 
-echo "4. off removes the payload from every loader, but not the payload manager's copy"
+echo "4. there's no off: asking for it (older apps) leaves autostart on"
 curl -sf -X POST "$API/api/autostart" -d '{"enable":false}' >/dev/null
-for d in "$ETA" "$ONION"; do [[ -z "$(ls -A "$d")" ]] || fail "$d not empty after turning autostart off: $(ls "$d")"; done
-expect "pldmgr after off" "$(ver "$PLD")" 1.1.1
+for d in "$ETA" "$ONION"; do expect "$d after asking for off" "$(ver "$d/romm-sync.elf")/$(on "$d")" 1.1.1/on; done
 
-echo "5. install while off only updates copies that exist; it doesn't turn autostart on"
-upload install 1.1.2 >/dev/null
-for d in "$ETA" "$ONION"; do [[ -z "$(ls -A "$d")" ]] || fail "install while off wrote to $d"; done
-expect "pldmgr" "$(ver "$PLD")" 1.1.2
-
-echo "6. upload turns it on in every installed loader; a loader that isn't installed is left alone"
+echo "5. upload turns it on in every installed loader; a loader that isn't installed is left alone"
 rm -rf "$T/OnionHEN"
 upload upload 1.1.2 >/dev/null
 expect "etaHEN" "$(ver "$ETA/romm-sync.elf")/$(on "$ETA")" 1.1.2/on
+expect "pldmgr" "$(ver "$PLD")" 1.1.2
 [[ ! -e "$T/OnionHEN" ]] || fail "a folder was made for a loader that isn't installed"
 
-expect "turning it on is remembered" "$(chosen)" True
-
-echo "7. a loader installed later gets set up at the next start"
+echo "6. a loader installed later gets set up at the next start"
 stop; mkdir -p "$ONION"; start
-expect "the choice after a restart" "$(chosen)" True
 expect "onionHEN after restart" "$(ver "$ONION/romm-sync.elf")/$(on "$ONION")" 1.1.2/on
 
-echo "8. while off, the next start adds nothing but still updates what's there"
-curl -sf -X POST "$API/api/autostart" -d '{"enable":false}' >/dev/null
-stop; elf 1.0.9 > "$ONION/romm-sync.elf"; start   # a stray copy, not turned on
-expect "etaHEN while off" "$(ver "$ETA/romm-sync.elf")" none
-expect "stray onionHEN copy" "$(ver "$ONION/romm-sync.elf")/$(on "$ONION")" 1.1.2/off
+echo "7. autostart another tool turned off comes back on at the next start, without its .off"
+stop
+rm "$ETA/romm-sync.elf.auto_start"                                       # deleted by hand
+mv "$ONION/romm-sync.elf.auto_start" "$ONION/romm-sync.elf.auto_start.off" # renamed by a file manager
+elf 1.0.9 > "$ONION/romm-sync.elf"                                        # and an older copy
+start
+for d in "$ETA" "$ONION"; do expect "$d" "$(ver "$d/romm-sync.elf")/$(on "$d")" 1.1.2/on; done
+[[ ! -e "$ONION/romm-sync.elf.auto_start.off" ]] || fail "the .off marker wasn't removed"
+
+echo "8. every loader is turned on even when only a payload manager has a copy"
+stop; rm -f "$ETA"/* "$ONION"/*; start
+for d in "$ETA" "$ONION"; do expect "$d" "$(ver "$d/romm-sync.elf")/$(on "$d")" 1.1.2/on; done
 
 echo "9. on the PS5 the payload doesn't update itself: RommPS brings the new one"
 stop; SELF_UPDATE=0 start
@@ -95,12 +91,14 @@ r=$(curl -sf "$API/api/update"); [[ "$r" == *'"self_update":false'* ]] || fail "
 
 echo "10. a page on another website can't change anything; our own page and apps can"
 code() { curl -s -o /dev/null -w '%{http_code}' -X POST "$API/api/autostart" "$@"; }
+rm "$ETA/romm-sync.elf.auto_start"
 expect "post from another site" "$(code -H 'Origin: http://evil.example' -d '{"enable":true}')" 403
 expect "cross-site fetch" "$(code -H 'Sec-Fetch-Site: cross-site' -d '{"enable":true}')" 403
 expect "opaque origin" "$(code -H 'Origin: null' -d '{"enable":true}')" 403
-expect "etaHEN after refused posts" "$(ver "$ETA/romm-sync.elf")" none
-expect "our own page" "$(code -H "Origin: http://127.0.0.1:$WEB_PORT" -H 'Sec-Fetch-Site: same-origin' -d '{"enable":false}')" 200
-expect "an app (no Origin)" "$(code -d '{"enable":false}')" 200
+expect "etaHEN after refused posts" "$(on "$ETA")" off
+expect "our own page" "$(code -H "Origin: http://127.0.0.1:$WEB_PORT" -H 'Sec-Fetch-Site: same-origin' -d '{}')" 200
+expect "etaHEN after our own page" "$(on "$ETA")" on
+expect "an app (no Origin)" "$(code -d '{}')" 200
 expect "reading from another site still works" "$(curl -s -o /dev/null -w '%{http_code}' -H 'Origin: http://evil.example' "$API/api/autostart")" 200
 
 echo "11. with RommPS installed RomM Sync keeps quiet; without it, it says to install RommPS"
