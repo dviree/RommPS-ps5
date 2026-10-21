@@ -1121,7 +1121,7 @@ function loadDownloads() {
   });
 }
 
-// Installed: the games this console keeps (/api/installed), like the app's Downloads tab.
+// The games on this console (/api/installed).
 function installedRow(g) {
   var p = (state.platforms || []).filter(function (x) { return x.id == g.platform_id; })[0];
   var cover = g.cover ? '<img class="instCover" alt="" loading="lazy" src="' + coverUrl(g) + '" onerror="this.style.visibility=\'hidden\'">' : "";

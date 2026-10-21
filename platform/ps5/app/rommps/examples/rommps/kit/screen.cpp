@@ -234,9 +234,16 @@ class RommPS final : public app::Concept
         }
         queue_position_.target = static_cast<float>(queue_row_);
         queue_position_.update(dt, 20.0f);
+        // The six-row window, eased so the list scrolls with the focus.
+        const int qcount = static_cast<int>(app_.queue().size());
+        queue_scroll_.target = static_cast<float>(std::clamp(queue_row_ - 5, 0, std::max(0, qcount - 6)));
+        queue_scroll_.update(dt, 14.0f);
 
         installed_position_.target = static_cast<float>(installed_row_);
         installed_position_.update(dt, 20.0f);
+        const int icount = static_cast<int>(app_.installed().size());
+        installed_scroll_.target = static_cast<float>(std::clamp(installed_row_ - 5, 0, std::max(0, icount - 6)));
+        installed_scroll_.update(dt, 14.0f);
     }
 
     void draw(app::Frame &frame) const override
@@ -893,13 +900,16 @@ class RommPS final : public app::Concept
         }
         constexpr float kRowH = 110.0f;
         const float top = 300.0f;
-        const int first = std::max(0, queue_row_ - 5);
-        list.rounded_rect({kMargin - 24, top + (queue_position_.value - static_cast<float>(first)) * kRowH, 1776, kRowH - 14},
+        const float scroll = queue_scroll_.value;
+        // One row past the band on each side, hidden by the clip below.
+        const int first = std::max(0, static_cast<int>(std::floor(scroll)) - 1);
+        list.rounded_rect({kMargin - 24, top + (queue_position_.value - scroll) * kRowH, 1776, kRowH - 14},
                           26, L.text.with_alpha(0.1f));
-        for (int i = first; i < static_cast<int>(downloads.size()) && i < first + 6; ++i)
+        list.push_clip({0, top, 1920, 6 * kRowH});
+        for (int i = first; i < static_cast<int>(downloads.size()) && i < first + 9; ++i)
         {
             const rommps::Download &d = downloads[static_cast<std::size_t>(i)];
-            const float y = top + static_cast<float>(i - first) * kRowH;
+            const float y = top + (static_cast<float>(i) - scroll) * kRowH;
             ui::text(list, fonts.semibold, context_.fonts.semibold.font->fit(d.name, 28, 1100), kMargin, y + 42, 28, L.text);
             std::string meta = d.platform + "  \xC2\xB7  ";
             if (d.running())
@@ -947,6 +957,7 @@ class RommPS final : public app::Concept
             if (hold > 0)
                 list.rounded_rect({bar.x, bar.y, std::max(10.0f, bar.w * hold), bar.h}, 5, L.danger);
         }
+        list.pop_clip();
         list.pop_opacity();
     }
 
@@ -977,18 +988,19 @@ class RommPS final : public app::Concept
         }
         constexpr float kRowH = 110.0f;
         const float top = 300.0f;
-        const int first = std::max(0, installed_row_ - 5);
+        const float scroll = installed_scroll_.value;
+        // One row past the band on each side, hidden by the clip below.
+        const int first = std::max(0, static_cast<int>(std::floor(scroll)) - 1);
         list.rounded_rect(
-            {kMargin - 24, top + (installed_position_.value - static_cast<float>(first)) * kRowH, 1776, kRowH - 14}, 26,
+            {kMargin - 24, top + (installed_position_.value - scroll) * kRowH, 1776, kRowH - 14}, 26,
             L.text.with_alpha(0.1f));
-        for (int i = first; i < static_cast<int>(games.size()) && i < first + 6; ++i)
+        list.push_clip({0, top, 1920, 6 * kRowH});
+        for (int i = first; i < static_cast<int>(games.size()) && i < first + 9; ++i)
         {
             const rommps::Game &g = games[static_cast<std::size_t>(i)];
-            const float y = top + static_cast<float>(i - first) * kRowH;
-            // The cover carries the state: a green check, or a live progress bar.
+            const float y = top + (static_cast<float>(i) - scroll) * kRowH;
             const Rect thumb{kMargin, y + 8, 66, 88};
             rommps::draw_cover(list, fonts, L, app_, &g, thumb, 1.0f, 10, false);
-            rommps::draw_badge(list, L, app_, &g, thumb, accent());
             ui::text(list, fonts.semibold, context_.fonts.semibold.font->fit(g.name, 28, 1160), kMargin + 96, y + 42,
                      28, L.text);
             const rommps::Platform *p = app_.platform_by_id(g.platform_id);
@@ -1005,6 +1017,7 @@ class RommPS final : public app::Concept
             ui::text(list, fonts.regular, context_.fonts.regular.font->fit(meta, 22, 1200), kMargin + 96, y + 80, 22,
                      meta_colour);
         }
+        list.pop_clip();
         list.pop_opacity();
     }
 
@@ -1231,8 +1244,10 @@ class RommPS final : public app::Concept
     int cancel_job_ = 0;
     bool cancel_seen_ = false; // hold_to_cancel ran this frame
     tween::Spring queue_position_;
+    tween::Spring queue_scroll_; // the window's first row, eased
     int installed_row_ = 0;    // the Downloads list's focus
     tween::Spring installed_position_;
+    tween::Spring installed_scroll_;
     rommps::SettingsPage settings_;
     rommps::LibraryPage library_;
     rommps::Game sheet_game_; // the game the details sheet is for
