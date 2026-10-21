@@ -1140,7 +1140,7 @@ class RommPS final : public app::Concept
         if (info.rating > 0)
         {
             char r[24];
-            std::snprintf(r, sizeof r, info.rating > 10 ? "%.0f/100" : "%.1f/10", info.rating);
+            std::snprintf(r, sizeof r, info.rating > 10 ? "Rating %.0f/100" : "Rating %.1f/10", info.rating);
             facts.push_back(r);
         }
         std::string line;

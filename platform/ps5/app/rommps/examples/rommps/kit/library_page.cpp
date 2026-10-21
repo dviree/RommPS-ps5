@@ -737,12 +737,12 @@ void LibraryPage::draw_grid(hui::gfx::DrawList &list, const hui::ui::Fonts &font
         }
         else
         {
-            const float w = ui::text(list, fonts.semibold, app.on_console(*g) ? "Downloaded" : "In your RomM library", kMargin,
-                                     352, 20, app.on_console(*g) ? look.success : look.muted);
-            // With the details on the line above, the file and emulator follow the state.
+            // "Downloaded" when it is; with the details on the line above, the file and emulator follow.
+            const bool here = app.on_console(*g);
+            const float w = here ? ui::text(list, fonts.semibold, "Downloaded", kMargin, 352, 20, look.success) + 14 : 0.0f;
             if (!about.empty())
-                ui::text(list, fonts.regular, fonts.regular.font->fit("\xC2\xB7  " + meta, 20, 1200), kMargin + w + 14,
-                         352, 20, look.muted);
+                ui::text(list, fonts.regular, fonts.regular.font->fit((here ? "\xC2\xB7  " : "") + meta, 20, 1200),
+                         kMargin + w, 352, 20, look.muted);
         }
         list.pop_opacity();
     }
