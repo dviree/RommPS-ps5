@@ -21,7 +21,8 @@ if (/PlayStation/.test(navigator.userAgent)) document.documentElement.className 
   <nav id="tabs">
     <button class="tab active" data-tab="home">Status</button>
     <button class="tab" data-tab="library">Library</button>
-    <button class="tab" data-tab="downloads">Downloads</button>
+    <button class="tab" data-tab="installed">Downloads</button>
+    <button class="tab" data-tab="downloads">Queue</button>
     <button class="tab" data-tab="settings">Settings</button>
     <button class="tab" data-tab="log">Log</button>
   </nav>
@@ -204,10 +205,20 @@ if (/PlayStation/.test(navigator.userAgent)) document.documentElement.className 
 <section id="downloads">
   <div class="card">
     <div class="row">
-      <h2 style="margin:0">Downloads</h2>
+      <h2 style="margin:0">Queue</h2>
       <button id="clearDl">Clear finished</button>
     </div>
     <div id="dl" style="margin-top:8px"><p class="muted">Nothing here yet.</p></div>
+  </div>
+</section>
+
+<section id="installed">
+  <div class="card">
+    <div class="row">
+      <h2 style="margin:0">Downloads</h2>
+      <span class="muted" id="instCount" style="margin-left:auto"></span>
+    </div>
+    <div id="instList" style="margin-top:8px"><p class="muted">Nothing here yet.</p></div>
   </div>
 </section>
 
@@ -364,6 +375,7 @@ function showTab(name) {
   if (name === "settings") loadSettings();
   if (name === "log") loadLog();
   if (name === "downloads") loadDownloads();
+  if (name === "installed") loadInstalled();
 }
 each(".tab", function (t) { t.onclick = function () { showTab(t.dataset.tab); }; });
 
@@ -438,6 +450,7 @@ function poll(timer) {
     renderStatus(s);
   }).catch(function () { poll.last = null; $("conn").innerHTML = '<span class="err">&#9679;</span> Can\'t reach RommPS'; });
   if (document.querySelector("#downloads.active")) loadDownloads();
+  if (document.querySelector("#installed.active")) loadInstalled();
   if (document.querySelector("#library.active") && $("romCard").style.display !== "none") pollLibraryDownloads();
 }
 $("syncNow").onclick = function () { api("POST", "/api/sync").then(function () { toast("Syncing"); setTimeout(poll, 500); }).catch(function (e) { toast(e.message, 1); }); };
@@ -904,7 +917,7 @@ function romButton(g) {
   if (j) return "<button disabled>" + jobLabel(j) + "</button>";
   if (g.installed) return '<button class="icon" data-hist="' + g.id + '" title="History" aria-label="History">' + CLOCK_ICON + '</button> <button class="danger" data-del="' + g.id + '">Remove</button>';
   if (g.archived) return '<button data-archived="' + g.id + '">Archived</button>';
-  return '<button class="primary" data-dl="' + g.id + '" data-name="' + esc(g.name || "") + '">Download</button>';
+  return '<button class="primary" data-dl="' + g.id + '" data-name="' + esc(g.name || "") + '" data-cover="' + esc(g.cover || "") + '">Download</button>';
 }
 // A message in the modal: why a game can't be downloaded.
 function notice(title, text) {
@@ -1010,7 +1023,7 @@ $("search").onkeydown = function (e) { if (e.key === "Enter") loadRoms(); };
 $("more").onclick = function () { loadRoms(true); };
 $("roms").onclick = function (ev) {
   var b = ev.target.closest("button"); if (!b) return;
-  if (b.dataset.dl) api("POST", "/api/download", { rom_id: +b.dataset.dl, name: b.dataset.name || "" }).then(function () { b.disabled = true; b.textContent = "Queued"; pollLibraryDownloads(); }).catch(function (e) {
+  if (b.dataset.dl) api("POST", "/api/download", { rom_id: +b.dataset.dl, name: b.dataset.name || "", cover: b.dataset.cover || "" }).then(function () { b.disabled = true; b.textContent = "Queued"; pollLibraryDownloads(); }).catch(function (e) {
     if (/archived/i.test(e.message)) notice("Can't download", e.message); else toast(e.message, 1);
   });
   if (b.dataset.archived) notice("Can't download", ARCHIVED);
@@ -1117,7 +1130,10 @@ function downloadRow(d) {
   else if (d.status === "cancelling") meta = "Cancelling";
   else if (d.status === "queued") meta = "Queued";
   else meta = (d.note ? esc(d.note) + ": " : "") + fmtSize(d.done) + (d.total ? " of " + fmtSize(d.total) : "") + (d.speed > 0 ? ", " + fmtSize(d.speed) + "/s" + (d.total ? ", " + fmtEta((d.total - d.done) / d.speed) : "") : "");
-  return '<div class="dl-item"><div class="row"><div>' + (d.platform ? pill(d.platform) : "") + (d.type === "firmware" ? pill("BIOS", "off") : "") + "<b>" + esc(d.name) + "</b>" +
+  var cover = d.cover ? '<img class="instCover" alt="" loading="lazy" src="' + coverUrl(d) + '" onerror="this.style.visibility=\'hidden\'">' : "";
+  return '<div class="dl-item installed-item"><div class="row">' + cover + '<div' + (cover ? ' style="flex:1"' : "") + '>' +
+    '<div>' + (d.platform ? pill(d.platform) : "") + (d.type === "firmware" ? pill("BIOS", "off") : "") + "</div>" +
+    '<div class="t"><b>' + esc(d.name) + "</b></div>" +
     '<div class="meta">' + meta + "</div></div>" + (active ? '<button class="small" data-cancel="' + d.id + '">Cancel</button>' : "") + "</div>" +
     (active || d.status === "cancelling" || d.status === "syncing" ? '<div class="bar"><i style="width:' + pct + '%"></i></div>' : "") + "</div>";
 }
@@ -1127,6 +1143,36 @@ function loadDownloads() {
     $("clearDl").disabled = !list.some(function (d) { return d.status === "done" || d.status === "error" || d.status === "cancelled"; });
   });
 }
+
+// Installed: the games this console keeps (/api/installed), like the app's Downloads tab.
+function installedRow(g) {
+  var p = (state.platforms || []).filter(function (x) { return x.id == g.platform_id; })[0];
+  var cover = g.cover ? '<img class="instCover" alt="" loading="lazy" src="' + coverUrl(g) + '" onerror="this.style.visibility=\'hidden\'">' : "";
+  return '<div class="dl-item installed-item"><div class="row">' + cover +
+    '<div style="flex:1"><div>' + (p && p.name ? pill(p.name, "off") : "") + "</div>" +
+    '<div class="t"><b>' + esc(g.name) + "</b></div>" +
+    '<div class="meta">' + fmtSize(g.size) + " · played " + ago(g.played) + "</div></div>" +
+    '<button class="small" data-del="' + g.id + '">Delete</button></div></div>';
+}
+function loadInstalled() {
+  // Platform names: fetched once, before the list if they aren't cached yet.
+  var plats = (state.platforms && state.platforms.length) ? Promise.resolve() :
+    api("GET", "/api/platforms").then(function (p) { state.platforms = p; });
+  plats.then(function () { return api("GET", "/api/installed?limit=5000"); }).then(function (list) {
+    state.installed = list;
+    $("instCount").textContent = list.length ? (list.length + (list.length === 1 ? " game" : " games")) : "";
+    $("instList").innerHTML = list.map(installedRow).join("") ||
+      '<p class="muted">Nothing on this console yet. Games you download from your library land here.</p>';
+  }).catch(function () {});
+}
+$("instList").onclick = function (ev) {
+  var b = ev.target.closest("[data-del]"); if (!b) return;
+  var g = (state.installed || []).filter(function (x) { return x.id == +b.dataset.del; })[0];
+  if (!g || !confirm("Remove " + g.name + " from this console? Its saves are kept.")) return;
+  b.disabled = true;
+  api("POST", "/api/delete", { rom_id: g.id }).then(function () { toast("Game removed"); loadInstalled(); })
+    .catch(function (e) { b.disabled = false; toast(e.message, 1); });
+};
 
 // Settings
 function loadSettings() {

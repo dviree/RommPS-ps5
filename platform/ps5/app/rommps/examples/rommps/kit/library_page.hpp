@@ -1,7 +1,6 @@
 // RommPS: the Library tab.
 //
-//   - Platforms: "On this console" (the games here, most recently played
-//     first) above a grid of RomM's platforms, each with a few of its covers.
+//   - Platforms: a grid of RomM's platforms, each with a few of its covers.
 //     Cross opens one, Triangle searches every platform.
 //   - A platform (or a search's results): the focused game's details above a
 //     grid of covers that loads as it scrolls, and an A to Z bar on the right
@@ -80,10 +79,9 @@ class LibraryPage
     };
 
     // ---- platforms
-    void update_platforms(App &app, const hui::InputFrame &input, hui::ui::Feedback &feedback, bool &details);
+    void update_platforms(App &app, const hui::InputFrame &input, hui::ui::Feedback &feedback);
     void draw_platforms(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, const Look &look, App &app, Color accent,
                         float clock, float age) const;
-    float platforms_top(App &app) const;
     // ---- a grid of games
     void open_grid(App &app, int platform_id, const std::string &search);
     void update_grid(App &app, const hui::InputFrame &input, hui::ui::Feedback &feedback, bool &details);
@@ -108,10 +106,8 @@ class LibraryPage
     float mode_age_ = 0.0f;
     hui::ui::Pulse nudge_;
 
-    // platforms: section 0 is "On this console", 1 the platform grid
-    int section_ = 1;
-    int recent_ = 0, tile_ = 0;
-    hui::ui::Scroller recent_scroll_;
+    // platforms: the tiles
+    int tile_ = 0;
     hui::tween::Spring tiles_scroll_; // in rows
 
     // a grid
