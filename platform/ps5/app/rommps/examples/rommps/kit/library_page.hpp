@@ -39,6 +39,9 @@ hui::gfx::Rect fit_cover(float shape, const hui::gfx::Rect &box);
 // A game's cover, or a card with its name while there's none.
 void draw_cover(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, const Look &look, App &app, const Game *g,
                 const hui::gfx::Rect &rect, float alpha, float radius, bool name = true);
+// A platform's logo from RomM, as large as fits box; nothing while it loads or
+// when RomM has none. Whether one was drawn.
+bool draw_logo(hui::gfx::DrawList &list, App &app, const std::string &slug, const hui::gfx::Rect &box, float alpha);
 // "Downloaded", or a running download's progress, on a card.
 void draw_badge(hui::gfx::DrawList &list, const Look &look, App &app, const Game *g, const hui::gfx::Rect &rect,
                 Color accent);

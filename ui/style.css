@@ -36,6 +36,8 @@ label { display: block; margin: 10px 0 4px; color: var(--text-muted); font-size:
 .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .row > * { flex: 1 1 auto; } .row > button, .row > .fixed { flex: 0 0 auto; }
 .muted { color: var(--text-muted); } .ok { color: var(--ok); } .warn { color: var(--warn); } .err { color: var(--err); }
+.pulse { animation: pulse 1.6s ease-in-out infinite; } @keyframes pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .pulse { animation: none; } }
 .pill { display: inline-block; font-size: 13px; font-weight: 600; padding: 3px 10px; border-radius: 999px; background: var(--pill-bg); color: var(--pill-text); margin: 0 6px 6px 0; white-space: nowrap; }
 .pill.ok { background: var(--pill-ok-bg); color: var(--pill-ok-text); } .pill.off { background: var(--pill-off-bg); color: var(--text-muted); } .pill.warn { background: var(--pill-warn-bg); color: var(--pill-warn-text); }
 .plats { display: grid; grid-gap: 16px; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); }

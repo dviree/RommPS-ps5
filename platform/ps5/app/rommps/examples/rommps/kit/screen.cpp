@@ -1,4 +1,4 @@
-// RommPS - the screen: Home, Library, Queue and Settings for the RomM Sync payload.
+// RommPS - the screen: Home, Library, Downloads, Queue and Settings for the RomM Sync payload.
 // Copyright (C) 2026 BlackBearReloaded (the Aurora Shelf design it grew from)
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
@@ -226,6 +226,8 @@ class RommPS final : public app::Concept
         sheet_.update(dt, context_.settings.reduced_motion ? 40.0f : 13.0f);
         action_position_.target = static_cast<float>(action_);
         action_position_.update(dt, 22.0f);
+        summary_scroll_.target = summary_target_;
+        summary_scroll_.update(dt, 14.0f);
         queue_row_ = std::clamp(queue_row_, 0, std::max(0, static_cast<int>(app_.queue().size()) - 1));
         if (!cancel_seen_) // focus left the download (another row, tab or button): the hold is gone
         {
@@ -294,9 +296,11 @@ class RommPS final : public app::Concept
         }
         if (move_open_)
             draw_move(frame.overlay);
-        draw_toast(back > 0.5f || move_open_ ? frame.overlay : frame.scene);
+        // The hints first: the toast keeps clear of them.
+        hints_left_ = 1920.0f;
         if (!move_open_)
             draw_hints(back > 0.5f ? frame.overlay : frame.scene);
+        draw_toast(back > 0.5f || move_open_ ? frame.overlay : frame.scene);
     }
 
   private:
@@ -406,8 +410,11 @@ class RommPS final : public app::Concept
         app_.check_on_console(g.id);
         sheet_open_ = true;
         addons_open_ = false;
+        remove_hold_ = -1; // a hold from before doesn't carry over
         action_ = 0;
         action_position_.snap(0.0f);
+        summary_scroll_.snap(0.0f);
+        summary_target_ = summary_hold_ = summary_max_ = 0.0f;
     }
 
     void open_sheet()
@@ -548,7 +555,16 @@ class RommPS final : public app::Concept
         }
         const std::vector<SheetAction> actions = sheet_actions();
         const int count = static_cast<int>(actions.size());
-        if (input.nav == Direction::up || input.nav == Direction::down)
+        // A press of Up or Down moves between the actions; holding it (D-pad or
+        // left stick) past the repeat delay scrolls a long description instead.
+        const float held = input.is_held(Action::down) || input.stick_y > 0.5f ? 1.0f
+                           : input.is_held(Action::up) || input.stick_y < -0.5f ? -1.0f
+                                                                                 : 0.0f;
+        summary_hold_ = held != 0.0f ? summary_hold_ + dt : 0.0f;
+        const bool scrolling = summary_max_ > 0.0f && summary_hold_ > 0.35f;
+        if (scrolling)
+            summary_target_ = std::clamp(summary_target_ + held * 160.0f * dt, 0.0f, summary_max_);
+        if ((input.nav == Direction::up || input.nav == Direction::down) && !(scrolling || (input.nav_repeat && summary_max_ > 0.0f)))
         {
             const int next = std::clamp(action_ + (input.nav == Direction::down ? 1 : -1), 0, count - 1);
             if (next != action_)
@@ -754,15 +770,47 @@ class RommPS final : public app::Concept
         // Right: the server, or what's wrong.
         const rommps::Status &s = app_.status();
         const bool old_payload = s.reachable && app_.payload_too_old();
-        std::string where = !s.known       ? "Connecting"
-                            : !s.reachable ? "The background service isn't running"
-                            : old_payload  ? "Updating the background service " + s.version
-                            : s.paired     ? s.user + " @ " + s.server
-                                           : "Not paired";
-        const float dot_x = 1824 - 12 - ui::text(list, fonts.regular, context_.fonts.regular.font->fit(where, 22, 640), 1824, 90,
-                                                 22, L.muted, gfx::Align::right);
+        const bool connected = s.known && s.reachable && !old_payload && s.paired;
+        float left = 1824; // where the line starts, for the dot
+        if (connected)
+        {
+            // "<user> @ host:port", the user in bold, and a lock when it's HTTPS.
+            const std::size_t scheme = s.server.find("://");
+            std::string host = scheme == std::string::npos ? s.server : s.server.substr(scheme + 3);
+            host = host.substr(0, host.find('/'));
+            if (s.server.rfind("https://", 0) == 0)
+            {
+                const Color c = L.muted;
+                list.bordered_rect({left - 11, 74, 8, 12}, 4, Color::rgb(0x000000, 0.0f), 2.0f, c); // shackle
+                list.rounded_rect({left - 14, 80, 14, 11}, 2, c);                                   // body
+                left -= 14 + 10;
+            }
+            left -= ui::text(list, fonts.regular, fonts.regular.font->fit(" @ " + host, 22, 460), left, 90, 22, L.muted,
+                             gfx::Align::right);
+            left -= ui::text(list, fonts.semibold, fonts.semibold.font->fit(s.user, 22, 240), left, 90, 22, L.text,
+                             gfx::Align::right);
+        }
+        else
+        {
+            const std::string where = !s.known       ? "Connecting"
+                                      : !s.reachable ? "The background service isn't running"
+                                      : old_payload  ? "Updating the background service " + s.version
+                                                     : "Not paired";
+            left -= ui::text(list, fonts.regular, context_.fonts.regular.font->fit(where, 22, 640), left, 90, 22, L.muted,
+                             gfx::Align::right);
+        }
+        const float dot_x = left - 12;
+        // RomM not answering: the dot turns amber, and a line under it pulses.
+        const bool trouble = s.reachable && s.paired && !old_payload && !s.server_trouble.empty();
+        const float pulse = 0.55f + 0.45f * std::sin(age_ * 3.0f);
         list.circle(dot_x - 12, 83, 7,
-                    s.reachable && s.paired && !old_payload ? L.success : s.reachable ? L.warning : L.danger);
+                    trouble ? L.warning.with_alpha(pulse)
+                    : s.reachable && s.paired && !old_payload ? L.success
+                    : s.reachable ? L.warning
+                                  : L.danger);
+        if (trouble)
+            ui::text(list, fonts.semibold, "Difficulties connecting to server", 1824, 122, 20, L.warning.with_alpha(pulse),
+                     gfx::Align::right);
         list.pop_opacity();
     }
 
@@ -809,7 +857,6 @@ class RommPS final : public app::Concept
         const float in = tween::stagger(tab_age_, 1, 0.08f, 0.6f);
         list.push_opacity(in);
         const float x = kMargin + 30.0f * (1.0f - in);
-        ui::text(list, fonts.semibold, "SAVE SYNC", x, 212, 20, accent(), gfx::Align::left, 4.0f);
         if (!app_.config().save_sync)
         {
             ui::text(list, fonts.display, "Save sync is off", x - 4, 304, 80, L.text);
@@ -1041,8 +1088,7 @@ class RommPS final : public app::Concept
             ui::text(list, fonts.semibold, context_.fonts.semibold.font->fit(g.name, 28, 1160), kMargin + 96, y + 42,
                      28, L.text);
             const rommps::Platform *p = app_.platform_by_id(g.platform_id);
-            std::string meta = p ? p->name : "";
-            meta += "  \xC2\xB7  " + rommps::human_size(g.size);
+            std::string meta = (p ? p->name + "  \xC2\xB7  " : std::string()) + rommps::human_size(g.size);
             Color meta_colour = L.muted;
             if (const rommps::Download *d = app_.download_for(g.id); d && d->active())
             {
@@ -1069,7 +1115,7 @@ class RommPS final : public app::Concept
         const Color acc = cover_accent(palette);
         const rommps::Platform *p = app_.platform_by_id(sheet_game_.platform_id);
         const float t = sheet_.value;
-        constexpr float kHeight = 520.0f;
+        constexpr float kHeight = 620.0f;
         const Rect sheet{120, gfx::kVirtualHeight - kHeight * t - 40.0f * t + 60.0f * (1.0f - t), 1680, kHeight};
         list.push_opacity(tween::clamp01(t * 1.4f));
         list.shadow({sheet.x, sheet.y + 20, sheet.w, sheet.h}, 44, 60, Color::rgb(0x000000, 0.5f));
@@ -1078,23 +1124,23 @@ class RommPS final : public app::Concept
         list.bordered_rect(sheet, 44, Color::rgb(0x000000, 0.0f), 1.5f, L.outline);
 
         // The cover in its own shape, as large as fits the space for it.
-        const Rect space{sheet.x + 56, sheet.y + 56, 300, 400};
+        const Rect space{sheet.x + 56, sheet.y + 64, 330, 480};
         rommps::draw_cover(list, fonts, L, app_, g, rommps::fit_cover(rommps::cover_shape(app_, g), space), 1.0f, 26);
         const float x = space.x + space.w + 56;
-        ui::text(list, fonts.semibold, ui::upper(p ? p->name : ""), x, sheet.y + 92, 20, acc, gfx::Align::left, 4.0f);
-        float y = ui::paragraph(list, fonts.display, g->name, x - 2, sheet.y + 156, 54, 640, 62, L.panel_text, 2) - 18;
+        ui::text(list, fonts.semibold, ui::upper(p ? p->name : ""), x, sheet.y + 100, 20, acc, gfx::Align::left, 4.0f);
+        float y = ui::paragraph(list, fonts.display, g->name, x - 2, sheet.y + 170, 54, 640, 62, L.panel_text, 2) - 10;
         if (g->versions > 1)
         {
             const std::string v = g->version + "  \xC2\xB7  1 of " + std::to_string(g->versions) + " versions";
             ui::text(list, fonts.semibold, fonts.semibold.font->fit(v, 22, 660), x, y, 22, L.panel_text.with_alpha(0.7f));
-            y += 38;
+            y += 42;
         }
         const rommps::Details &info = app_.details(g->id);
         if (addons_open_)
-            draw_addons(list, info, x, y, sheet.y + 480.0f, acc);
+            draw_addons(list, info, x, y, sheet.y + sheet.h - 60.0f, acc);
         else
-            draw_about(list, info, g, p, x, y, sheet);
-        draw_sheet_actions(list, g);
+            draw_about(list, info, g, p, x, y, sheet, acc);
+        draw_sheet_actions(list, g, sheet);
         list.pop_opacity();
     }
 
@@ -1122,19 +1168,43 @@ class RommPS final : public app::Concept
 
     // RomM's details: year, publisher, genres; the summary; then the numbers.
     void draw_about(gfx::DrawList &list, const rommps::Details &info, const rommps::Game *g, const rommps::Platform *p,
-                    float x, float y, const Rect &sheet) const
+                    float x, float y, const Rect &sheet, Color acc) const
     {
         const ui::Fonts &fonts = context_.fonts;
         const rommps::Look &L = look();
-        const Color acc = cover_accent(app_.cover(g->cover).palette);
         const std::string about = rommps::details_line(info);
-        if (!about.empty())
+        // RomM's rating closes the line, after a star.
+        char rating[24] = "";
+        if (info.rating > 0)
+            std::snprintf(rating, sizeof rating, info.rating > 10 ? "Rating %.0f/100" : "Rating %.1f/10", info.rating);
+        const float rating_w = rating[0] ? fonts.semibold.font->measure(rating, 22) + 30 : 0.0f;
+        if (!about.empty() || rating[0])
         {
-            ui::text(list, fonts.semibold, fonts.semibold.font->fit(about, 22, 660), x, y, 22, acc);
-            y += 38;
+            float w = about.empty() ? -24.0f
+                                    : ui::text(list, fonts.semibold, fonts.semibold.font->fit(about, 22, 660 - rating_w - 24),
+                                               x, y, 22, acc);
+            if (rating[0])
+            {
+                list.star(x + w + 24 + 9, y - 8, 10, acc);
+                ui::text(list, fonts.semibold, rating, x + w + 24 + 26, y, 22, L.panel_text.with_alpha(0.85f));
+            }
+            y += 52;
         }
         if (!info.summary.empty())
-            y = ui::paragraph(list, fonts.regular, info.summary, x, y, 20, 660, 28, L.panel_text.with_alpha(0.85f), 3) + 6;
+        {
+            // Three lines show; holding Up or Down scrolls the rest through.
+            constexpr float kLine = 30.0f, kShown = 3 * kLine;
+            const float lines = static_cast<float>(fonts.regular.font->wrap(info.summary, 20, 660).size());
+            summary_max_ = std::max(0.0f, lines * kLine - kShown);
+            list.push_clip({x - 4, y - 22, 680, kShown});
+            ui::paragraph(list, fonts.regular, info.summary, x, y - summary_scroll_.value, 20, 660, kLine,
+                          L.panel_text.with_alpha(0.85f));
+            list.pop_clip();
+            // More below: a small marker under the window's right edge.
+            if (summary_max_ > 0.0f && summary_scroll_.value < summary_max_ - 1.0f)
+                list.triangle({x + 660 - 14, y - 22 + kShown + 2, 14, 8}, L.panel_text.with_alpha(0.5f), 0.0f, 3.14159f);
+            y += std::min(lines, 3.0f) * kLine + 22;
+        }
         std::vector<std::string> facts;
         if (info.play_ms > 0)
             facts.push_back("Played " + rommps::play_time(info.play_ms));
@@ -1150,12 +1220,6 @@ class RommPS final : public app::Concept
             facts.push_back("Main story ~" + std::to_string(static_cast<int>(info.main_story_s / 3600.0 + 0.5)) + " h");
         if (!info.players.empty())
             facts.push_back(info.players + (info.players == "1" ? " player" : " players"));
-        if (info.rating > 0)
-        {
-            char r[24];
-            std::snprintf(r, sizeof r, info.rating > 10 ? "Rating %.0f/100" : "Rating %.1f/10", info.rating);
-            facts.push_back(r);
-        }
         std::string line;
         for (const std::string &f : facts)
             line += (line.empty() ? "" : "  \xC2\xB7  ") + f;
@@ -1170,23 +1234,17 @@ class RommPS final : public app::Concept
         if (archived)
             file = info.archived.empty() ? "This download is archived. Decompress it on your RomM server first."
                                          : info.archived;
-        y = std::max(y, sheet.y + 330.0f);
         if (!line.empty())
-        {
-            ui::paragraph(list, fonts.regular, line, x, y, 20, 660, 28, L.panel_muted, 2);
-            y += 60;
-        }
-        ui::text(list, fonts.regular, context_.fonts.regular.font->fit(file, 20, 660), x, std::min(y, sheet.y + 470.0f), 20,
+            ui::paragraph(list, fonts.regular, line, x, y, 20, 660, 32, L.panel_muted, 2);
+        // The file line keeps to the sheet's foot.
+        ui::text(list, fonts.regular, context_.fonts.regular.font->fit(file, 20, 660), x, sheet.y + sheet.h - 60, 20,
                  archived ? L.danger : L.panel_muted);
     }
 
-    void draw_sheet_actions(gfx::DrawList &list, const rommps::Game *g) const
+    void draw_sheet_actions(gfx::DrawList &list, const rommps::Game *g, const Rect &sheet) const
     {
         const ui::Fonts &fonts = context_.fonts;
         const rommps::Look &L = look();
-        const float t = sheet_.value;
-        constexpr float kHeight = 520.0f;
-        const Rect sheet{120, gfx::kVirtualHeight - kHeight * t - 40.0f * t + 60.0f * (1.0f - t), 1680, kHeight};
         const std::vector<SheetAction> actions = sheet_actions();
         const float ax = sheet.x + sheet.w - 56 - 460;
         const float ay = sheet.y + 76;
@@ -1217,9 +1275,12 @@ class RommPS final : public app::Concept
         const ui::Fonts &fonts = context_.fonts;
         const float a = tween::clamp01(app_.toast_age() * 5.0f) * tween::clamp01((4.0f - app_.toast_age()) * 2.0f);
         list.push_opacity(a);
-        const std::string fitted = fonts.regular.font->fit(message, 24, 1100);
+        // Beside the button hints, on their line, when there's room for it;
+        // above them when they leave too little.
+        const float room = std::min(1180.0f, hints_left_ - 24.0f - kMargin);
+        const Rect r = room >= 480.0f ? Rect{kMargin, 978, room, 64} : Rect{kMargin, 892, 1180, 64};
+        const std::string fitted = fonts.regular.font->fit(message, 24, r.w - 64);
         const rommps::Look &L = look();
-        const Rect r{kMargin, 960, 1180, 64};
         list.rounded_rect(r, 32, L.covers ? Color::rgb(0x14182e, 0.92f) : L.page.with_alpha(0.95f));
         list.bordered_rect(r, 32, Color::rgb(0x000000, 0.0f), 1.5f, L.outline);
         ui::text(list, fonts.regular, fitted, r.x + 32, r.y + 41, 24, L.text);
@@ -1235,6 +1296,7 @@ class RommPS final : public app::Concept
         const ui::HintLayout layout; // the kit's bottom row: glyphs 40 tall, cy 1010
         const float width = ui::measure_hints(fonts, hints, count, layout);
         const Rect plate{1824.0f - width - 30.0f, layout.cy - 38.0f, width + 60.0f, 76.0f};
+        hints_left_ = std::min(hints_left_, plate.x);
         draw_panel(list, plate);
         ui::draw_hints(list, fonts, style, hints, count, 1824, true);
     }
@@ -1254,8 +1316,12 @@ class RommPS final : public app::Concept
             return;
         if (sheet_open_)
         {
-            const ui::Hint hints[] = {{ui::Button::cross, "Choose"}, {ui::Button::circle, "Back"}};
-            hint_row(list, fonts, style, hints, 2);
+            // Scrolling, with the D-pad or the left stick, when there's something to scroll.
+            const bool scroll = addons_open_ || summary_max_ > 0.0f;
+            const ui::Hint hints[] = {{ui::Button::dpad, addons_open_ ? "Scroll" : "Hold to scroll", ui::Button::left_stick},
+                                      {ui::Button::cross, "Choose"},
+                                      {ui::Button::circle, "Back"}};
+            hint_row(list, fonts, style, scroll ? hints : hints + 1, scroll ? 3 : 2);
             return;
         }
         if (view_.active())
@@ -1321,12 +1387,20 @@ class RommPS final : public app::Concept
     ui::SpringColor palette_[4];
     ui::Pulse nudge_;
     float nudge_direction_ = 0.0f;
+    mutable float hints_left_ = 1920.0f; // where this frame's button hints start, for the toast
     bool sheet_open_ = false;
     bool addons_open_ = false; // the sheet lists the game's update and DLC
     int addons_top_ = 0;       // the first of them shown
     tween::Spring sheet_;
     int action_ = 0;
     tween::Spring action_position_;
+    // The description, a few lines at a time: how far it's scrolled (eased),
+    // where to, how long Up or Down has been held, and how far it can go (from
+    // the last draw).
+    tween::Spring summary_scroll_;
+    float summary_target_ = 0.0f;
+    float summary_hold_ = 0.0f;
+    mutable float summary_max_ = 0.0f;
     int queue_row_ = 0;
     float cancel_hold_ = 0; // seconds Cross has been held to cancel cancel_job_; -1 once done
     float remove_hold_ = -1; // seconds Cross has been held on remove; -1 waits for a press

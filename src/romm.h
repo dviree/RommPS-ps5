@@ -34,19 +34,28 @@ cJSON *romm_call(const char *method, const char *path, const cJSON *body, long *
  * console was renamed, or its name set in the web UI. One request, only then. */
 void romm_update_device_name(void);
 
-/* GETs a paged RomM list such as /api/roms?..., limit items from offset,
- * ROMM_LIST_PAGE at a time. RomM's game lists carry each game's full metadata,
- * so a page of 30 can be too much to parse in the PS4's memory; a page that
- * can't be taken in is asked for again, fewer games at a time. cb gets each
- * item with its page (first is set for the first page, and cb is called once
- * with a NULL item for an empty list); nonzero stops. Returns how many items
- * were seen, -1 on an error (status holds the HTTP status). */
-#define ROMM_LIST_PAGE 16
+/* GETs a paged RomM list such as /api/roms?..., limit items from offset, 60
+ * at a time (the library's page), 16 on the PS4. RomM's game lists carry each
+ * game's full metadata, so a page of 30 can be too much to parse in the PS4's
+ * memory; a page that can't be taken in is asked for again, fewer games at a
+ * time. cb gets each item with its page (first is set for the first page, and
+ * cb is called once with a NULL item for an empty list); nonzero stops.
+ * Returns how many items were seen, -1 on an error (status holds the HTTP
+ * status). */
 typedef int (*romm_list_cb)(const cJSON *item, const cJSON *page, int first, void *ctx);
 int romm_list(const char *path, int offset, int limit, romm_list_cb cb, void *ctx, long *status);
 /* Same, with an explicit server and auth, for use before pairing. */
 cJSON *romm_call_raw(const char *base, const char *auth, const char *method, const char *path,
                      const cJSON *body, long *status);
+
+/* 1 while the paired server isn't answering at all (see http_down), with what
+ * to tell the user in msg: "RomM at 192.168.1.2:8085 isn't answering". */
+int romm_no_answer(char *msg, int n);
+
+/* While it isn't answering, finds out in the background when it does again
+ * (one check at a time, paced as http_down says), so nothing waits for the
+ * next sync to notice. */
+void romm_check_back(void);
 
 /* Checks the server and fills in its version. 0 on success. */
 int romm_heartbeat(const char *base, char *version, int vn);

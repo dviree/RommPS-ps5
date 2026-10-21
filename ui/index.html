@@ -384,8 +384,11 @@ function renderStatus(s) {
   // The PS4's browser can't keep up with the frosted glass blur: it goes, the theme stays.
   if (s.platform === "ps4" && !renderStatus.flat) { renderStatus.flat = true; document.documentElement.style.setProperty("--glass", "none"); }
   state.status = s;
+  // RomM not answering: an amber dot, and a pulsing line under the server.
   $("conn").innerHTML = s.paired
-    ? '<span class="ok">&#9679;</span> ' + esc(s.username || "") + " at " + esc(s.server_url.replace(/^https?:\/\//, ""))
+    ? (s.server_trouble ? '<span class="warn pulse">&#9679;</span> ' : '<span class="ok">&#9679;</span> ') +
+      esc(s.username || "") + " at " + esc(s.server_url.replace(/^https?:\/\//, "")) +
+      (s.server_trouble ? '<div class="warn pulse" style="font-size:14px">Difficulties connecting to server</div>' : "")
     : '<span class="warn">&#9679;</span> Not paired';
   if (!s.paired || !s.setup_complete) {
     if (!document.querySelector("#pair.active") && !document.querySelector("#log.active")) showTab("pair");
@@ -444,13 +447,14 @@ function poll(timer) {
     // Redrawn only when something changed (the uptime always does): on the
     // PS4's browser every redraw holds up button presses.
     poll.slow = s.platform === "ps4";
+    // The Downloads tab reloads only when the games on the console change.
+    if (document.querySelector("#installed.active") && s.installed_sig !== state.instSig) loadInstalled();
     var key = JSON.stringify(s, function (k, v) { return k === "uptime" ? undefined : v; });
     if (key === poll.last) return;
     poll.last = key;
     renderStatus(s);
   }).catch(function () { poll.last = null; $("conn").innerHTML = '<span class="err">&#9679;</span> Can\'t reach RommPS'; });
   if (document.querySelector("#downloads.active")) loadDownloads();
-  if (document.querySelector("#installed.active")) loadInstalled();
   if (document.querySelector("#library.active") && $("romCard").style.display !== "none") pollLibraryDownloads();
 }
 $("syncNow").onclick = function () { api("POST", "/api/sync").then(function () { toast("Syncing"); setTimeout(poll, 500); }).catch(function (e) { toast(e.message, 1); }); };
@@ -1155,15 +1159,19 @@ function installedRow(g) {
     '<button class="small" data-del="' + g.id + '">Delete</button></div></div>';
 }
 function loadInstalled() {
-  // Platform names: fetched once, before the list if they aren't cached yet.
-  var plats = (state.platforms && state.platforms.length) ? Promise.resolve() :
-    api("GET", "/api/platforms").then(function (p) { state.platforms = p; });
-  plats.then(function () { return api("GET", "/api/installed?limit=5000"); }).then(function (list) {
+  // Platform names: fetched once, before the list if they aren't cached yet;
+  // without them the list still shows.
+  var plats = state.platforms ? Promise.resolve() :
+    api("GET", "/api/platforms").then(function (p) { state.platforms = p; }).catch(function () {});
+  return Promise.all([plats, api("GET", "/api/status")]).then(function (r) {
+    state.instSig = r[1].installed_sig;
+    return api("GET", "/api/installed?limit=5000");
+  }).then(function (list) {
     state.installed = list;
     $("instCount").textContent = list.length ? (list.length + (list.length === 1 ? " game" : " games")) : "";
     $("instList").innerHTML = list.map(installedRow).join("") ||
       '<p class="muted">Nothing on this console yet. Games you download from your library land here.</p>';
-  }).catch(function () {});
+  }).catch(function (e) { $("instList").innerHTML = '<p class="err">' + esc(e.message) + "</p>"; });
 }
 $("instList").onclick = function (ev) {
   var b = ev.target.closest("[data-del]"); if (!b) return;

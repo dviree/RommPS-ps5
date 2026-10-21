@@ -305,23 +305,43 @@ static int collect_cover(const cJSON *it, const cJSON *page, int first, void *ct
     return 0;
 }
 
-/* Every game's cover path, platform by platform. 0 when RomM gave the whole
- * list; -1 if it couldn't be reached part way (what came is still used). */
-static int list_all(void) {
+/* Each platform's game count when a pass last listed it: the daily pass
+ * lists only the platforms whose count changed since (a cover replaced on
+ * RomM comes down when its game is next looked at). The counts of a pass are
+ * kept once its covers are done, so an unfinished one is listed again. */
+static cJSON *g_pass_counts;
+
+/* Every game's cover path, platform by platform; all: even the platforms
+ * whose game count didn't change. 0 when RomM gave the whole list; -1 if it
+ * couldn't be reached part way (what came is still used). */
+static int list_all(int all) {
     struct cover_list c = {0};
     static char heads[100000]; /* a platform's first covers (its tile) */
     memset(heads, 0, sizeof heads);
     long st = 0;
     cJSON *plats = romm_call("GET", "/api/platforms", NULL, &st), *p;
-    int ok = st == 200 && cJSON_IsArray(plats);
+    int ok = st == 200 && cJSON_IsArray(plats), same = 0;
+    state_lock();
+    cJSON *had = cJSON_Duplicate(cJSON_GetObjectItemCaseSensitive(state_section("covers"), "counts"), 1);
+    state_unlock();
+    cJSON *counts = cJSON_CreateObject();
     cJSON_ArrayForEach(p, plats) {
-        if (jget_num(p, "rom_count", 0) <= 0) continue;
-        char path[160];
-        snprintf(path, sizeof path, "/api/roms?platform_ids=%d&order_by=name&order_dir=asc&with_char_index=false" ROMS_LEAN, (int)jget_num(p, "id", 0));
+        const double n = jget_num(p, "rom_count", 0);
+        if (n <= 0) continue;
+        char id[24], path[160];
+        snprintf(id, sizeof id, "%d", (int)jget_num(p, "id", 0));
+        if (!all && jget_num(had, id, -1) == n) {
+            cJSON_AddNumberToObject(counts, id, n);
+            same++;
+            continue;
+        }
+        snprintf(path, sizeof path, "/api/roms?platform_ids=%s&order_by=name&order_dir=asc&with_char_index=false" ROMS_LEAN, id);
         int before = c.n;
         if (romm_list(path, 0, 100000, collect_cover, &c, &st) < 0) ok = 0;
+        else cJSON_AddNumberToObject(counts, id, n);
         for (int k = before; k < c.n && k < before + 3; k++) heads[k] = 1;
     }
+    cJSON_Delete(had);
     cJSON_Delete(plats);
     prioritize(&c, heads);
     pthread_mutex_lock(&g_lock);
@@ -330,8 +350,11 @@ static int list_all(void) {
     g_all = c.list;
     g_nall = c.n;
     g_next = g_done = 0;
+    cJSON_Delete(g_pass_counts);
+    g_pass_counts = counts;
     pthread_mutex_unlock(&g_lock);
-    LOGI("covers: %d games to check%s", c.n, ok ? "" : " (RomM couldn't be reached for all of them)");
+    LOGI("covers: %d games to check%s%s", c.n, ok ? "" : " (RomM couldn't be reached for all of them)",
+         same ? ", the platforms with as many games as last time skipped" : "");
     return ok ? 0 : -1;
 }
 
@@ -400,7 +423,18 @@ static void *worker(void *arg) {
             char *body = NULL;
             size_t len = 0;
             const char *type;
-            if (covers_fetch(p, &body, &len, &type) == 0) free(body);
+            char why[160];
+            if (covers_fetch(p, &body, &len, &type) == 0) {
+                free(body);
+            } else if (romm_no_answer(why, sizeof why)) {
+                /* Not skipped: it goes first again, once RomM answers (this
+                 * worker's next try finds out). */
+                covers_warm(p);
+                pthread_mutex_lock(&g_lock);
+                str_copy(g_state, sizeof g_state, "waiting");
+                pthread_mutex_unlock(&g_lock);
+                sleep(5);
+            }
         }
         if (from_pass) {
             pthread_mutex_lock(&g_lock);
@@ -430,7 +464,17 @@ static void *planner(void *arg) {
         pthread_mutex_lock(&g_lock);
         int running = g_next < g_nall, asked = g_refresh;
         g_refresh = 0;
+        cJSON *counts = running ? NULL : g_pass_counts;
+        if (counts) g_pass_counts = NULL;
         pthread_mutex_unlock(&g_lock);
+        if (counts) { /* a pass's covers are done */
+            state_lock();
+            cJSON *cs = state_section("covers");
+            cJSON_DeleteItemFromObjectCaseSensitive(cs, "counts");
+            cJSON_AddItemToObject(cs, "counts", counts);
+            state_save();
+            state_unlock();
+        }
         if (running) continue;
         state_lock();
         double last = jget_num(state_section("covers"), "last_full", 0);
@@ -439,7 +483,7 @@ static void *planner(void *arg) {
         if (!asked && time(NULL) < retry_at) continue;
         /* A pass RomM couldn't list in full isn't counted: it's tried again in
          * a few minutes, not a day. */
-        if (list_all() == 0) {
+        if (list_all(asked) == 0) {
             state_lock();
             jset_num(state_section("covers"), "last_full", (double)time(NULL));
             state_save();

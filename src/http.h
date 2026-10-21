@@ -1,4 +1,5 @@
-/* libcurl wrapper. Each call uses its own handle, so it is thread-safe. */
+/* libcurl wrapper, thread-safe. Handles are kept between requests, and with
+ * them their open connections, so requests to the same server reuse them. */
 #ifndef ROMM_HTTP_H
 #define ROMM_HTTP_H
 
@@ -10,6 +11,7 @@ typedef struct {
     char *body;    /* malloc'd, NUL-terminated (may be NULL) */
     size_t len;
     char error[256];
+    int no_answer; /* no connection at all: refused, unknown host or timed out */
 } http_resp;
 
 /* Progress callback: return non-zero to abort. total may be 0 if unknown. */
@@ -38,6 +40,10 @@ int http_tls_untrusted(const char *url);
 int http_get_verified(const char *url, http_resp *out);
 int http_download_verified(const char *url, const char *dest, http_progress_fn progress, void *ud,
                            http_resp *out);
+
+/* 1 while url's server isn't answering: requests to it fail at once, and one
+ * at a time checks whether it's back (every 5 to 30 s). */
+int http_down(const char *url);
 
 /* URL-encode a query/path component into a malloc'd string. */
 char *http_escape(const char *s);

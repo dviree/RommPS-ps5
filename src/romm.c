@@ -1,5 +1,6 @@
 #include "romm.h"
 
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,8 +45,46 @@ cJSON *romm_call_raw(const char *base, const char *auth, const char *method, con
     return j;
 }
 
+int romm_no_answer(char *msg, int n) {
+    char base[512];
+    config_lock();
+    str_copy(base, sizeof base, g_cfg.server_url);
+    config_unlock();
+    if (!base[0] || !http_down(base)) return 0;
+    const char *host = strstr(base, "://");
+    host = host ? host + 3 : base;
+    snprintf(msg, (size_t)n, "RomM at %.*s isn't answering", (int)strcspn(host, "/"), host);
+    return 1;
+}
+
+static pthread_mutex_t g_check_lock = PTHREAD_MUTEX_INITIALIZER;
+static int g_checking;
+
+static void *check_back(void *arg) {
+    (void)arg;
+    long st = 0;
+    cJSON_Delete(romm_call("GET", "/api/heartbeat", NULL, &st));
+    pthread_mutex_lock(&g_check_lock);
+    g_checking = 0;
+    pthread_mutex_unlock(&g_check_lock);
+    return NULL;
+}
+
+void romm_check_back(void) {
+    pthread_mutex_lock(&g_check_lock);
+    const int start = !g_checking;
+    g_checking = 1;
+    pthread_mutex_unlock(&g_check_lock);
+    if (start && thread_start(check_back, NULL) != 0) {
+        pthread_mutex_lock(&g_check_lock);
+        g_checking = 0;
+        pthread_mutex_unlock(&g_check_lock);
+    }
+}
+
 int romm_list(const char *path, int offset, int limit, romm_list_cb cb, void *ctx, long *status) {
-    int seen = 0, page_size = ROMM_LIST_PAGE;
+    int seen = 0, page_size = strcmp(plat_info()->name, "ps4") ? 60 : 16;
+    char why[160];
     if (status) *status = 0;
     while (seen < limit) {
         char url[2048];
@@ -55,8 +94,9 @@ int romm_list(const char *path, int offset, int limit, romm_list_cb cb, void *ct
         cJSON *page = romm_call("GET", url, NULL, &st);
         if (status) *status = st;
         /* A page too big to take in (games with a lot of metadata, where memory
-         * is tight): the same games again, fewer at a time. */
-        if ((st == 0 || (st == 200 && !page)) && want > 1) {
+         * is tight): the same games again, fewer at a time. Not when RomM
+         * didn't answer at all: fewer games won't change that. */
+        if ((st == 0 || (st == 200 && !page)) && want > 1 && !(st == 0 && romm_no_answer(why, sizeof why))) {
             cJSON_Delete(page);
             page_size = want / 2;
             LOGI("%s: trying %d games at a time", path, page_size);

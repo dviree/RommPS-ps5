@@ -174,6 +174,7 @@ struct Status
     bool reachable = false; // the payload answered the last time
     bool paired = false, setup_complete = false;
     std::string version, server, user, ip, error;
+    std::string server_trouble; // RomM isn't answering: what the payload says, "" while it does
     int port = 8780;
     int tracked_saves = 0, conflicts = 0, sync_count = 0;
     bool syncing = false;
@@ -278,6 +279,8 @@ class App
     }
     // A cover's texture and palette; asks for it the first time.
     const Cover &cover(const std::string &path);
+    // A platform's logo from RomM, by its slug ("psx"), as a cover.
+    const Cover &platform_logo(const std::string &slug);
     // A cover's width over its height, kept after its texture is let go;
     // 0 until it has been loaded once. since: when it became known.
     float cover_aspect(const std::string &path, double *since = nullptr) const;

@@ -29,8 +29,6 @@ constexpr float kMargin = 96.0f;
 // The platform tiles start right under the page's heading.
 constexpr float kPlatformTop = 196.0f;
 
-// A cover on the shelf follows its shape.
-constexpr float kRecentH = 200.0f;
 // Platform tiles
 constexpr int kTileCols = 4;
 constexpr float kTileW = 408.0f, kTileH = 220.0f, kTileGap = 32.0f, kTilePitch = kTileH + kTileGap;
@@ -121,11 +119,6 @@ Rect in_card(float shape, const Rect &card)
     return r;
 }
 
-float shelf_width(App &app, const Game &g)
-{
-    return kRecentH * cover_shape(app, &g);
-}
-
 } // namespace
 
 // ------------------------------------------------------------------ shared
@@ -188,6 +181,16 @@ Rect fit_cover(float shape, const Rect &box)
     if (w > box.w)
         w = box.w, h = box.w / shape;
     return {box.x + (box.w - w) * 0.5f, box.y + (box.h - h) * 0.5f, w, h};
+}
+
+bool draw_logo(hui::gfx::DrawList &list, App &app, const std::string &slug, const Rect &box, float alpha)
+{
+    const Cover &logo = app.platform_logo(slug);
+    if (!logo.texture)
+        return false;
+    list.image(logo.texture, fit_cover(logo.aspect > 0 ? logo.aspect : 1.0f, box), hui::gfx::kFullUv,
+               Color::rgb(0xFFFFFF, alpha));
+    return true;
 }
 
 void draw_cover(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, const Look &look, App &app, const Game *g,
@@ -453,6 +456,8 @@ void LibraryPage::draw_platforms(hui::gfx::DrawList &list, const hui::ui::Fonts 
             list.shadow({c.x, c.y + 8, c.w, c.h}, 10, 16, Color::rgb(0x000000, 0.35f));
             draw_cover(list, fonts, look, app, g, c, 1.0f - 0.15f * static_cast<float>(k), 10, false);
         }
+        // The system's logo, small, in the corner under the covers.
+        draw_logo(list, app, p.slug, {r.x + r.w - 28 - 30, r.y + 172, 30, 30}, 0.9f);
         ui::paragraph(list, fonts.semibold, p.name, r.x + 28, r.y + 56, 28, 165, 34, look.panel_text, 2);
         char count[48];
         std::snprintf(count, sizeof count, p.rom_count == 1 ? "%d game" : "%d games", p.rom_count);

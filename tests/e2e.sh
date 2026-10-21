@@ -1277,6 +1277,17 @@ for want in "900 False  False" "901 True update False" "902 True update False" "
             "905 False  False" "906 False  True"; do
   grep -qx "$want" <<<"$lib" || fail "Switch library listing, '$want': $lib"
 done
+# One game RomM keeps three times (an .nsp, a .rar and a folder, versions of each other): one card.
+nxrom '{"id":910,"platform_id":90,"name":"Dup","fs_name":"Dup [0100CCCC00000000][v0].nsp","sibling_roms":[{"id":911},{"id":912}]}'
+nxrom '{"id":911,"platform_id":90,"name":"Dup","fs_name":"Dup (NSZ).rar","sibling_roms":[{"id":910},{"id":912}]}'
+nxrom '{"id":912,"platform_id":90,"name":"Dup","fs_name":"Dup [0100CCCC00000000][v0]","sibling_roms":[{"id":910},{"id":911}],
+  "files":[{"id":9121,"file_name":"Dup.nsp","content":"x"}]}'
+dup=$(curl -sf "$API/api/roms?platform_id=90&limit=60&search=dup" | python3 -c "
+import json,sys
+for i in json.load(sys.stdin)['items']: print(i['id'], bool(i.get('not_game')), i.get('same_as',''), i.get('versions',''))")
+[[ "$dup" == $'910 False  \n911 True 910 \n912 True 910 ' ]] || fail "a Switch game RomM keeps several times must show once, the .nsp: $dup"
+[[ "$(curl -sf "$API/api/roms?platform_id=90&limit=60" | python3 -c "import json,sys; print([i['id'] for i in json.load(sys.stdin)['items'] if i.get('version')])")" == "[]" ]] \
+  || fail "Switch entries carry no version label (their versions are files)"
 det=$(curl -sf "$API/api/roms/900/details" | python3 -c "
 import json,sys; d=json.load(sys.stdin); print(d.get('updates'), d.get('dlc'), [(a['kind'], a['name']) for a in d.get('addons', [])])")
 [[ "$det" == "1 1 [('update', 'Poke [0100000011D90800][v393216].nsp'), ('dlc', 'Poke DLC [0100000011D91001][v0].nsp')]" ]] \

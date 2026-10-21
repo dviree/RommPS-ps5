@@ -218,6 +218,9 @@ class SetupPage
     RowList leave_list_;
     std::string ps2_cards_ = "per_game";
     std::map<std::string, Own> own_;    // by system key (first slug)
+    // Each platform's logo (texture, width over height) for the emulator rows,
+    // asked for in update, where the app can fetch them.
+    std::map<std::string, std::pair<std::uint32_t, float>> logos_;
     std::vector<std::string> own_order_; // the server's order
     std::vector<std::string> manual_;    // own_ keys of emulators with no preset, in the order found
     bool picking_ = false;

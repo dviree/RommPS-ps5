@@ -196,10 +196,23 @@ void RowList::draw(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, const 
                 list.line(cx, cy + 4, cx + 8, cy - 3, 3.0f, c);
             }
         }
-        const float room = std::max(200.0f, bounds.w - 64 - used - indent);
-        ui::text(list, fonts.semibold, fonts.semibold.font->fit(row.label, 26, room), x + indent, label_y, 26, ink.with_alpha(dim));
+        // The platform's logo, then the label.
+        float lx = x + indent;
+        if (row.logo_slot)
+        {
+            constexpr float kLogo = 34.0f;
+            if (row.logo)
+            {
+                const float w = std::min(kLogo * 1.6f, kLogo * row.logo_aspect), h = w / row.logo_aspect;
+                list.image(row.logo, {lx + (kLogo - std::min(w, kLogo)) * 0.5f, label_y - 9 - h * 0.5f, w, h},
+                           hui::gfx::kFullUv, hui::gfx::Color::rgb(0xFFFFFF, dim));
+            }
+            lx += kLogo * 1.6f + 8;
+        }
+        const float room = std::max(200.0f, bounds.w - 64 - used - (lx - x));
+        ui::text(list, fonts.semibold, fonts.semibold.font->fit(row.label, 26, room), lx, label_y, 26, ink.with_alpha(dim));
         if (two_lines)
-            ui::text(list, fonts.regular, fonts.regular.font->fit(row.detail, 19, room), x + indent, label_y + 30, 19,
+            ui::text(list, fonts.regular, fonts.regular.font->fit(row.detail, 19, room), lx, label_y + 30, 19,
                      soft.with_alpha(dim));
     }
     list.pop_clip();

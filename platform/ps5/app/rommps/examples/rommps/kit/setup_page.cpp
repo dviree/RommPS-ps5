@@ -251,6 +251,17 @@ void SetupPage::follow_status(App &app)
 void SetupPage::update(App &app, const hui::InputFrame &input, float dt, hui::ui::Feedback &feedback)
 {
     step_age_ += dt;
+    if (step_ == kEmulators && emulators_loaded_)
+    {
+        auto logo = [&](const std::string &key) {
+            const Cover &c = app.platform_logo(key);
+            logos_[key] = {c.texture, c.aspect > 0 ? c.aspect : 1.0f};
+        };
+        for (const Conflict &c : systems())
+            logo(c.key);
+        for (const auto &[key, o] : own_)
+            logo(key);
+    }
     follow_status(app);
     switch (step_)
     {
@@ -1644,6 +1655,14 @@ void SetupPage::draw(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, cons
                      dirty() ? "Unsaved changes. Press Triangle to save them." : "Choose the emulator for each platform.");
         std::vector<RowRef> refs;
         rows = emulator_rows(app, &refs);
+        // Each platform's row, with its logo before its name.
+        for (std::size_t i = 0; i < rows.size() && i < refs.size(); ++i)
+            if (refs[i].kind == RowRef::kMain || refs[i].kind == RowRef::kOwn)
+            {
+                rows[i].logo_slot = true;
+                if (const auto it = logos_.find(refs[i].key); it != logos_.end())
+                    rows[i].logo = it->second.first, rows[i].logo_aspect = it->second.second;
+            }
     }
     else if (step_ == kPreview)
     {

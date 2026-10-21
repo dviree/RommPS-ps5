@@ -55,6 +55,31 @@ int version_cmp(const std::string &a, const std::string &b)
     return 0;
 }
 
+// RomM's platform logos are .ico files holding a PNG (256x256): bytes and len
+// are moved onto the biggest PNG inside, which stb_image reads. Anything else
+// is left as it is.
+static void ico_png(const unsigned char *&bytes, int &len)
+{
+    auto u16 = [&](int at) { return bytes[at] | bytes[at + 1] << 8; };
+    auto u32 = [&](int at) { return static_cast<unsigned>(u16(at)) | static_cast<unsigned>(u16(at + 2)) << 16; };
+    if (len < 6 || u16(0) != 0 || u16(2) != 1)
+        return;
+    const int n = u16(4);
+    unsigned best_size = 0, best_at = 0, best_area = 0;
+    for (int i = 0; i < n && 6 + 16 * (i + 1) <= len; ++i)
+    {
+        const int e = 6 + 16 * i;
+        const unsigned w = bytes[e] ? bytes[e] : 256, h = bytes[e + 1] ? bytes[e + 1] : 256;
+        const unsigned size = u32(e + 8), at = u32(e + 12);
+        if (at + size > static_cast<unsigned>(len) || size < 8 || std::memcmp(bytes + at, "\x89PNG", 4) != 0)
+            continue;
+        if (w * h > best_area)
+            best_area = w * h, best_size = size, best_at = at;
+    }
+    if (best_size)
+        bytes += best_at, len = static_cast<int>(best_size);
+}
+
 std::string url_escape(const std::string &s)
 {
     static const char hex[] = "0123456789ABCDEF";
@@ -277,8 +302,10 @@ void App::tick(float dt, hui::gfx::Renderer *renderer)
         to_decode_.pop_front();
         Cover &cover = covers_[job.path];
         int w = 0, h = 0, channels = 0;
-        unsigned char *rgba = stbi_load_from_memory(reinterpret_cast<const unsigned char *>(job.bytes.data()),
-                                                    static_cast<int>(job.bytes.size()), &w, &h, &channels, 4);
+        const auto *bytes = reinterpret_cast<const unsigned char *>(job.bytes.data());
+        int len = static_cast<int>(job.bytes.size());
+        ico_png(bytes, len);
+        unsigned char *rgba = stbi_load_from_memory(bytes, len, &w, &h, &channels, 4);
         if (!rgba)
         {
             cover.failed = true;
@@ -481,6 +508,7 @@ void App::refresh_status()
         status_.setup_complete = flag(j.get(), "setup_complete");
         status_.server = str(j.get(), "server_url");
         status_.user = str(j.get(), "username");
+        status_.server_trouble = str(j.get(), "server_trouble");
         status_.uptime = num(j.get(), "uptime");
         const cJSON *sync = cJSON_GetObjectItemCaseSensitive(j.get(), "sync");
         status_.syncing = flag(sync, "running");
@@ -741,7 +769,7 @@ const Details &App::details(int rom_id)
 
 void App::refresh_installed()
 {
-    api_.get("/api/installed?limit=1000", [this](const Response &r) { // every one: the shelf's count is theirs
+    api_.get("/api/installed?limit=5000", [this](const Response &r) { // every one: the Downloads tab counts them
         if (!r.ok())
             return;
         std::unique_ptr<cJSON, void (*)(cJSON *)> j(r.json(), cJSON_Delete);
@@ -789,6 +817,14 @@ void App::check_on_console(int rom_id)
                                         [rom_id](const Game &g) { return g.id == rom_id; }),
                          installed_.end());
     });
+}
+
+const Cover &App::platform_logo(const std::string &slug)
+{
+    std::string lower = slug;
+    for (char &c : lower)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return cover(slug.empty() ? std::string() : "/assets/platforms/" + lower + ".ico");
 }
 
 const Cover &App::cover(const std::string &path)

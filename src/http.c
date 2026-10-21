@@ -3,6 +3,7 @@
 #include <pthread.h>
 
 #include <curl/curl.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,6 +32,116 @@ static char g_user_agent[64];
  * between threads that use them at the same time. */
 static CURLSH *g_share;
 static pthread_mutex_t g_share_locks[CURL_LOCK_DATA_LAST];
+
+/* The connections instead stay with the handles, which are kept between
+ * requests: the next cover, list page or save to the same server goes over a
+ * connection already open (two per handle at most), not a new one. A handle
+ * can move from thread to thread as long as only one uses it at a time, so
+ * each request takes an idle one (the last given back, whose connection is
+ * the freshest) or a new one, and gives it back; POOL_MAX are kept. */
+#define POOL_MAX 8
+static CURL *g_pool[POOL_MAX];
+static int g_npool;
+static pthread_mutex_t g_pool_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static CURL *handle_take(void) {
+    CURL *c = NULL;
+    pthread_mutex_lock(&g_pool_lock);
+    if (g_npool) c = g_pool[--g_npool];
+    pthread_mutex_unlock(&g_pool_lock);
+    if (!c) return curl_easy_init();
+    curl_easy_reset(c); /* the options go; its connections stay */
+    return c;
+}
+
+static void handle_give(CURL *c) {
+    pthread_mutex_lock(&g_pool_lock);
+    const int kept = g_npool < POOL_MAX;
+    if (kept) g_pool[g_npool++] = c;
+    pthread_mutex_unlock(&g_pool_lock);
+    if (!kept) curl_easy_cleanup(c);
+}
+
+static double mono_sec(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+/* A server that doesn't answer at all (no connection) isn't asked again by
+ * every thread, each waiting out the connect timeout: requests to it fail at
+ * once, and one at a time checks whether it's back, after 5 s, then twice as
+ * long each time it still isn't, up to 30 s. */
+#define DOWN_FIRST 5.0
+#define DOWN_MOST  30.0
+static pthread_mutex_t g_down_lock = PTHREAD_MUTEX_INITIALIZER;
+static char g_down[256]; /* its scheme://host:port, "" while all answer */
+static double g_down_until, g_down_wait;
+static int g_down_probing;
+
+static void url_origin(const char *url, char *out, size_t n) {
+    const char *host = strstr(url, "://");
+    host = host ? host + 3 : url;
+    snprintf(out, n, "%.*s", (int)(host - url + (ptrdiff_t)strcspn(host, "/?#")), url);
+}
+
+int http_down(const char *url) {
+    char o[256];
+    url_origin(url, o, sizeof o);
+    pthread_mutex_lock(&g_down_lock);
+    int down = g_down[0] && !strcmp(o, g_down);
+    pthread_mutex_unlock(&g_down_lock);
+    return down;
+}
+
+/* 0 to go ahead (*probe: this one checks whether it's back), -1 to fail at once. */
+static int down_gate(const char *url, int *probe, http_resp *out) {
+    char o[200];
+    url_origin(url, o, sizeof o);
+    *probe = 0;
+    pthread_mutex_lock(&g_down_lock);
+    int wait = 0;
+    if (g_down[0] && !strcmp(o, g_down)) {
+        if (g_down_probing || mono_sec() < g_down_until) wait = 1;
+        else g_down_probing = *probe = 1;
+    }
+    pthread_mutex_unlock(&g_down_lock);
+    if (!wait) return 0;
+    memset(out, 0, sizeof *out);
+    snprintf(out->error, sizeof out->error, "%s isn't answering", o);
+    out->no_answer = 1;
+    return -1;
+}
+
+static void down_note(const char *url, int no_answer, int probe) {
+    char o[256];
+    url_origin(url, o, sizeof o);
+    pthread_mutex_lock(&g_down_lock);
+    const int same = !strcmp(o, g_down);
+    if (no_answer) {
+        if (!same) {
+            str_copy(g_down, sizeof g_down, o);
+            g_down_wait = DOWN_FIRST;
+            LOGW("%s isn't answering: asking again in %.0f s", o, g_down_wait);
+        } else if (probe) {
+            g_down_wait = g_down_wait * 2 > DOWN_MOST ? DOWN_MOST : g_down_wait * 2;
+        }
+        g_down_until = mono_sec() + g_down_wait;
+    } else if (same) {
+        LOGI("%s answers again", o);
+        g_down[0] = 0;
+    }
+    if (probe) g_down_probing = 0;
+    pthread_mutex_unlock(&g_down_lock);
+}
+
+/* No connection at all: refused, no such host, or the connect timeout. */
+static int no_answer(CURL *c, CURLcode rc) {
+    if (rc == CURLE_COULDNT_CONNECT || rc == CURLE_COULDNT_RESOLVE_HOST) return 1;
+    curl_off_t connected = 0;
+    curl_easy_getinfo(c, CURLINFO_CONNECT_TIME_T, &connected);
+    return rc == CURLE_OPERATION_TIMEDOUT && connected == 0;
+}
 
 static void share_lock(CURL *c, curl_lock_data data, curl_lock_access access, void *ud) {
     (void)c, (void)access, (void)ud;
@@ -139,7 +250,7 @@ static int curl_trace(CURL *c, curl_infotype type, char *data, size_t size, void
 /* errbuf, CURL_ERROR_SIZE bytes or NULL, gets curl's own account of a
  * failure: which host, which phase, how long it waited. */
 static CURL *easy_new(const char *url, struct curl_slist **hdrs, const char *auth, int verify, char *errbuf) {
-    CURL *c = curl_easy_init();
+    CURL *c = handle_take();
     if (!c) return NULL;
     if (errbuf) {
         errbuf[0] = 0;
@@ -151,6 +262,7 @@ static CURL *easy_new(const char *url, struct curl_slist **hdrs, const char *aut
     curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(c, CURLOPT_MAXREDIRS, 5L);
     curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 15L);
+    curl_easy_setopt(c, CURLOPT_MAXCONNECTS, 2L);
     curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
     /* Give up on stalled transfers rather than using a total timeout. */
     curl_easy_setopt(c, CURLOPT_LOW_SPEED_LIMIT, 1L);
@@ -178,8 +290,10 @@ static CURL *easy_new(const char *url, struct curl_slist **hdrs, const char *aut
     return c;
 }
 
-static int finish(CURL *c, CURLcode rc, membuf *m, http_resp *out, const char *url, const char *errbuf) {
+static int finish(CURL *c, CURLcode rc, membuf *m, http_resp *out, const char *url, const char *errbuf, int probe) {
     memset(out, 0, sizeof *out);
+    out->no_answer = rc != CURLE_OK && no_answer(c, rc);
+    down_note(url, out->no_answer, probe);
     if (rc != CURLE_OK) {
         snprintf(out->error, sizeof out->error, "%s", curl_easy_strerror(rc));
         /* "Timeout was reached" alone can't tell a server that never answered
@@ -207,11 +321,16 @@ static int finish(CURL *c, CURLcode rc, membuf *m, http_resp *out, const char *u
 static int request_impl(const char *method, const char *url, const char *auth, const char *content_type,
                         const void *body, size_t body_len, int verify, http_resp *out) {
     memset(out, 0, sizeof *out);
+    int probe;
+    if (down_gate(url, &probe, out)) return -1;
     struct curl_slist *hdrs = NULL;
     membuf m = {0};
     char errbuf[CURL_ERROR_SIZE];
     CURL *c = easy_new(url, &hdrs, auth, verify, errbuf);
-    if (!c) return -1;
+    if (!c) {
+        down_note(url, 0, probe);
+        return -1;
+    }
     if (content_type) {
         char h[256];
         snprintf(h, sizeof h, "Content-Type: %s", content_type);
@@ -230,9 +349,9 @@ static int request_impl(const char *method, const char *url, const char *auth, c
     curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, mem_write);
     curl_easy_setopt(c, CURLOPT_WRITEDATA, &m);
     CURLcode rc = curl_easy_perform(c);
-    int r = finish(c, rc, &m, out, url, errbuf);
+    int r = finish(c, rc, &m, out, url, errbuf, probe);
     curl_slist_free_all(hdrs);
-    curl_easy_cleanup(c);
+    handle_give(c);
     return r;
 }
 
@@ -253,17 +372,22 @@ int http_tls_untrusted(const char *url) {
     curl_easy_setopt(c, CURLOPT_TIMEOUT, 20L);
     CURLcode rc = curl_easy_perform(c);
     curl_slist_free_all(hdrs);
-    curl_easy_cleanup(c);
+    handle_give(c);
     return rc == CURLE_PEER_FAILED_VERIFICATION;
 }
 
 int http_upload_file(const char *method, const char *url, const char *auth, const char *field,
                      const char *file_path, const char *upload_name, http_resp *out) {
+    int probe;
+    if (down_gate(url, &probe, out)) return -1;
     struct curl_slist *hdrs = NULL;
     membuf m = {0};
     char errbuf[CURL_ERROR_SIZE];
     CURL *c = easy_new(url, &hdrs, auth, g_tls_verify, errbuf);
-    if (!c) return -1;
+    if (!c) {
+        down_note(url, 0, probe);
+        return -1;
+    }
     curl_mime *mime = curl_mime_init(c);
     curl_mimepart *part = curl_mime_addpart(mime);
     curl_mime_name(part, field);
@@ -278,10 +402,10 @@ int http_upload_file(const char *method, const char *url, const char *auth, cons
     curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, mem_write);
     curl_easy_setopt(c, CURLOPT_WRITEDATA, &m);
     CURLcode rc = curl_easy_perform(c);
-    int r = finish(c, rc, &m, out, url, errbuf);
+    int r = finish(c, rc, &m, out, url, errbuf, probe);
     curl_mime_free(mime);
     curl_slist_free_all(hdrs);
-    curl_easy_cleanup(c);
+    handle_give(c);
     return r;
 }
 
@@ -313,14 +437,10 @@ static int big_rcvbuf(void *ud, curl_socket_t fd, curlsocktype purpose) {
     return CURL_SOCKOPT_OK;
 }
 
-static double mono_sec(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
-}
-
 static int download_impl(const char *url, const char *auth, const char *dest, int resume, int verify,
                          http_progress_fn progress, void *ud, http_resp *out) {
+    int probe;
+    if (down_gate(url, &probe, out)) return -1;
     char part[PATH_MAX_LEN];
     snprintf(part, sizeof part, "%s.part", dest);
     mkdir_parent(dest);
@@ -329,6 +449,7 @@ static int download_impl(const char *url, const char *auth, const char *dest, in
     if (offset < 0) offset = 0;
     FILE *f = fopen(part, offset > 0 ? "ab" : "wb");
     if (!f) {
+        down_note(url, 0, probe);
         memset(out, 0, sizeof *out);
         snprintf(out->error, sizeof out->error, "cannot open %s", part);
         return -1;
@@ -339,6 +460,7 @@ static int download_impl(const char *url, const char *auth, const char *dest, in
     char errbuf[CURL_ERROR_SIZE];
     CURL *c = easy_new(url, &hdrs, auth, verify, errbuf);
     if (!c) {
+        down_note(url, 0, probe);
         fclose(f);
         return -1;
     }
@@ -361,12 +483,12 @@ static int download_impl(const char *url, const char *auth, const char *dest, in
     if (rc == CURLE_OK && got > 1024 * 1024 && secs > 0)
         LOGI("downloaded %.1f MB in %.1fs (%.2f MB/s)", got / 1048576.0, secs, got / 1048576.0 / secs);
 
-    int r = finish(c, rc, NULL, out, url, errbuf);
+    int r = finish(c, rc, NULL, out, url, errbuf, probe);
     if (r == 0 && out->status == 200 && offset > 0) {
         /* The server ignored Range, so start over. */
         LOGW("server ignored Range for %s; restarting download", url);
         curl_slist_free_all(hdrs);
-        curl_easy_cleanup(c);
+        handle_give(c);
         unlink(part);
         return download_impl(url, auth, dest, 0, verify, progress, ud, out);
     }
@@ -380,7 +502,7 @@ static int download_impl(const char *url, const char *auth, const char *dest, in
     }
     if (r != 0 && rc == CURLE_HTTP_RETURNED_ERROR) unlink(part);
     curl_slist_free_all(hdrs);
-    curl_easy_cleanup(c);
+    handle_give(c);
     return r;
 }
 

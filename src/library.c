@@ -194,12 +194,20 @@ static nx_kind nx_file_kind(const char *name, const char *category) {
     return !strcmp(category, "update") ? NX_UPDATE : !strcmp(category, "dlc") ? NX_DLC : NX_GAME;
 }
 
-/* The game a RomM entry is: the title id in its name, or its first file's. */
+/* The game a RomM entry is: the title id in its name, else the game's own
+ * file's in its folder, else any file's. */
 static nx_kind nx_rom(const cJSON *rom, unsigned long long *game) {
     nx_kind k = nx_title(jget_str(rom, "fs_name", ""), game, NULL);
+    unsigned long long id;
     const cJSON *f;
-    cJSON_ArrayForEach(f, cJSON_GetObjectItemCaseSensitive(rom, "files"))
-        if (k == NX_NONE) k = nx_title(jget_str(f, "file_name", ""), game, NULL);
+    cJSON_ArrayForEach(f, cJSON_GetObjectItemCaseSensitive(rom, "files")) {
+        if (k == NX_GAME) break;
+        const nx_kind fk = nx_title(jget_str(f, "file_name", ""), &id, NULL);
+        if (fk != NX_NONE && (k == NX_NONE || fk == NX_GAME)) {
+            k = fk;
+            *game = id;
+        }
+    }
     return k;
 }
 
@@ -403,6 +411,7 @@ typedef struct {
     int with;            /* the game an update or DLC came with, else 0 */
     nx_kind kind;
     int had;             /* there, whole, before this download */
+    int got;             /* brought by this download */
     int64_t size;
     char name[256];
     char dest[PATH_MAX_LEN];
@@ -504,7 +513,8 @@ static void run_switch_job(job *j, const cJSON *rom, const profile_map *maps, in
         j->base = base;
         snprintf(j->note, sizeof j->note, "%s", x->kind == NX_UPDATE ? "Update" : x->kind == NX_DLC ? "DLC" : "");
         pthread_mutex_unlock(&g_q_lock);
-        ok = romm_download(path, x->dest, progress_cb, j, &r) == 0 && !cancelled(j);
+        x->got = romm_download(path, x->dest, progress_cb, j, &r) == 0;
+        ok = x->got && !cancelled(j);
         base += file_size(x->dest) > 0 ? file_size(x->dest) : 0;
     }
     if (ok) {
@@ -527,12 +537,12 @@ static void run_switch_job(job *j, const cJSON *rom, const profile_map *maps, in
         }
         finish_download(j, maps, n, rom);
     } else {
-        /* What this download brought goes; what was there stays. */
+        /* Cancelled: what this download brought goes; what was there stays. */
         for (int i = 0; i < nf; i++) {
             char part[PATH_MAX_LEN + 8];
             snprintf(part, sizeof part, "%s.part", files[i].dest);
             unlink(part);
-            if (!files[i].had && cancelled(j)) unlink(files[i].dest);
+            if (files[i].got && cancelled(j)) unlink(files[i].dest);
         }
         job_end(j, JOB_ERROR, "%s", r.error);
     }
@@ -943,7 +953,7 @@ cJSON *library_platforms(char *err, int en) {
     long st = 0;
     cJSON *plats = romm_call("GET", "/api/platforms", NULL, &st);
     if (st != 200 || !cJSON_IsArray(plats)) {
-        snprintf(err, (size_t)en, "could not load platforms (HTTP %ld)", st);
+        if (st || !romm_no_answer(err, en)) snprintf(err, (size_t)en, "could not load platforms (HTTP %ld)", st);
         cJSON_Delete(plats);
         return NULL;
     }
@@ -1241,17 +1251,17 @@ static void clear_old_copies(const profile_map *maps, int n) {
 static void nx_unfold(const profile_map *maps, int n) {
     typedef struct { char path[PATH_MAX_LEN]; int map; } folder;
     folder *todo = NULL;
-    int nt = 0, cap = 0;
+    int nt = 0, cap = 0, logged = 0;
     const cJSON *e;
     state_lock();
     cJSON_ArrayForEach(e, state_section("roms")) {
         if (jget_num(e, "rom_id", 0) <= 0) continue;
+        char parent[PATH_MAX_LEN];
+        str_copy(parent, sizeof parent, e->string);
+        char *slash = strrchr(parent, '/');
+        if (slash) *slash = 0;
         for (int i = 0; i < n; i++) {
             const profile_map *m = &maps[i];
-            char parent[PATH_MAX_LEN];
-            str_copy(parent, sizeof parent, e->string);
-            char *slash = strrchr(parent, '/');
-            if (slash) *slash = 0;
             if (strncmp(m->romm_slugs, "switch", 6) != 0 || (m->romm_slugs[6] && m->romm_slugs[6] != ',') ||
                 strcmp(jget_str(e, "profile", ""), m->profile_id) != 0 || strcmp(parent, m->rom_dir) != 0)
                 continue;
@@ -1306,7 +1316,7 @@ static void nx_unfold(const profile_map *maps, int n) {
         }
         if (d) closedir(d);
         if (left) {
-            LOGI("%s: %d file%s moved out, %d left (archives stay)", dir, moved, moved == 1 ? "" : "s", left);
+            if (moved) LOGI("%s: %d file%s moved out, %d left (archives stay)", dir, moved, moved == 1 ? "" : "s", left);
         } else {
             rmdir(dir);
             state_lock();
@@ -1316,11 +1326,12 @@ static void nx_unfold(const profile_map *maps, int n) {
             LOGI("%s: %s", dir, moved ? "unfolded, the emulator sees it now" : "empty, removed");
             events_add("game", moved ? "moved" : "removed", rom_id, dir, m->profile_name,
                        moved ? "Out of its folder, where the emulator sees it" : "An empty folder: the download never finished");
+            logged++;
         }
         cJSON_Delete(rec);
-        installed_changed();
+        if (moved || !left) installed_changed();
     }
-    if (nt) events_save();
+    if (logged) events_save();
     free(todo);
 }
 
@@ -1465,7 +1476,7 @@ cJSON *library_details(int rom_id, char *err, int en) {
     long st = 0;
     cJSON *rom = romm_call("GET", path, NULL, &st);
     if (st != 200 || !rom) {
-        snprintf(err, (size_t)en, "could not load the game from RomM (HTTP %ld)", st);
+        if (st || !romm_no_answer(err, en)) snprintf(err, (size_t)en, "could not load the game from RomM (HTTP %ld)", st);
         cJSON_Delete(rom);
         return NULL;
     }
@@ -1836,9 +1847,94 @@ static int add_library_rom(const cJSON *it, const cJSON *page, int first, void *
     if (library_not_game(jget_str(it, "fs_name", "")) || k == NX_UPDATE || k == NX_DLC) cJSON_AddBoolToObject(o, "not_game", 1);
     if (k == NX_UPDATE || k == NX_DLC) cJSON_AddStringToObject(o, "addon", k == NX_UPDATE ? "update" : "dlc");
     if (rom_archive(it, nx)) cJSON_AddBoolToObject(o, "archived", 1);
-    add_version(o, it);
+    if (nx) {
+        /* What nx_collapse needs (and takes out again): the game's title id
+         * and the entries RomM counts as versions of the same game. */
+        char id[20];
+        if (k == NX_GAME) {
+            snprintf(id, sizeof id, "%016llX", game);
+            cJSON_AddStringToObject(o, "_game", id);
+        }
+        cJSON *sib = cJSON_AddArrayToObject(o, "_sib");
+        const cJSON *s;
+        cJSON_ArrayForEach(s, cJSON_GetObjectItemCaseSensitive(it, "sibling_roms"))
+            cJSON_AddItemToArray(sib, cJSON_CreateNumber(jget_num(s, "id", 0)));
+    } else {
+        add_version(o, it); /* a Switch game's "versions" are its files: one card */
+    }
     cJSON_AddItemToArray(cJSON_GetObjectItemCaseSensitive(out, "items"), o);
     return 0;
+}
+
+/* A Switch game RomM keeps as several entries (the same game as an .nsp and an
+ * .nsz, a .rar beside its files, two dumps) shows as one card: the one on the
+ * console, else not an archive, else named by its title id, else the biggest.
+ * The others are hidden like updates and DLC. Entries go together when RomM
+ * counts them as versions of the same game, or they carry the same title id;
+ * only within a page, where the A-Z order puts them side by side. */
+static int nx_same(const cJSON *a, const cJSON *b) {
+    const char *ga = jget_str(a, "_game", ""), *gb = jget_str(b, "_game", "");
+    if (ga[0] && !strcmp(ga, gb)) return 1;
+    const int ia = (int)jget_num(a, "id", 0), ib = (int)jget_num(b, "id", 0);
+    const cJSON *s;
+    cJSON_ArrayForEach(s, cJSON_GetObjectItemCaseSensitive(a, "_sib")) if ((int)s->valuedouble == ib) return 1;
+    cJSON_ArrayForEach(s, cJSON_GetObjectItemCaseSensitive(b, "_sib")) if ((int)s->valuedouble == ia) return 1;
+    return 0;
+}
+
+static double nx_rank(const cJSON *o) {
+    return (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(o, "installed")) ? 8e15 : 0) +
+           (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(o, "archived")) ? 0 : 4e15) +
+           (jget_str(o, "_game", "")[0] ? 2e15 : 0) + jget_num(o, "size", 0);
+}
+
+static void nx_collapse(cJSON *page) {
+    cJSON *items = cJSON_GetObjectItemCaseSensitive(page, "items");
+    const int n = cJSON_GetArraySize(items);
+    int *group = malloc(sizeof *group * (size_t)(n ? n : 1));
+    cJSON **at = malloc(sizeof *at * (size_t)(n ? n : 1));
+    if (!group || !at) {
+        free(group);
+        free(at);
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        at[i] = cJSON_GetArrayItem(items, i);
+        group[i] = i;
+    }
+    /* Each shown Switch entry joins the group of the first one before it that
+     * it goes with. */
+    for (int i = 0; i < n; i++) {
+        if (!cJSON_GetObjectItemCaseSensitive(at[i], "_sib") || cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(at[i], "not_game")))
+            continue;
+        for (int j = 0; j < i; j++)
+            if (cJSON_GetObjectItemCaseSensitive(at[j], "_sib") &&
+                !cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(at[j], "not_game")) && nx_same(at[i], at[j])) {
+                group[i] = group[j];
+                break;
+            }
+    }
+    for (int g = 0; g < n; g++) {
+        int best = -1, members = 0;
+        for (int i = 0; i < n; i++)
+            if (group[i] == g) {
+                members++;
+                if (best < 0 || nx_rank(at[i]) > nx_rank(at[best])) best = i;
+            }
+        if (members < 2) continue;
+        for (int i = 0; i < n; i++)
+            if (group[i] == g && i != best) {
+                cJSON_DeleteItemFromObjectCaseSensitive(at[i], "not_game");
+                cJSON_AddBoolToObject(at[i], "not_game", 1);
+                cJSON_AddNumberToObject(at[i], "same_as", jget_num(at[best], "id", 0));
+            }
+    }
+    for (int i = 0; i < n; i++) {
+        cJSON_DeleteItemFromObjectCaseSensitive(at[i], "_game");
+        cJSON_DeleteItemFromObjectCaseSensitive(at[i], "_sib");
+    }
+    free(group);
+    free(at);
 }
 
 /* The pages either side of the one just shown, fetched in the background so
@@ -1941,11 +2037,12 @@ cJSON *library_roms(int platform_id, const char *search, int offset, int limit, 
     long st = 0;
     if (romm_list(path, offset, limit, add_library_rom, out, &st) < 0) {
         if (st == 200) snprintf(err, (size_t)en, "could not read RomM's list of games (see the log)");
-        else snprintf(err, (size_t)en, "could not load games (HTTP %ld)", st);
+        else if (st || !romm_no_answer(err, en)) snprintf(err, (size_t)en, "could not load games (HTTP %ld)", st);
         cJSON_Delete(out);
         return NULL;
     }
     if (!cJSON_GetObjectItemCaseSensitive(out, "total")) cJSON_AddNumberToObject(out, "total", 0);
+    nx_collapse(out);
     page_cache_put(key, out);
     fetch_near_pages(path, platform_id, search, offset, limit, (int)jget_num(out, "total", 0));
     return out;

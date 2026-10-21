@@ -27,6 +27,7 @@
 #include "platform.h"
 #include "profiles.h"
 #include "ra2.h"
+#include "romm.h"
 #include "state.h"
 #include "sync.h"
 #include "ui_index.h" /* generated from ui/index.html */
@@ -266,6 +267,12 @@ static cJSON *status_json(void) {
     cJSON_AddStringToObject(j, "device_id", g_cfg.device_id);
     cJSON_AddNumberToObject(j, "web_port", g_cfg.web_port);
     config_unlock();
+    /* RomM not answering: the clients say so (it's checked again meanwhile). */
+    char trouble[160];
+    if (romm_no_answer(trouble, sizeof trouble)) {
+        cJSON_AddStringToObject(j, "server_trouble", trouble);
+        romm_check_back();
+    }
     pthread_mutex_lock(&g_fg_lock);
     cJSON_AddStringToObject(j, "foreground", g_foreground);
     pthread_mutex_unlock(&g_fg_lock);
