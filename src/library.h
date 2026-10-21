@@ -33,8 +33,7 @@ unsigned library_installed_sig(void);
 /* Whether a game is on the console now (RommPS asks as its sheet opens). */
 int library_on_console(int rom_id);
 
-/* name: the game's name as the client shows it ("Game #<id>" if "" until the job runs).
- * cover: the client's copy of RomM's path_cover_small, if it has one; the job re-reads it from RomM when it runs. */
+/* name: the name the client shows; cover: its copy of RomM's path_cover_small. */
 int library_queue_rom(int rom_id, const char *name, const char *cover, char *err, int en);
 int library_queue_firmware(int platform_id, char *err, int en);
 int library_cancel(int id, char *err, int en);
