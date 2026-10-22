@@ -35,6 +35,10 @@ void netlog_send(const char *line);
 #endif
 
 #define LOGD(...) log_msg(LOG_DEBUG, __VA_ARGS__)
+
+/* The largest block malloc hands out, in MB up to 1024: for the logs, where
+ * memory is tight (the PS4 payload lives in a system process's budget). */
+int mem_largest_mb(void);
 #define LOGI(...) log_msg(LOG_INFO, __VA_ARGS__)
 #define LOGW(...) log_msg(LOG_WARN, __VA_ARGS__)
 #define LOGE(...) log_msg(LOG_ERROR, __VA_ARGS__)

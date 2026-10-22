@@ -39,6 +39,7 @@ class SettingsPage
     {
         kSaveSync,
         kLook,
+        kSounds,
         kInterval,
         kOnExit,
         kOnStart,

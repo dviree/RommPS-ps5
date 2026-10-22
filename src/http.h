@@ -26,6 +26,10 @@ void http_resp_free(http_resp *r);
 int http_request(const char *method, const char *url, const char *auth, const char *content_type,
                  const void *body, size_t body_len, http_resp *out);
 
+/* A GET whose JSON reply drops the members named in drop (NULL-terminated)
+ * as it arrives, so they never take memory: for big lists. */
+int http_get_lean(const char *url, const char *auth, const char *const *drop, http_resp *out);
+
 /* multipart/form-data upload of one file. */
 int http_upload_file(const char *method, const char *url, const char *auth, const char *field,
                      const char *file_path, const char *upload_name, http_resp *out);

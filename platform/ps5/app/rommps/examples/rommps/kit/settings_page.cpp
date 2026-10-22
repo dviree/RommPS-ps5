@@ -59,6 +59,7 @@ std::vector<Row> SettingsPage::rows(const App &app, std::vector<int> *ids) const
     r[kSaveSync] = {RowKind::toggle, "Save sync", "", c.save_sync ? "" : "RomM is only for games",
                     c.save_sync};
     r[kLook] = {RowKind::choice, "Theme", l.name, l.family};
+    r[kSounds] = {RowKind::toggle, "Interface sounds", "", "", ui_sounds()};
     r[kInterval] = {RowKind::choice, "Sync every", interval_label(c.sync_interval_min), ""};
     r[kOnExit] = {RowKind::toggle, "Sync when a game closes", "", "", c.sync_on_game_exit};
     r[kOnStart] = {RowKind::toggle, "Sync when a game starts", "", "",
@@ -152,7 +153,7 @@ std::vector<Row> SettingsPage::rows(const App &app, std::vector<int> *ids) const
     } kSections[] = {
         {"Sync", {kSaveSync, kInterval, kOnExit, kOnStart, kOnChange, kPolicy, kStates}},
         {"Downloads", {kConcurrency, kCovers, -1}},
-        {"Theme and notifications", {kLook, kNotify, -1}},
+        {"Theme, sounds and notifications", {kLook, kSounds, kNotify, -1}},
         {"Emulators", {kEmulators, -1}},
         {"Updates", {kUpdate, kUpdateCheck, -1}},
         {"RomM", {kSetup, kForget, -1}},
@@ -245,6 +246,9 @@ void SettingsPage::update(App &app, const hui::InputFrame &input, float dt, hui:
         break;
     case kLook:
         set_look((current_look() + e.step + look_count()) % look_count());
+        break;
+    case kSounds:
+        set_ui_sounds(!ui_sounds());
         break;
     case kInterval:
     {

@@ -132,6 +132,16 @@ static int load_maps(profile_map **maps) {
     return n;
 }
 
+/* No emulator found because the list of them couldn't be built (memory, on
+ * the PS4), not because none plays the platform: say which. */
+#define MAPS_SHORT_MSG "the console was short of memory just then. Try again in a moment"
+static int maps_failed(const profile_map *maps, int n) {
+    config_lock();
+    const int have = cJSON_GetArraySize(g_cfg.profiles) > 0;
+    config_unlock();
+    return !maps && !n && have;
+}
+
 /* Files a RomM scan picks up beside the games (a frontend's metadata.txt or
  * gamelist.xml, artwork, readmes, checksums) aren't games: the library hides
  * them and they aren't downloaded. Not .md: that's a Mega Drive ROM. */
@@ -604,7 +614,8 @@ static void run_rom_job(job *j) {
     const char *slug = jget_str(rom, "platform_slug", "");
     const profile_map *m = profile_find_for_platform(maps, n, slug, jget_str(rom, "platform_fs_slug", ""));
     if (!m) {
-        job_end(j, JOB_ERROR, "no emulator is set up for %s", slug);
+        if (maps_failed(maps, n)) job_end(j, JOB_ERROR, MAPS_SHORT_MSG "%s", "");
+        else job_end(j, JOB_ERROR, "no emulator is set up for %s", slug);
         free(maps);
         cJSON_Delete(rom);
         return;
@@ -732,7 +743,8 @@ static void run_firmware_job(job *j) {
     str_copy(j->platform, sizeof j->platform, jget_str(plat, "display_name", jget_str(plat, "name", "")));
     pthread_mutex_unlock(&g_q_lock);
     if (st != 200 || !profile_find_for_platform(maps, n, jget_str(plat, "slug", ""), jget_str(plat, "fs_slug", ""))) {
-        job_end(j, JOB_ERROR, "no emulator is set up for %s", plat ? jget_str(plat, "slug", "") : "this platform");
+        if (st == 200 && maps_failed(maps, n)) job_end(j, JOB_ERROR, MAPS_SHORT_MSG "%s", "");
+        else job_end(j, JOB_ERROR, "no emulator is set up for %s", plat ? jget_str(plat, "slug", "") : "this platform");
         cJSON_Delete(plat);
         free(maps);
         return;

@@ -2830,8 +2830,8 @@ static void *worker(void *arg) {
             if (notify) plat_notify("RommPS: couldn't sync. %s", r.error);
         } else {
             /* Issue #10 - Added notification and log file for memory card operations. */
-            LOGI("sync done: %d up, %d down, %d conflicts, %d failed, %d states, %d cards up, %d cards down", r.uploaded,
-                 r.downloaded, r.conflicts, r.failed, r.states_up, r.cards, r.cards_down);
+            LOGI("sync done: %d up, %d down, %d conflicts, %d failed, %d states, %d cards up, %d cards down; largest free block %d MB",
+                 r.uploaded, r.downloaded, r.conflicts, r.failed, r.states_up, r.cards, r.cards_down, mem_largest_mb());
             char text[200], games[400];
             if (notify && sync_summary(&r, text, sizeof text)) {
                 if (events_games(mark, 3, games, sizeof games)) plat_notify("RommPS: %s\n%s", text, games);

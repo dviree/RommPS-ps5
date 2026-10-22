@@ -125,6 +125,15 @@ class RommPS final : public app::Concept
 
     void update(const InputFrame &input, float dt, app::Feedback &feedback) override
     {
+        update_frame(input, dt, feedback);
+        // Interface sounds turned off in Settings: what this frame asked for
+        // isn't played. Rumble still is.
+        if (!rommps::ui_sounds())
+            feedback.cues.clear();
+    }
+
+    void update_frame(const InputFrame &input, float dt, app::Feedback &feedback)
+    {
         age_ += dt;
         clock_ += dt;
         app_.tick(dt, static_cast<gfx::Renderer *>(rommps_renderer()));

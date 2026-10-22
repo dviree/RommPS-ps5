@@ -54,22 +54,6 @@ static void *tile_thread(void *arg) {
     return NULL;
 }
 
-/* The largest block malloc hands out, in MB up to 1024, for the log: on the PS4
- * the payload shares GoldHEN's process, which has little memory to spare. */
-static int largest_block_mb(void) {
-    int lo = 0, hi = 1024;
-    while (lo < hi) {
-        int mid = (lo + hi + 1) / 2;
-        void *p = malloc((size_t)mid << 20);
-        if (p) {
-            free(p);
-            lo = mid;
-        } else {
-            hi = mid - 1;
-        }
-    }
-    return lo;
-}
 
 /* Lets the PS4 app read which version an installed payload is, so it never
  * replaces a newer one with the copy it carries (platform/ps4/app). */
@@ -152,7 +136,7 @@ static void *app_main(void *arg) {
     plat_describe(about, sizeof about);
     iso8601_utc(time(NULL), now_iso, sizeof now_iso);
     LOGI("%s %s (build %s) starting (%s), data dir %s", APP_NAME, APP_VERSION, APP_BUILD, plat_name(), plat_data_dir());
-    LOGI("%s; clock %s; largest free block %d MB", about, now_iso, largest_block_mb());
+    LOGI("%s; clock %s; largest free block %d MB", about, now_iso, mem_largest_mb());
     /* Jailbroken consoles kept offline often run with the clock at 1970, which
      * breaks HTTPS certificate checks and save timestamps. */
     if (time(NULL) < 1577836800) { /* 2020-01-01 */

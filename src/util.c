@@ -607,3 +607,18 @@ void random_uuid(char out[37]) {
              b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12],
              b[13], b[14], b[15]);
 }
+
+int mem_largest_mb(void) {
+    int lo = 0, hi = 1024;
+    while (lo < hi) {
+        const int mid = (lo + hi + 1) / 2;
+        void *p = malloc((size_t)mid << 20);
+        if (p) {
+            free(p);
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    return lo;
+}

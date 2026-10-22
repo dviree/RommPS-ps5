@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "config.h"
 #include "detect.h"
@@ -503,9 +504,17 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
                     cJSON_ArrayForEach(f, cJSON_GetObjectItemCaseSensitive(q, "platforms"))
                         want += !profiles_excludes(q, profiles_system_key(f));
                 }
-                profile_map *grown = realloc(maps, sizeof *maps * (size_t)(want > cap ? want : cap + 1));
+                /* Short of memory for a moment (the PS4 payload, while downloads
+                 * finish together): it frees up, so wait for it a little. */
+                const size_t bytes = sizeof *maps * (size_t)(want > cap ? want : cap + 1);
+                profile_map *grown = realloc(maps, bytes);
+                for (int tries = 1; !grown && tries < 10; tries++) {
+                    usleep(200 * 1000);
+                    grown = realloc(maps, bytes);
+                    if (grown) LOGI("memory for %d emulator platforms after %d tries", want, tries + 1);
+                }
                 if (!grown) {
-                    LOGE("no memory for %d emulator platforms", want);
+                    LOGE("no memory for %d emulator platforms (largest free block %d MB)", want, mem_largest_mb());
                     free(maps);
                     *out = NULL;
                     return 0;

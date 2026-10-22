@@ -1,4 +1,5 @@
 #include "http.h"
+#include "jsonlean.h"
 
 #include <pthread.h>
 
@@ -337,8 +338,23 @@ static int finish(CURL *c, CURLcode rc, membuf *m, http_resp *out, const char *u
     return 0;
 }
 
+/* A reply kept lean: the members named in drop never reach memory. */
+typedef struct {
+    membuf m;
+    jlean j;
+} lean_buf;
+
+static int lean_put(void *ud, const char *bytes, size_t n) {
+    return mem_write((char *)bytes, 1, n, ud) == n;
+}
+
+static size_t lean_write(char *ptr, size_t size, size_t nmemb, void *ud) {
+    lean_buf *l = ud;
+    return jlean_feed(&l->j, ptr, size * nmemb, lean_put, &l->m) ? size * nmemb : 0;
+}
+
 static int request_impl(const char *method, const char *url, const char *auth, const char *content_type,
-                        const void *body, size_t body_len, int verify, http_resp *out) {
+                        const void *body, size_t body_len, int verify, const char *const *drop, http_resp *out) {
     memset(out, 0, sizeof *out);
     int probe;
     if (down_gate(url, &probe, out)) return -1;
@@ -365,9 +381,18 @@ static int request_impl(const char *method, const char *url, const char *auth, c
         curl_easy_setopt(c, CURLOPT_POSTFIELDS, body ? body : "");
         curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, (long)(body ? body_len : 0));
     }
-    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, mem_write);
-    curl_easy_setopt(c, CURLOPT_WRITEDATA, &m);
+    lean_buf lean;
+    if (drop) {
+        memset(&lean, 0, sizeof lean);
+        jlean_init(&lean.j, drop);
+        curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, lean_write);
+        curl_easy_setopt(c, CURLOPT_WRITEDATA, &lean);
+    } else {
+        curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, mem_write);
+        curl_easy_setopt(c, CURLOPT_WRITEDATA, &m);
+    }
     CURLcode rc = curl_easy_perform(c);
+    if (drop) m = lean.m;
     int r = finish(c, rc, &m, out, url, errbuf, probe);
     curl_slist_free_all(hdrs);
     handle_give(c);
@@ -376,11 +401,15 @@ static int request_impl(const char *method, const char *url, const char *auth, c
 
 int http_request(const char *method, const char *url, const char *auth, const char *content_type,
                  const void *body, size_t body_len, http_resp *out) {
-    return request_impl(method, url, auth, content_type, body, body_len, g_tls_verify, out);
+    return request_impl(method, url, auth, content_type, body, body_len, g_tls_verify, NULL, out);
+}
+
+int http_get_lean(const char *url, const char *auth, const char *const *drop, http_resp *out) {
+    return request_impl("GET", url, auth, NULL, NULL, 0, g_tls_verify, drop, out);
 }
 
 int http_get_verified(const char *url, http_resp *out) {
-    return request_impl("GET", url, NULL, NULL, NULL, 0, 1, out);
+    return request_impl("GET", url, NULL, NULL, NULL, 0, 1, NULL, out);
 }
 
 int http_tls_untrusted(const char *url) {

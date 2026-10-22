@@ -21,21 +21,32 @@ static void current_auth(char *base, size_t bn, char *auth, size_t an) {
     config_unlock();
 }
 
-cJSON *romm_call_raw(const char *base, const char *auth, const char *method, const char *path,
-                     const cJSON *body, long *status) {
+/* What a game list carries that nothing here reads, and that makes it heavy:
+ * RetroAchievements' lists alone are most of a page (1.1 of 1.3 MB for 16 PS1
+ * games), and the PS4 payload can't hold that. Dropped as the page arrives. */
+static const char *const LIST_DROP[] = {
+    "merged_ra_metadata", "ra_metadata",        "ss_metadata",     "igdb_metadata",
+    "hasheous_metadata",  "launchbox_metadata", "moby_metadata",   "flashpoint_metadata",
+    "gamelist_metadata",  "merged_screenshots", "url_screenshots", "url_manual",
+    NULL};
+
+static cJSON *call(const char *base, const char *auth, const char *method, const char *path, const cJSON *body,
+                   const char *const *drop, long *status) {
     char url[2048];
     snprintf(url, sizeof url, "%s%s", base, path);
     char *payload = body ? cJSON_PrintUnformatted(body) : NULL;
     http_resp r;
-    int rc = http_request(method, url, auth, payload ? "application/json" : NULL, payload,
-                          payload ? strlen(payload) : 0, &r);
+    int rc = drop ? http_get_lean(url, auth, drop, &r)
+                  : http_request(method, url, auth, payload ? "application/json" : NULL, payload,
+                                 payload ? strlen(payload) : 0, &r);
     free(payload);
     if (status) *status = rc == 0 ? r.status : 0;
     cJSON *j = (rc == 0 && r.body) ? cJSON_Parse(r.body) : NULL;
     /* A big reply can't always be parsed where memory is tight (the PS4 payload
      * shares GoldHEN's process); romm_list pages lists to stay small. */
     if (rc == 0 && r.status < 300 && r.len && !j)
-        LOGW("%s %s -> %ld, but the %zu-byte reply couldn't be read (out of memory?)", method, path, r.status, r.len);
+        LOGW("%s %s -> %ld, but the %zu-byte reply couldn't be read (out of memory? largest free block %d MB)", method,
+             path, r.status, r.len, mem_largest_mb());
     if (rc == 0 && r.status >= 400) {
         char d[256];
         romm_error_detail(j, d, sizeof d);
@@ -44,6 +55,11 @@ cJSON *romm_call_raw(const char *base, const char *auth, const char *method, con
     }
     http_resp_free(&r);
     return j;
+}
+
+cJSON *romm_call_raw(const char *base, const char *auth, const char *method, const char *path,
+                     const cJSON *body, long *status) {
+    return call(base, auth, method, path, body, NULL, status);
 }
 
 int romm_no_answer(char *msg, int n) {
@@ -92,7 +108,9 @@ int romm_list(const char *path, int offset, int limit, romm_list_cb cb, void *ct
         int want = limit - seen < page_size ? limit - seen : page_size;
         snprintf(url, sizeof url, "%s%soffset=%d&limit=%d", path, strchr(path, '?') ? "&" : "?", offset + seen, want);
         long st = 0;
-        cJSON *page = romm_call("GET", url, NULL, &st);
+        char base[512], auth[300];
+        current_auth(base, sizeof base, auth, sizeof auth);
+        cJSON *page = base[0] ? call(base, auth, "GET", url, NULL, LIST_DROP, &st) : NULL;
         if (status) *status = st;
         /* A page too big to take in (games with a lot of metadata, where memory
          * is tight): the same games again, fewer at a time. Not when RomM
