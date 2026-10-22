@@ -8,7 +8,7 @@
 
 #define APP_NAME    "romm-sync"
 #ifndef APP_VERSION
-#define APP_VERSION "1.2.1"
+#define APP_VERSION "1.3.0"
 #endif
 #ifndef APP_BUILD /* git describe of the build, from the Makefile */
 #define APP_BUILD "unknown"
@@ -27,8 +27,18 @@ void log_init(const char *file_path);
 void log_msg(int level, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 /* Recent log lines, newline separated. Free the result. */
 char *log_recent(void);
+/* Sends one line to tools/netlog.py in NETLOG=1 builds; a no-op otherwise.
+ * log_msg already does; this is for what runs before the log is open. */
+void netlog_send(const char *line);
+#ifndef ROMM_NETLOG_PORT
+#define ROMM_NETLOG_PORT 8781 /* UDP; the web UI's port plus one */
+#endif
 
 #define LOGD(...) log_msg(LOG_DEBUG, __VA_ARGS__)
+
+/* The largest block malloc hands out, in MB up to 1024: for the logs, where
+ * memory is tight (the PS4 payload lives in a system process's budget). */
+int mem_largest_mb(void);
 #define LOGI(...) log_msg(LOG_INFO, __VA_ARGS__)
 #define LOGW(...) log_msg(LOG_WARN, __VA_ARGS__)
 #define LOGE(...) log_msg(LOG_ERROR, __VA_ARGS__)
@@ -69,6 +79,9 @@ int str_ends_with_ci(const char *s, const char *suffix);
 /* Is the file's extension in a list like ".srm,.sav,.state*"? */
 int ext_in_list(const char *file_name, const char *list);
 void str_copy(char *dst, size_t n, const char *src);
+/* str_copy for names people read (and RomM keeps): a cut never splits a
+ * UTF-8 character. Not for bytes cut at a known length: those may not be UTF-8. */
+void str_copy_utf8(char *dst, size_t n, const char *src);
 /* Fills {key} placeholders. vars holds key, value pairs and ends with NULL. */
 void str_template(char *out, size_t n, const char *tpl, const char *const *vars);
 

@@ -15,6 +15,12 @@
 
 #include "md5.h"
 
+#ifdef ROMM_NETLOG
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#endif
+
 
 #define LOG_RING_LINES 200
 #define LOG_LINE_LEN   320
@@ -34,6 +40,63 @@ int thread_start(void *(*fn)(void *), void *arg) {
     int rc = pthread_create(&t, &a, fn, arg);
     pthread_attr_destroy(&a);
     return rc;
+}
+
+#ifdef ROMM_NETLOG
+/* Test builds only (make ... NETLOG=1). Every log line also goes out as a UDP
+ * broadcast, so a console whose files nobody can reach still tells
+ * tools/netlog.py on the same network what it's doing. UDP because a log that
+ * needs a connection is no help on the console that can't keep one. For
+ * networks that drop broadcasts, an IP address in netlog-host next to the log
+ * gets every line too. */
+static pthread_mutex_t g_netlog_lock = PTHREAD_MUTEX_INITIALIZER;
+static int g_netlog_fd = -1, g_netlog_host_read;
+static struct sockaddr_in g_netlog_to[2];
+static int g_netlog_n;
+
+static void netlog_add(in_addr_t addr) {
+    struct sockaddr_in *to = &g_netlog_to[g_netlog_n++];
+    memset(to, 0, sizeof *to);
+    to->sin_family = AF_INET;
+    to->sin_port = htons(ROMM_NETLOG_PORT);
+    to->sin_addr.s_addr = addr;
+}
+
+/* netlog-host is read once the log has a folder; until then, broadcast only. */
+static void netlog_read_host(void) {
+    char path[PATH_MAX_LEN], host[64] = "";
+    const char *slash = strrchr(g_log_path, '/');
+    if (!slash) return;
+    g_netlog_host_read = 1;
+    snprintf(path, sizeof path, "%.*s/netlog-host", (int)(slash - g_log_path), g_log_path);
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    if (fgets(host, sizeof host, f)) host[strcspn(host, " \r\n")] = 0;
+    fclose(f);
+    struct in_addr a;
+    if (host[0] && inet_pton(AF_INET, host, &a) == 1 && g_netlog_n < 2) netlog_add(a.s_addr);
+}
+#endif
+
+void netlog_send(const char *line) {
+#ifdef ROMM_NETLOG
+    char pkt[LOG_LINE_LEN + 16];
+    int len = snprintf(pkt, sizeof pkt, "[romm-sync] %s\n", line);
+    if (len >= (int)sizeof pkt) len = (int)sizeof pkt - 1;
+    pthread_mutex_lock(&g_netlog_lock);
+    if (g_netlog_fd < 0) {
+        int on = 1;
+        g_netlog_fd = socket(AF_INET, SOCK_DGRAM, 0);
+        if (g_netlog_fd >= 0) setsockopt(g_netlog_fd, SOL_SOCKET, SO_BROADCAST, &on, sizeof on);
+        netlog_add(htonl(INADDR_BROADCAST));
+    }
+    if (!g_netlog_host_read && g_log_path[0]) netlog_read_host();
+    for (int i = 0; g_netlog_fd >= 0 && i < g_netlog_n; i++)
+        sendto(g_netlog_fd, pkt, (size_t)len, 0, (struct sockaddr *)&g_netlog_to[i], sizeof g_netlog_to[i]);
+    pthread_mutex_unlock(&g_netlog_lock);
+#else
+    (void)line;
+#endif
 }
 
 void log_init(const char *file_path) {
@@ -74,6 +137,7 @@ void log_msg(int level, const char *fmt, ...) {
             fclose(f);
         }
     }
+    netlog_send(line);
     pthread_mutex_unlock(&g_log_lock);
 }
 
@@ -356,6 +420,21 @@ void str_copy(char *dst, size_t n, const char *src) {
     dst[l] = 0;
 }
 
+void str_copy_utf8(char *dst, size_t n, const char *src) {
+    if (!n) return;
+    if (!src) src = "";
+    size_t l = strlen(src);
+    if (l >= n) {
+        l = n - 1;
+        /* src[l] continuing a character that starts before it: cut before that */
+        size_t k = l;
+        while (k > 0 && l - k < 3 && ((unsigned char)src[k] & 0xC0) == 0x80) k--;
+        if (k < l && ((unsigned char)src[k] & 0xC0) == 0xC0) l = k;
+    }
+    memcpy(dst, src, l);
+    dst[l] = 0;
+}
+
 void str_template(char *out, size_t n, const char *tpl, const char *const *vars) {
     size_t o = 0;
     for (const char *p = tpl; *p && o + 1 < n;) {
@@ -527,4 +606,19 @@ void random_uuid(char out[37]) {
     snprintf(out, 37, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
              b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12],
              b[13], b[14], b[15]);
+}
+
+int mem_largest_mb(void) {
+    int lo = 0, hi = 1024;
+    while (lo < hi) {
+        const int mid = (lo + hi + 1) / 2;
+        void *p = malloc((size_t)mid << 20);
+        if (p) {
+            free(p);
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    return lo;
 }

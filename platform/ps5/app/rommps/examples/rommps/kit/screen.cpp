@@ -1,4 +1,4 @@
-// RommPS - the screen: Home, Library, Downloads and Settings for the RomM Sync payload.
+// RommPS - the screen: Home, Library, Downloads, Queue and Settings for the RomM Sync payload.
 // Copyright (C) 2026 BlackBearReloaded (the Aurora Shelf design it grew from)
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
@@ -7,14 +7,15 @@
 // from the payload through rommps_app.hpp; the screen only draws it and sends
 // what the pad asks for.
 //
-//   - L1 / R1 move between Home, Library and Downloads.
+//   - L1 / R1 move between Home, Library, Downloads, Queue and Settings.
 //   - Home: the sync at a glance; Cross syncs now. Beside it: the conflicts
 //     to settle, the sync log and the saves kept in sync (sync_views.hpp).
-//   - Library (library_page.hpp): the games on this console and RomM's
-//     platforms; a platform's games in a grid with an A to Z bar; search. The
-//     backdrop eases toward the focused cover's colours; Cross opens a frosted
-//     sheet to download the game.
-//   - Downloads: what's queued and running; Cross cancels one.
+//   - Library (library_page.hpp): RomM's platforms; a platform's games in a
+//     grid with an A to Z bar; search. The backdrop eases toward the focused
+//     cover's colours; Cross opens a frosted sheet to download the game.
+//   - Downloads: the games on this console, most recently played first;
+//     Cross opens one's details sheet, where a held Cross deletes it.
+//   - Queue: what's queued and running; Cross cancels one.
 //   - Settings: the look, the payload's settings, its updates, the setup.
 //
 // Until the payload answers the screen says so; until it's paired with RomM
@@ -36,6 +37,7 @@
 #include "ui/motion.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <ctime>
@@ -62,10 +64,11 @@ enum Tab
     kHome,
     kLibrary,
     kDownloads,
+    kQueue,
     kSettings,
     kTabs
 };
-constexpr const char *kTabNames[kTabs] = {"Home", "Library", "Downloads", "Settings"};
+constexpr const char *kTabNames[kTabs] = {"Home", "Library", "Downloads", "Queue", "Settings"};
 
 constexpr const char *kTechniques[] = {
     "The background service's state, read through its local API on a worker thread",
@@ -95,6 +98,8 @@ class RommPS final : public app::Concept
   public:
     explicit RommPS(app::Context &context) : context_(context), app_(rommps::app())
     {
+        // Before the first answer is read (that's in update): names keep what these fonts can draw
+        rommps::set_text_fonts(context.fonts);
         apply_palette(rommps::Palette{}, true);
     }
 
@@ -120,6 +125,15 @@ class RommPS final : public app::Concept
 
     void update(const InputFrame &input, float dt, app::Feedback &feedback) override
     {
+        update_frame(input, dt, feedback);
+        // Interface sounds turned off in Settings: what this frame asked for
+        // isn't played. Rumble still is.
+        if (!rommps::ui_sounds())
+            feedback.cues.clear();
+    }
+
+    void update_frame(const InputFrame &input, float dt, app::Feedback &feedback)
+    {
         age_ += dt;
         clock_ += dt;
         app_.tick(dt, static_cast<gfx::Renderer *>(rommps_renderer()));
@@ -139,6 +153,8 @@ class RommPS final : public app::Concept
                 feedback.play(audio::Cue::tab);
                 if (tab_ == kSettings)
                     settings_.enter(app_);
+                if (tab_ == kDownloads)
+                    app_.refresh_installed();
                 if (tab_ == kLibrary)
                 {
                     library_.enter(app_);
@@ -191,7 +207,14 @@ class RommPS final : public app::Concept
                 open_sheet();
         }
         else if (tab_ == kDownloads)
-            update_downloads(input, dt, feedback);
+        {
+            if (sheet_open_)
+                update_sheet(input, dt, feedback);
+            else
+                update_downloads(input, dt, feedback);
+        }
+        else if (tab_ == kQueue)
+            update_queue(input, dt, feedback);
         else
             settings_.update(app_, input, dt, feedback);
 
@@ -199,10 +222,12 @@ class RommPS final : public app::Concept
         tab_age_ += dt;
         tab_position_.target = static_cast<float>(tab_);
         tab_position_.update(dt, 16.0f);
-        // The backdrop eases toward the focused game's cover (or platform's).
-        if (tab_ == kLibrary)
+        // The backdrop eases toward the focused game's cover (or the platform's).
+        if (tab_ == kLibrary || tab_ == kDownloads)
         {
-            const std::string cover = sheet_open_ ? sheet_game_.cover : library_.backdrop_cover(app_);
+            const std::string cover = sheet_open_         ? sheet_game_.cover
+                                      : tab_ == kLibrary  ? library_.backdrop_cover(app_)
+                                                          : (downloaded_game() ? downloaded_game()->cover : "");
             if (!cover.empty())
                 apply_palette(app_.cover(cover).palette, false);
         }
@@ -213,14 +238,26 @@ class RommPS final : public app::Concept
         sheet_.update(dt, context_.settings.reduced_motion ? 40.0f : 13.0f);
         action_position_.target = static_cast<float>(action_);
         action_position_.update(dt, 22.0f);
-        download_row_ = std::clamp(download_row_, 0, std::max(0, static_cast<int>(app_.downloads().size()) - 1));
+        summary_scroll_.target = summary_target_;
+        summary_scroll_.update(dt, 14.0f);
+        queue_row_ = std::clamp(queue_row_, 0, std::max(0, static_cast<int>(app_.queue().size()) - 1));
         if (!cancel_seen_) // focus left the download (another row, tab or button): the hold is gone
         {
             cancel_hold_ = 0;
             cancel_job_ = 0;
         }
-        download_position_.target = static_cast<float>(download_row_);
-        download_position_.update(dt, 20.0f);
+        queue_position_.target = static_cast<float>(queue_row_);
+        queue_position_.update(dt, 20.0f);
+        // The six-row window, eased so the list scrolls with the focus.
+        const int qcount = static_cast<int>(app_.queue().size());
+        queue_scroll_.target = static_cast<float>(std::clamp(queue_row_ - 5, 0, std::max(0, qcount - 6)));
+        queue_scroll_.update(dt, 14.0f);
+
+        installed_position_.target = static_cast<float>(installed_row_);
+        installed_position_.update(dt, 20.0f);
+        const int icount = static_cast<int>(app_.installed().size());
+        installed_scroll_.target = static_cast<float>(std::clamp(installed_row_ - 5, 0, std::max(0, icount - 6)));
+        installed_scroll_.update(dt, 14.0f);
     }
 
     void draw(app::Frame &frame) const override
@@ -253,6 +290,8 @@ class RommPS final : public app::Concept
             draw_library(list);
         else if (tab_ == kDownloads)
             draw_downloads(list);
+        else if (tab_ == kQueue)
+            draw_queue(list);
         else
             settings_.draw(list, context_.fonts, L, app_, clock_, tab_age_);
         list.pop_transform();
@@ -269,9 +308,11 @@ class RommPS final : public app::Concept
         }
         if (move_open_)
             draw_move(frame.overlay);
-        draw_toast(back > 0.5f || move_open_ ? frame.overlay : frame.scene);
+        // The hints first: the toast keeps clear of them.
+        hints_left_ = 1920.0f;
         if (!move_open_)
             draw_hints(back > 0.5f ? frame.overlay : frame.scene);
+        draw_toast(back > 0.5f || move_open_ ? frame.overlay : frame.scene);
     }
 
   private:
@@ -298,6 +339,15 @@ class RommPS final : public app::Concept
     const rommps::Game *focused_game() const
     {
         return tab_ == kLibrary && !sheet_open_ ? library_.focused(app_) : nullptr;
+    }
+
+    // The game the Downloads list's focus is on (nullptr when there is none).
+    const rommps::Game *downloaded_game() const
+    {
+        const auto &games = app_.installed();
+        return installed_row_ >= 0 && installed_row_ < static_cast<int>(games.size())
+                   ? &games[static_cast<std::size_t>(installed_row_)]
+                   : nullptr;
     }
 
     // The backdrop's four colours, from the focused cover (or the default).
@@ -366,15 +416,23 @@ class RommPS final : public app::Concept
         feedback.play(audio::Cue::select);
     }
 
-    void open_sheet()
+    void open_sheet(const rommps::Game &g)
     {
-        const rommps::Game *g = library_.focused(app_);
-        if (!g)
-            return;
-        sheet_game_ = *g;
+        sheet_game_ = g;
+        app_.check_on_console(g.id);
         sheet_open_ = true;
+        addons_open_ = false;
+        remove_hold_ = -1; // a hold from before doesn't carry over
         action_ = 0;
         action_position_.snap(0.0f);
+        summary_scroll_.snap(0.0f);
+        summary_target_ = summary_hold_ = summary_max_ = 0.0f;
+    }
+
+    void open_sheet()
+    {
+        if (const rommps::Game *g = library_.focused(app_))
+            open_sheet(*g);
     }
 
     // The sheet's actions for the focused game, and whether each can be used.
@@ -382,7 +440,7 @@ class RommPS final : public app::Concept
     {
         std::string label;
         bool enabled;
-        int kind; // 0 download, 1 cancel, 3 remove, 4 saves and states (Circle closes the sheet)
+        int kind; // 0 download, 1 cancel, 3 remove, 4 saves and states, 5 updates and DLC (Circle closes the sheet)
     };
 
     std::vector<SheetAction> sheet_actions() const
@@ -391,19 +449,27 @@ class RommPS final : public app::Concept
         const rommps::Game *g = &sheet_game_;
         const rommps::Platform *p = app_.platform_by_id(sheet_game_.platform_id);
         const rommps::Download *d = g ? app_.download_for(g->id) : nullptr;
+        const rommps::Details &info = app_.details(sheet_game_.id);
         if (d && d->syncing())
             actions.push_back({"Syncing saves", false, 0});
         else if (d && d->active())
             actions.push_back({"Hold to cancel download", true, 1});
-        else if (g && g->installed)
+        else if (g && app_.on_console(*g))
         {
             actions.push_back({"Hold to delete this game", true, 3});
             actions.push_back({"Saves and states", true, 4});
         }
         else if (p && p->profile.empty())
             actions.push_back({"No emulator for this platform", false, 0});
+        else if (g->archived || !info.archived.empty())
+            actions.push_back({"Archived: can't download", false, 0});
         else
             actions.push_back({"Download", true, 0});
+        // A Switch game's update and DLC, which come with it.
+        if (!info.addons.empty())
+            actions.push_back({std::string(info.bundle ? "In this folder (" : "Updates and DLC (") +
+                                   std::to_string(info.addons.size()) + ")",
+                               true, 5});
         return actions;
     }
 
@@ -476,11 +542,43 @@ class RommPS final : public app::Concept
         return true;
     }
 
+    // Rows of the update and DLC list that fit the sheet at once.
+    static constexpr int kAddonRows = 6;
+
     void update_sheet(const InputFrame &input, float dt, app::Feedback &feedback)
     {
+        if (addons_open_)
+        {
+            const int n = static_cast<int>(app_.details(sheet_game_.id).addons.size());
+            if (input.nav == Direction::up || input.nav == Direction::down)
+            {
+                const int next = std::clamp(addons_top_ + (input.nav == Direction::down ? 1 : -1), 0,
+                                            std::max(0, n - kAddonRows));
+                if (next != addons_top_)
+                {
+                    addons_top_ = next;
+                    feedback.play(audio::Cue::focus, 1.0f, 0.35f);
+                }
+            }
+            if (input.is_pressed(Action::back) || input.is_pressed(Action::confirm))
+            {
+                feedback.play(audio::Cue::back);
+                addons_open_ = false;
+            }
+            return;
+        }
         const std::vector<SheetAction> actions = sheet_actions();
         const int count = static_cast<int>(actions.size());
-        if (input.nav == Direction::up || input.nav == Direction::down)
+        // A press of Up or Down moves between the actions; holding it (D-pad or
+        // left stick) past the repeat delay scrolls a long description instead.
+        const float held = input.is_held(Action::down) || input.stick_y > 0.5f ? 1.0f
+                           : input.is_held(Action::up) || input.stick_y < -0.5f ? -1.0f
+                                                                                 : 0.0f;
+        summary_hold_ = held != 0.0f ? summary_hold_ + dt : 0.0f;
+        const bool scrolling = summary_max_ > 0.0f && summary_hold_ > 0.35f;
+        if (scrolling)
+            summary_target_ = std::clamp(summary_target_ + held * 160.0f * dt, 0.0f, summary_max_);
+        if ((input.nav == Direction::up || input.nav == Direction::down) && !(scrolling || (input.nav_repeat && summary_max_ > 0.0f)))
         {
             const int next = std::clamp(action_ + (input.nav == Direction::down ? 1 : -1), 0, count - 1);
             if (next != action_)
@@ -520,6 +618,12 @@ class RommPS final : public app::Concept
                 feedback.play(audio::Cue::select);
                 sheet_open_ = false;
                 view_.open(app_, rommps::SyncView::kGame, g->id, g->name);
+            }
+            else if (a.kind == 5)
+            {
+                feedback.play(audio::Cue::modal_open);
+                addons_open_ = true;
+                addons_top_ = 0;
             }
             else
             {
@@ -590,17 +694,18 @@ class RommPS final : public app::Concept
                         clock_);
     }
 
-    void update_downloads(const InputFrame &input, float dt, app::Feedback &feedback)
+    // The transfer tab: what's queued and running.
+    void update_queue(const InputFrame &input, float dt, app::Feedback &feedback)
     {
-        const int count = static_cast<int>(app_.downloads().size());
+        const int count = static_cast<int>(app_.queue().size());
         // The list can get shorter at any tick (finished ones cleared, the payload restarted).
-        download_row_ = std::clamp(download_row_, 0, std::max(0, count - 1));
+        queue_row_ = std::clamp(queue_row_, 0, std::max(0, count - 1));
         if ((input.nav == Direction::up || input.nav == Direction::down) && count > 0)
         {
-            const int next = std::clamp(download_row_ + (input.nav == Direction::down ? 1 : -1), 0, count - 1);
-            if (next != download_row_)
+            const int next = std::clamp(queue_row_ + (input.nav == Direction::down ? 1 : -1), 0, count - 1);
+            if (next != queue_row_)
             {
-                download_row_ = next;
+                queue_row_ = next;
                 feedback.play(audio::Cue::focus);
             }
             else if (!input.nav_repeat)
@@ -608,23 +713,52 @@ class RommPS final : public app::Concept
         }
         if (input.is_pressed(Action::west) && count > 0)
         {
-            const auto &downloads = app_.downloads();
+            const auto &downloads = app_.queue();
             if (std::any_of(downloads.begin(), downloads.end(), [](const rommps::Download &d) { return d.finished(); }))
             {
-                app_.clear_finished_downloads();
-                download_row_ = 0;
+                app_.clear_finished_queue();
+                queue_row_ = 0;
                 feedback.play(audio::Cue::back);
             }
             else
                 refuse(feedback, 0.0f);
         }
-        if (count > 0 && download_row_ < static_cast<int>(app_.downloads().size()))
+        if (count > 0 && queue_row_ < static_cast<int>(app_.queue().size()))
         {
-            const rommps::Download &d = app_.downloads()[static_cast<std::size_t>(download_row_)];
+            const rommps::Download &d = app_.queue()[static_cast<std::size_t>(queue_row_)];
             if (d.cancellable())
                 hold_to_cancel(input, dt, &d, feedback);
+            else if (d.retryable() && input.is_pressed(Action::confirm))
+            {
+                app_.retry_download(d.id);
+                feedback.play(audio::Cue::select);
+            }
             else if (input.is_pressed(Action::confirm))
                 refuse(feedback, 0.0f);
+        }
+    }
+
+    // The Downloads tab: the games on this console, one per row.
+    void update_downloads(const InputFrame &input, float dt, app::Feedback &feedback)
+    {
+        const int count = static_cast<int>(app_.installed().size());
+        // The list can get shorter at any tick (a game removed on its sheet).
+        installed_row_ = std::clamp(installed_row_, 0, std::max(0, count - 1));
+        if ((input.nav == Direction::up || input.nav == Direction::down) && count > 0)
+        {
+            const int next = std::clamp(installed_row_ + (input.nav == Direction::down ? 1 : -1), 0, count - 1);
+            if (next != installed_row_)
+            {
+                installed_row_ = next;
+                feedback.play(audio::Cue::focus);
+            }
+            else if (!input.nav_repeat)
+                refuse(feedback, 0.0f);
+        }
+        if (input.is_pressed(Action::confirm) && count > 0)
+        {
+            feedback.play(audio::Cue::open);
+            open_sheet(*downloaded_game());
         }
     }
 
@@ -655,15 +789,47 @@ class RommPS final : public app::Concept
         // Right: the server, or what's wrong.
         const rommps::Status &s = app_.status();
         const bool old_payload = s.reachable && app_.payload_too_old();
-        std::string where = !s.known       ? "Connecting"
-                            : !s.reachable ? "The background service isn't running"
-                            : old_payload  ? "Updating the background service " + s.version
-                            : s.paired     ? s.user + " @ " + s.server
-                                           : "Not paired";
-        const float dot_x = 1824 - 12 - ui::text(list, fonts.regular, context_.fonts.regular.font->fit(where, 22, 640), 1824, 90,
-                                                 22, L.muted, gfx::Align::right);
+        const bool connected = s.known && s.reachable && !old_payload && s.paired;
+        float left = 1824; // where the line starts, for the dot
+        if (connected)
+        {
+            // "<user> @ host:port", the user in bold, and a lock when it's HTTPS.
+            const std::size_t scheme = s.server.find("://");
+            std::string host = scheme == std::string::npos ? s.server : s.server.substr(scheme + 3);
+            host = host.substr(0, host.find('/'));
+            if (s.server.rfind("https://", 0) == 0)
+            {
+                const Color c = L.muted;
+                list.bordered_rect({left - 11, 74, 8, 12}, 4, Color::rgb(0x000000, 0.0f), 2.0f, c); // shackle
+                list.rounded_rect({left - 14, 80, 14, 11}, 2, c);                                   // body
+                left -= 14 + 10;
+            }
+            left -= ui::text(list, fonts.regular, fonts.regular.font->fit(rommps::plain_text((" @ " + host).c_str()), 22, 460), left,
+                             90, 22, L.muted, gfx::Align::right);
+            left -= ui::text(list, fonts.semibold, fonts.semibold.font->fit(s.user, 22, 240), left, 90, 22, L.text,
+                             gfx::Align::right);
+        }
+        else
+        {
+            const std::string where = !s.known       ? "Connecting"
+                                      : !s.reachable ? "The background service isn't running"
+                                      : old_payload  ? "Updating the background service " + s.version
+                                                     : "Not paired";
+            left -= ui::text(list, fonts.regular, context_.fonts.regular.font->fit(where, 22, 640), left, 90, 22, L.muted,
+                             gfx::Align::right);
+        }
+        const float dot_x = left - 12;
+        // RomM not answering: the dot turns amber, and a line under it pulses.
+        const bool trouble = s.reachable && s.paired && !old_payload && !s.server_trouble.empty();
+        const float pulse = 0.55f + 0.45f * std::sin(age_ * 3.0f);
         list.circle(dot_x - 12, 83, 7,
-                    s.reachable && s.paired && !old_payload ? L.success : s.reachable ? L.warning : L.danger);
+                    trouble ? L.warning.with_alpha(pulse)
+                    : s.reachable && s.paired && !old_payload ? L.success
+                    : s.reachable ? L.warning
+                                  : L.danger);
+        if (trouble)
+            ui::text(list, fonts.semibold, "Difficulties connecting to server", 1824, 122, 20, L.warning.with_alpha(pulse),
+                     gfx::Align::right);
         list.pop_opacity();
     }
 
@@ -694,8 +860,8 @@ class RommPS final : public app::Concept
                                  "with your HEN's payload loader.",
                       x, panel.y + 190, 28, 1060, 42, L.panel_muted, 4);
         if (!starting && !app_.payload_error().empty())
-            ui::text(list, fonts.regular, fonts.regular.font->fit(app_.payload_error(), 22, 1060), x, panel.y + 340, 22,
-                     L.panel_muted.with_alpha(0.8f));
+            ui::text(list, fonts.regular, fonts.regular.font->fit(rommps::plain_text(app_.payload_error().c_str()), 22, 1060), x,
+                     panel.y + 340, 22, L.panel_muted.with_alpha(0.8f));
         if (s.known && !s.error.empty())
             ui::text(list, fonts.regular, fonts.regular.font->fit(s.error, 22, 1060), x, panel.y + 380, 22,
                      L.panel_muted.with_alpha(0.6f));
@@ -710,7 +876,6 @@ class RommPS final : public app::Concept
         const float in = tween::stagger(tab_age_, 1, 0.08f, 0.6f);
         list.push_opacity(in);
         const float x = kMargin + 30.0f * (1.0f - in);
-        ui::text(list, fonts.semibold, "SAVE SYNC", x, 212, 20, accent(), gfx::Align::left, 4.0f);
         if (!app_.config().save_sync)
         {
             ui::text(list, fonts.display, "Save sync is off", x - 4, 304, 80, L.text);
@@ -794,14 +959,14 @@ class RommPS final : public app::Concept
         library_.draw(list, context_.fonts, look(), app_, accent(), clock_, tab_age_);
     }
 
-    void draw_downloads(gfx::DrawList &list) const
+    void draw_queue(gfx::DrawList &list) const
     {
         const ui::Fonts &fonts = context_.fonts;
         const rommps::Look &L = look();
-        const auto &downloads = app_.downloads();
+        const auto &downloads = app_.queue();
         const float in = tween::stagger(tab_age_, 1, 0.08f, 0.6f);
         list.push_opacity(in);
-        ui::text(list, fonts.display, "Downloads", kMargin, 240, 64, L.text);
+        ui::text(list, fonts.display, "Queue", kMargin, 240, 64, L.text);
         // Top right: everything downloading at once, and what's waiting.
         double total_speed = 0;
         int running = 0, queued = 0;
@@ -838,15 +1003,20 @@ class RommPS final : public app::Concept
         }
         constexpr float kRowH = 110.0f;
         const float top = 300.0f;
-        const int first = std::max(0, download_row_ - 5);
-        list.rounded_rect({kMargin - 24, top + (download_position_.value - static_cast<float>(first)) * kRowH, 1776, kRowH - 14},
+        const float scroll = queue_scroll_.value;
+        // One row past the band on each side, hidden by the clip below.
+        const int first = std::max(0, static_cast<int>(std::floor(scroll)) - 1);
+        list.rounded_rect({kMargin - 24, top + (queue_position_.value - scroll) * kRowH, 1776, kRowH - 14},
                           26, L.text.with_alpha(0.1f));
-        for (int i = first; i < static_cast<int>(downloads.size()) && i < first + 6; ++i)
+        list.push_clip({0, top, 1920, 6 * kRowH});
+        for (int i = first; i < static_cast<int>(downloads.size()) && i < first + 9; ++i)
         {
             const rommps::Download &d = downloads[static_cast<std::size_t>(i)];
-            const float y = top + static_cast<float>(i - first) * kRowH;
+            const float y = top + (static_cast<float>(i) - scroll) * kRowH;
             ui::text(list, fonts.semibold, context_.fonts.semibold.font->fit(d.name, 28, 1100), kMargin, y + 42, 28, L.text);
-            std::string meta = d.platform + "  \xC2\xB7  ";
+            // "PlayStation  ·  Waiting". A download that failed before RomM said
+            // which platform the game is on has none: no dot in front then.
+            std::string meta = d.platform.empty() ? "" : d.platform + "  \xC2\xB7  ";
             if (d.running())
             {
                 char text[96];
@@ -854,8 +1024,14 @@ class RommPS final : public app::Concept
                               rommps::human_size(d.total).c_str());
                 meta += text;
             }
-            else if (d.status == "error")
-                meta += d.error;
+            else if (d.status == "error" && !d.error.empty())
+            {
+                // The service's errors are sentences in lower case; the row's
+                // other states start with a capital.
+                std::string error = d.error;
+                error[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(error[0])));
+                meta += error;
+            }
             else if (d.syncing())
                 meta += "Syncing saves";
             else if (d.status == "done" && !d.saves_note().empty())
@@ -864,7 +1040,7 @@ class RommPS final : public app::Concept
             {
                 static const char *const kStates[][2] = {{"queued", "Waiting"},
                                                          {"cancelling", "Cancelling"},
-                                                         {"cancelled", "Cancelled, nothing kept"},
+                                                         {"cancelled", "Cancelled"},
                                                          {"done", "Downloaded"}};
                 for (const auto &st : kStates)
                     if (d.status == st[0])
@@ -892,6 +1068,66 @@ class RommPS final : public app::Concept
             if (hold > 0)
                 list.rounded_rect({bar.x, bar.y, std::max(10.0f, bar.w * hold), bar.h}, 5, L.danger);
         }
+        list.pop_clip();
+        list.pop_opacity();
+    }
+
+    // The Downloads tab: every game this console keeps, as a list.
+    void draw_downloads(gfx::DrawList &list) const
+    {
+        const ui::Fonts &fonts = context_.fonts;
+        const rommps::Look &L = look();
+        const auto &games = app_.installed();
+        const float in = tween::stagger(tab_age_, 1, 0.08f, 0.6f);
+        list.push_opacity(in);
+        ui::text(list, fonts.display, "Downloads", kMargin, 240, 64, L.text);
+        // Top right: how many games this console keeps.
+        if (!games.empty())
+        {
+            char count[48];
+            std::snprintf(count, sizeof count, games.size() == 1 ? "1 game" : "%d games",
+                          static_cast<int>(games.size()));
+            ui::text(list, fonts.regular, count, 1824, 240, 24, L.muted, gfx::Align::right);
+        }
+        if (games.empty())
+        {
+            ui::text(list, fonts.regular, "Nothing on this console yet.", kMargin, 310, 28, L.muted);
+            ui::text(list, fonts.regular, "Games you download from your library land here.", kMargin, 348, 22,
+                     L.muted.with_alpha(0.7f));
+            list.pop_opacity();
+            return;
+        }
+        constexpr float kRowH = 110.0f;
+        const float top = 300.0f;
+        const float scroll = installed_scroll_.value;
+        // One row past the band on each side, hidden by the clip below.
+        const int first = std::max(0, static_cast<int>(std::floor(scroll)) - 1);
+        list.rounded_rect(
+            {kMargin - 24, top + (installed_position_.value - scroll) * kRowH, 1776, kRowH - 14}, 26,
+            L.text.with_alpha(0.1f));
+        list.push_clip({0, top, 1920, 6 * kRowH});
+        for (int i = first; i < static_cast<int>(games.size()) && i < first + 9; ++i)
+        {
+            const rommps::Game &g = games[static_cast<std::size_t>(i)];
+            const float y = top + (static_cast<float>(i) - scroll) * kRowH;
+            const Rect thumb{kMargin, y + 8, 66, 88};
+            rommps::draw_cover(list, fonts, L, app_, &g, thumb, 1.0f, 10, false);
+            ui::text(list, fonts.semibold, context_.fonts.semibold.font->fit(g.name, 28, 1160), kMargin + 96, y + 42,
+                     28, L.text);
+            const rommps::Platform *p = app_.platform_by_id(g.platform_id);
+            std::string meta = (p ? p->name + "  \xC2\xB7  " : std::string()) + rommps::human_size(g.size);
+            Color meta_colour = L.muted;
+            if (const rommps::Download *d = app_.download_for(g.id); d && d->active())
+            {
+                char pct[16];
+                std::snprintf(pct, sizeof pct, "%d%%", static_cast<int>(d->progress() * 100.0f));
+                meta = (p ? p->name + "  \xC2\xB7  " : std::string()) + "Downloading " + pct;
+                meta_colour = L.text;
+            }
+            ui::text(list, fonts.regular, context_.fonts.regular.font->fit(meta, 22, 1200), kMargin + 96, y + 80, 22,
+                     meta_colour);
+        }
+        list.pop_clip();
         list.pop_opacity();
     }
 
@@ -906,7 +1142,7 @@ class RommPS final : public app::Concept
         const Color acc = cover_accent(palette);
         const rommps::Platform *p = app_.platform_by_id(sheet_game_.platform_id);
         const float t = sheet_.value;
-        constexpr float kHeight = 520.0f;
+        constexpr float kHeight = 620.0f;
         const Rect sheet{120, gfx::kVirtualHeight - kHeight * t - 40.0f * t + 60.0f * (1.0f - t), 1680, kHeight};
         list.push_opacity(tween::clamp01(t * 1.4f));
         list.shadow({sheet.x, sheet.y + 20, sheet.w, sheet.h}, 44, 60, Color::rgb(0x000000, 0.5f));
@@ -915,27 +1151,107 @@ class RommPS final : public app::Concept
         list.bordered_rect(sheet, 44, Color::rgb(0x000000, 0.0f), 1.5f, L.outline);
 
         // The cover in its own shape, as large as fits the space for it.
-        const Rect space{sheet.x + 56, sheet.y + 56, 300, 400};
+        const Rect space{sheet.x + 56, sheet.y + 64, 330, 480};
         rommps::draw_cover(list, fonts, L, app_, g, rommps::fit_cover(rommps::cover_shape(app_, g), space), 1.0f, 26);
         const float x = space.x + space.w + 56;
-        ui::text(list, fonts.semibold, ui::upper(p ? p->name : ""), x, sheet.y + 92, 20, acc, gfx::Align::left, 4.0f);
-        float y = ui::paragraph(list, fonts.display, g->name, x - 2, sheet.y + 156, 54, 640, 62, L.panel_text, 2) - 18;
+        ui::text(list, fonts.semibold, ui::upper(p ? p->name : ""), x, sheet.y + 100, 20, acc, gfx::Align::left, 4.0f);
+        float y = ui::paragraph(list, fonts.display, g->name, x - 2, sheet.y + 170, 54, 640, 62, L.panel_text, 2) - 10;
         if (g->versions > 1)
         {
             const std::string v = g->version + "  \xC2\xB7  1 of " + std::to_string(g->versions) + " versions";
             ui::text(list, fonts.semibold, fonts.semibold.font->fit(v, 22, 660), x, y, 22, L.panel_text.with_alpha(0.7f));
-            y += 38;
+            y += 42;
         }
-        // RomM's details: year, publisher, genres; the summary; then the numbers.
         const rommps::Details &info = app_.details(g->id);
-        const std::string about = rommps::details_line(info);
-        if (!about.empty())
+        // A Switch game's title id, as a tag: what to look for in ProsperoEden.
+        if (!info.title_id.empty())
         {
-            ui::text(list, fonts.semibold, fonts.semibold.font->fit(about, 22, 660), x, y, 22, acc);
-            y += 38;
+            const std::string tag = "TITLE ID  " + info.title_id;
+            const float w = fonts.semibold.font->measure(tag, 18) + 28;
+            list.bordered_rect({x, y - 24, w, 34}, 17, acc.with_alpha(0.12f), 1.5f, acc.with_alpha(0.5f));
+            ui::text(list, fonts.semibold, tag, x + 14, y - 1, 18, L.panel_text.with_alpha(0.85f));
+            y += 50;
+        }
+        if (addons_open_)
+            draw_addons(list, info, x, y, sheet.y + sheet.h - 60.0f, acc);
+        else
+            draw_about(list, info, g, p, x, y, sheet, acc);
+        draw_sheet_actions(list, g, sheet);
+        list.pop_opacity();
+    }
+
+    // A Switch game's update and DLC, a row each with its title id; then a
+    // collection's other games and theirs.
+    void draw_addons(gfx::DrawList &list, const rommps::Details &info, float x, float y, float bottom, Color acc) const
+    {
+        const ui::Fonts &fonts = context_.fonts;
+        const rommps::Look &L = look();
+        ui::text(list, fonts.semibold, info.bundle ? "IN THIS FOLDER" : "UPDATES AND DLC", x, y, 20, acc,
+                 gfx::Align::left, 4.0f);
+        y += 46;
+        const int n = static_cast<int>(info.addons.size());
+        for (int i = addons_top_; i < n && i < addons_top_ + kAddonRows && y < bottom; ++i, y += 40)
+        {
+            const rommps::Details::Addon &a = info.addons[static_cast<std::size_t>(i)];
+            const bool own = i < n - info.bundle;
+            static const char *const kKind[] = {"Update", "DLC", "Game"};
+            // From the right: the size, the title id, then the name in what's left.
+            const std::string size = rommps::human_size(a.size);
+            const float id_right = x + 660 - fonts.regular.font->measure(size, 20) - 24;
+            const float id_left = a.title_id.empty() ? id_right : id_right - fonts.regular.font->measure(a.title_id, 18);
+            ui::text(list, fonts.semibold, kKind[a.kind], x, y, 20, own ? acc : L.panel_muted);
+            ui::text(list, fonts.regular, fonts.regular.font->fit(a.name, 20, std::max(80.0f, id_left - 20 - (x + 100))),
+                     x + 100, y, 20, L.panel_text);
+            if (!a.title_id.empty())
+                ui::text(list, fonts.regular, a.title_id, id_right, y, 18, L.panel_muted, gfx::Align::right);
+            ui::text(list, fonts.regular, size, x + 660, y, 20, L.panel_muted, gfx::Align::right);
+        }
+        if (n > kAddonRows)
+            ui::text(list, fonts.regular,
+                     std::to_string(addons_top_ + 1) + "-" + std::to_string(std::min(n, addons_top_ + kAddonRows)) +
+                         " of " + std::to_string(n),
+                     x, y + 6, 20, L.panel_muted);
+    }
+
+    // RomM's details: year, publisher, genres; the summary; then the numbers.
+    void draw_about(gfx::DrawList &list, const rommps::Details &info, const rommps::Game *g, const rommps::Platform *p,
+                    float x, float y, const Rect &sheet, Color acc) const
+    {
+        const ui::Fonts &fonts = context_.fonts;
+        const rommps::Look &L = look();
+        const std::string about = rommps::details_line(info);
+        // RomM's rating closes the line, after a star.
+        char rating[24] = "";
+        if (info.rating > 0)
+            std::snprintf(rating, sizeof rating, info.rating > 10 ? "Rating %.0f/100" : "Rating %.1f/10", info.rating);
+        const float rating_w = rating[0] ? fonts.semibold.font->measure(rating, 22) + 30 : 0.0f;
+        if (!about.empty() || rating[0])
+        {
+            float w = about.empty() ? -24.0f
+                                    : ui::text(list, fonts.semibold, fonts.semibold.font->fit(about, 22, 660 - rating_w - 24),
+                                               x, y, 22, acc);
+            if (rating[0])
+            {
+                list.star(x + w + 24 + 9, y - 8, 10, acc);
+                ui::text(list, fonts.semibold, rating, x + w + 24 + 26, y, 22, L.panel_text.with_alpha(0.85f));
+            }
+            y += 52;
         }
         if (!info.summary.empty())
-            y = ui::paragraph(list, fonts.regular, info.summary, x, y, 20, 660, 28, L.panel_text.with_alpha(0.85f), 3) + 6;
+        {
+            // Three lines show; holding Up or Down scrolls the rest through.
+            constexpr float kLine = 30.0f, kShown = 3 * kLine;
+            const float lines = static_cast<float>(fonts.regular.font->wrap(info.summary, 20, 660).size());
+            summary_max_ = std::max(0.0f, lines * kLine - kShown);
+            list.push_clip({x - 4, y - 22, 680, kShown});
+            ui::paragraph(list, fonts.regular, info.summary, x, y - summary_scroll_.value, 20, 660, kLine,
+                          L.panel_text.with_alpha(0.85f));
+            list.pop_clip();
+            // More below: a small marker under the window's right edge.
+            if (summary_max_ > 0.0f && summary_scroll_.value < summary_max_ - 1.0f)
+                list.triangle({x + 660 - 14, y - 22 + kShown + 2, 14, 8}, L.panel_text.with_alpha(0.5f), 0.0f, 3.14159f);
+            y += std::min(lines, 3.0f) * kLine + 22;
+        }
         std::vector<std::string> facts;
         if (info.play_ms > 0)
             facts.push_back("Played " + rommps::play_time(info.play_ms));
@@ -951,28 +1267,31 @@ class RommPS final : public app::Concept
             facts.push_back("Main story ~" + std::to_string(static_cast<int>(info.main_story_s / 3600.0 + 0.5)) + " h");
         if (!info.players.empty())
             facts.push_back(info.players + (info.players == "1" ? " player" : " players"));
-        if (info.rating > 0)
-        {
-            char r[24];
-            std::snprintf(r, sizeof r, info.rating > 10 ? "%.0f/100" : "%.1f/10", info.rating);
-            facts.push_back(r);
-        }
         std::string line;
         for (const std::string &f : facts)
             line += (line.empty() ? "" : "  \xC2\xB7  ") + f;
-        // The file and emulator, last.
+        // The file and emulator, last; for an archive, why it can't come down.
         std::string file = rommps::human_size(g->size) + (g->multi ? ", several files" : "");
+        if (info.updates || info.dlc)
+            file += " + " + std::string(info.updates ? "update" : "") + (info.updates && info.dlc ? " and " : "") +
+                    (info.dlc ? std::to_string(info.dlc) + " DLC" : "");
         if (p && !p->profile.empty())
             file += "  \xC2\xB7  plays with " + p->profile;
-        y = std::max(y, sheet.y + 330.0f);
+        const bool archived = g->archived || !info.archived.empty();
+        if (archived)
+            file = info.archived.empty() ? "This download is archived. Decompress it on your RomM server first."
+                                         : info.archived;
         if (!line.empty())
-        {
-            ui::paragraph(list, fonts.regular, line, x, y, 20, 660, 28, L.panel_muted, 2);
-            y += 60;
-        }
-        ui::text(list, fonts.regular, context_.fonts.regular.font->fit(file, 20, 660), x, std::min(y, sheet.y + 470.0f), 20,
-                 L.panel_muted);
+            ui::paragraph(list, fonts.regular, line, x, y, 20, 660, 32, L.panel_muted, 2);
+        // The file line keeps to the sheet's foot.
+        ui::text(list, fonts.regular, context_.fonts.regular.font->fit(file, 20, 660), x, sheet.y + sheet.h - 60, 20,
+                 archived ? L.danger : L.panel_muted);
+    }
 
+    void draw_sheet_actions(gfx::DrawList &list, const rommps::Game *g, const Rect &sheet) const
+    {
+        const ui::Fonts &fonts = context_.fonts;
+        const rommps::Look &L = look();
         const std::vector<SheetAction> actions = sheet_actions();
         const float ax = sheet.x + sheet.w - 56 - 460;
         const float ay = sheet.y + 76;
@@ -993,7 +1312,6 @@ class RommPS final : public app::Concept
             ui::text(list, fonts.semibold, context_.fonts.semibold.font->fit(a.label, 26, 400), ax + 36, y + 46, 26,
                      (focused ? L.on_highlight : L.panel_text).with_alpha(a.enabled ? 1.0f : 0.5f));
         }
-        list.pop_opacity();
     }
 
     void draw_toast(gfx::DrawList &list) const
@@ -1004,13 +1322,30 @@ class RommPS final : public app::Concept
         const ui::Fonts &fonts = context_.fonts;
         const float a = tween::clamp01(app_.toast_age() * 5.0f) * tween::clamp01((4.0f - app_.toast_age()) * 2.0f);
         list.push_opacity(a);
-        const std::string fitted = fonts.regular.font->fit(message, 24, 1100);
+        // Beside the button hints, on their line, when there's room for it;
+        // above them when they leave too little.
+        const float room = std::min(1180.0f, hints_left_ - 24.0f - kMargin);
+        const Rect r = room >= 480.0f ? Rect{kMargin, 978, room, 64} : Rect{kMargin, 892, 1180, 64};
+        const std::string fitted = fonts.regular.font->fit(message, 24, r.w - 64);
         const rommps::Look &L = look();
-        const Rect r{kMargin, 960, 1180, 64};
         list.rounded_rect(r, 32, L.covers ? Color::rgb(0x14182e, 0.92f) : L.page.with_alpha(0.95f));
         list.bordered_rect(r, 32, Color::rgb(0x000000, 0.0f), 1.5f, L.outline);
         ui::text(list, fonts.regular, fitted, r.x + 32, r.y + 41, 24, L.text);
         list.pop_opacity();
+    }
+
+    // The hint row floats over the page's bottom corner: it gets the panel
+    // treatment (draw_panel: shadow, fill, outline), so it reads over the
+    // covers it crosses instead of hovering on them.
+    void hint_row(gfx::DrawList &list, const ui::Fonts &fonts, const ui::GlyphStyle &style,
+                  const ui::Hint *hints, int count) const
+    {
+        const ui::HintLayout layout; // the kit's bottom row: glyphs 40 tall, cy 1010
+        const float width = ui::measure_hints(fonts, hints, count, layout);
+        const Rect plate{1824.0f - width - 30.0f, layout.cy - 38.0f, width + 60.0f, 76.0f};
+        hints_left_ = std::min(hints_left_, plate.x);
+        draw_panel(list, plate);
+        ui::draw_hints(list, fonts, style, hints, count, 1824, true);
     }
 
     void draw_hints(gfx::DrawList &list) const
@@ -1020,7 +1355,7 @@ class RommPS final : public app::Concept
         if (setting_up_)
         {
             const std::vector<ui::Hint> hints = setup_.hints();
-            ui::draw_hints(list, fonts, style, hints.data(), static_cast<int>(hints.size()), 1824, true);
+            hint_row(list, fonts, style, hints.data(), static_cast<int>(hints.size()));
             return;
         }
         const bool ready = app_.status().paired && app_.status().setup_complete;
@@ -1028,14 +1363,18 @@ class RommPS final : public app::Concept
             return;
         if (sheet_open_)
         {
-            const ui::Hint hints[] = {{ui::Button::cross, "Choose"}, {ui::Button::circle, "Back"}};
-            ui::draw_hints(list, fonts, style, hints, 2, 1824, true);
+            // Scrolling, with the D-pad or the left stick, when there's something to scroll.
+            const bool scroll = addons_open_ || summary_max_ > 0.0f;
+            const ui::Hint hints[] = {{ui::Button::dpad, addons_open_ ? "Scroll" : "Hold to scroll", ui::Button::left_stick},
+                                      {ui::Button::cross, "Choose"},
+                                      {ui::Button::circle, "Back"}};
+            hint_row(list, fonts, style, scroll ? hints : hints + 1, scroll ? 3 : 2);
             return;
         }
         if (view_.active())
         {
             const std::vector<ui::Hint> hints = view_.hints();
-            ui::draw_hints(list, fonts, style, hints.data(), static_cast<int>(hints.size()), 1824, true);
+            hint_row(list, fonts, style, hints.data(), static_cast<int>(hints.size()));
             return;
         }
         list.push_opacity(tween::stagger(age_, 8, 0.08f, 0.5f) * (1.0f - sheet_.value));
@@ -1046,20 +1385,27 @@ class RommPS final : public app::Concept
             std::vector<ui::Hint> hints{close, pages};
             if (app_.config().save_sync)
                 hints.push_back({ui::Button::cross, home_focus_ == 0 ? "Sync now" : "Open"});
-            ui::draw_hints(list, fonts, style, hints.data(), static_cast<int>(hints.size()), 1824, true);
+            hint_row(list, fonts, style, hints.data(), static_cast<int>(hints.size()));
         }
         else if (tab_ == kLibrary)
         {
             const std::vector<ui::Hint> hints = library_.hints();
-            ui::draw_hints(list, fonts, style, hints.data(), static_cast<int>(hints.size()), 1824, true);
+            hint_row(list, fonts, style, hints.data(), static_cast<int>(hints.size()));
         }
         else if (tab_ == kDownloads)
         {
+            const ui::Hint hints[] = {pages, {ui::Button::cross, "Details"}};
+            hint_row(list, fonts, style, hints, 2);
+        }
+        else if (tab_ == kQueue)
+        {
             // Cross on a download that's still going stops it and deletes what
-            // came so far; Square takes the finished ones off the list.
-            const auto &downloads = app_.downloads();
-            const bool on_active = download_row_ < static_cast<int>(downloads.size()) &&
-                                   downloads[static_cast<std::size_t>(download_row_)].cancellable();
+            // came so far, on one that failed or was cancelled tries it again;
+            // Square takes the finished ones off the list.
+            const auto &downloads = app_.queue();
+            const bool on_row = queue_row_ < static_cast<int>(downloads.size());
+            const bool on_active = on_row && downloads[static_cast<std::size_t>(queue_row_)].cancellable();
+            const bool on_failed = on_row && downloads[static_cast<std::size_t>(queue_row_)].retryable();
             const bool any_finished = std::any_of(downloads.begin(), downloads.end(),
                                                   [](const rommps::Download &d) { return d.finished(); });
             std::vector<ui::Hint> hints{pages};
@@ -1067,12 +1413,14 @@ class RommPS final : public app::Concept
                 hints.push_back({ui::Button::square, "Clear finished"});
             if (on_active)
                 hints.push_back({ui::Button::cross, "Hold to cancel and delete"});
-            ui::draw_hints(list, fonts, style, hints.data(), static_cast<int>(hints.size()), 1824, true);
+            if (on_failed)
+                hints.push_back({ui::Button::cross, "Retry"});
+            hint_row(list, fonts, style, hints.data(), static_cast<int>(hints.size()));
         }
         else
         {
             const ui::Hint hints[] = {close, pages, {ui::Button::cross, settings_.cross_hint(app_)}};
-            ui::draw_hints(list, fonts, style, hints, 3, 1824, true);
+            hint_row(list, fonts, style, hints, 3);
         }
         list.pop_opacity();
     }
@@ -1090,16 +1438,30 @@ class RommPS final : public app::Concept
     ui::SpringColor palette_[4];
     ui::Pulse nudge_;
     float nudge_direction_ = 0.0f;
+    mutable float hints_left_ = 1920.0f; // where this frame's button hints start, for the toast
     bool sheet_open_ = false;
+    bool addons_open_ = false; // the sheet lists the game's update and DLC
+    int addons_top_ = 0;       // the first of them shown
     tween::Spring sheet_;
     int action_ = 0;
     tween::Spring action_position_;
-    int download_row_ = 0;
+    // The description, a few lines at a time: how far it's scrolled (eased),
+    // where to, how long Up or Down has been held, and how far it can go (from
+    // the last draw).
+    tween::Spring summary_scroll_;
+    float summary_target_ = 0.0f;
+    float summary_hold_ = 0.0f;
+    mutable float summary_max_ = 0.0f;
+    int queue_row_ = 0;
     float cancel_hold_ = 0; // seconds Cross has been held to cancel cancel_job_; -1 once done
     float remove_hold_ = -1; // seconds Cross has been held on remove; -1 waits for a press
     int cancel_job_ = 0;
     bool cancel_seen_ = false; // hold_to_cancel ran this frame
-    tween::Spring download_position_;
+    tween::Spring queue_position_;
+    tween::Spring queue_scroll_; // the window's first row, eased
+    int installed_row_ = 0;    // the Downloads list's focus
+    tween::Spring installed_position_;
+    tween::Spring installed_scroll_;
     rommps::SettingsPage settings_;
     rommps::LibraryPage library_;
     rommps::Game sheet_game_; // the game the details sheet is for

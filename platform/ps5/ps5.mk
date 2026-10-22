@@ -23,9 +23,9 @@ build/ps5/gen/emulators_json.h: platform/ps5/emulators.json tools/embed.py
 	python3 -c "import json,sys; json.load(open(sys.argv[1]))" $<
 	python3 tools/embed.py $< $@ EMULATORS_JSON
 
-PS5_PLAT := platform/ps5/platform.c platform/console/console.c
+PS5_PLAT := platform/ps5/platform.c platform/ps5/mounts.c platform/console/console.c
 
-$(PS5_ELF): $(SRCS) $(PS5_PLAT) platform/console/console.h $(HDRS) $(UI_HEADER) build/ps5/gen/cacert_pem.h build/ps5/gen/emulators_json.h
+$(PS5_ELF): $(SRCS) $(PS5_PLAT) platform/console/console.h platform/ps5/ps5.h $(HDRS) $(GEN_HEADERS) build/ps5/gen/cacert_pem.h build/ps5/gen/emulators_json.h
 	@mkdir -p $(dir $@)
 	$(PS5_CC) $(COMMON_CFLAGS) -Ibuild/ps5/gen -Iplatform/console -DROMM_EMBED_CA $$($(PS5_PKGCONF) --cflags libcurl) -DCURL_STATICLIB \
 		-o $@ $(SRCS) $(PS5_PLAT) \

@@ -1,9 +1,12 @@
 #include "profiles.h"
 
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
+#include "config.h"
 #include "detect.h"
 #include "platform.h"
 
@@ -29,7 +32,7 @@ static const char *DEFAULT_PROFILES_JSON =
     "{\"romm\":[\"gba\"],\"dir\":\"gba\",\"emulator\":\"mgba\",\"core_name\":\"mGBA\"},"
     "{\"romm\":[\"gb\"],\"dir\":\"gb\",\"emulator\":\"mgba\",\"core_name\":\"mGBA\"},"
     "{\"romm\":[\"gbc\"],\"dir\":\"gbc\",\"emulator\":\"mgba\",\"core_name\":\"mGBA\"},"
-    "{\"romm\":[\"genesis-slash-megadrive\",\"genesis\",\"megadrive\"],\"dir\":\"megadrive\",\"emulator\":\"genesis_plus_gx\",\"core_name\":\"Genesis Plus GX\"},"
+    "{\"romm\":[\"genesis\",\"genesis-slash-megadrive\",\"megadrive\"],\"dir\":\"megadrive\",\"emulator\":\"genesis_plus_gx\",\"core_name\":\"Genesis Plus GX\"},"
     "{\"romm\":[\"sms\",\"mastersystem\"],\"dir\":\"mastersystem\",\"emulator\":\"genesis_plus_gx\",\"core_name\":\"Genesis Plus GX\"},"
     "{\"romm\":[\"gamegear\",\"gg\"],\"dir\":\"gamegear\",\"emulator\":\"genesis_plus_gx\",\"core_name\":\"Genesis Plus GX\"},"
     "{\"romm\":[\"segacd\",\"sega-cd\"],\"dir\":\"segacd\",\"emulator\":\"genesis_plus_gx\",\"core_name\":\"Genesis Plus GX\"},"
@@ -37,8 +40,9 @@ static const char *DEFAULT_PROFILES_JSON =
     "{\"romm\":[\"arcade\",\"fbneo\",\"neogeoaes\",\"neogeomvs\",\"cps1\",\"cps2\",\"cps3\"],\"dir\":\"fbneo\",\"emulator\":\"fbneo\",\"core_name\":\"FinalBurn Neo\"},"
     /* Saves made of several files, synced as one zip per game. */
     "{\"romm\":[\"ps2\"],\"dir\":\"ps2\",\"emulator\":\"pcsx2\",\"core_name\":\"LRPS2\",\"save_exts\":\".ps2\","
-    "\"sync_requires_option\":{\"key\":\"pcsx2_shared_memory_cards\",\"value\":\"disabled\",\"default\":\"enabled\","
-    "\"hint\":\"LRPS2 uses one shared memory card for all games. Turn off Shared Memory Cards in the core options to give each game its own card, which then syncs.\"}},"
+    "\"memcards\":\"{bios}/pcsx2/memcards/Mcd001.ps2,{bios}/pcsx2/memcards/Mcd002.ps2\","
+    "\"cards\":{\"default\":\"shared\",\"modes\":\"per_game,shared\",\"change\":\"Turn off Shared Memory Cards in LRPS2's core options\","
+    "\"setting\":{\"core_option\":\"pcsx2_shared_memory_cards\",\"per_game\":\"disabled\",\"shared\":\"enabled\",\"default\":\"enabled\"}}},"
     "{\"romm\":[\"psp\"],\"dir\":\"psp\",\"emulator\":\"ppsspp\",\"core_name\":\"PPSSPP\",\"save_layout\":\"psp\"},"
     "{\"romm\":[\"ngc\",\"gamecube\"],\"dir\":\"gamecube\",\"emulator\":\"dolphin\",\"core_name\":\"Dolphin\",\"save_layout\":\"gci\"},"
     "{\"romm\":[\"wii\"],\"dir\":\"wii\",\"emulator\":\"dolphin\",\"core_name\":\"Dolphin\",\"save_layout\":\"wii\"}"
@@ -59,7 +63,7 @@ static const char *DEFAULT_PROFILES_JSON =
     "{\"romm\":[\"snes\",\"sfam\"],\"emulator\":\"mednafen_snes\"},"
     "{\"romm\":[\"gb\",\"gbc\"],\"emulator\":\"mednafen_gb\"},"
     "{\"romm\":[\"gba\"],\"emulator\":\"mednafen_gba\"},"
-    "{\"romm\":[\"genesis-slash-megadrive\",\"genesis\",\"megadrive\",\"sms\",\"gamegear\"],\"emulator\":\"mednafen_md\"},"
+    "{\"romm\":[\"genesis\",\"genesis-slash-megadrive\",\"megadrive\",\"sms\",\"gamegear\"],\"emulator\":\"mednafen_md\"},"
     "{\"romm\":[\"tg16\",\"turbografx16--1\",\"pce\",\"pcengine\"],\"emulator\":\"mednafen_pce\"},"
     "{\"romm\":[\"ngp\",\"ngpc\",\"neo-geo-pocket\",\"neo-geo-pocket-color\"],\"emulator\":\"mednafen_ngp\"},"
     "{\"romm\":[\"wonderswan\",\"wonderswan-color\",\"ws\",\"wsc\"],\"emulator\":\"mednafen_wswan\"},"
@@ -121,7 +125,7 @@ static int ra_cfg_get(const char *cfg, const char *key, char *out, size_t n) {
     size_t kl = strlen(key);
     for (const char *line = cfg; line && *line;) {
         while (*line == ' ' || *line == '\t') line++;
-        if (!strncmp(line, key, kl) && (line[kl] == ' ' || line[kl] == '=')) {
+        if (!strncmp(line, key, kl) && (line[kl] == ' ' || line[kl] == '\t' || line[kl] == '=')) {
             const char *q = strchr(line, '"');
             const char *eol = strchr(line, '\n');
             if (q && (!eol || q < eol)) {
@@ -133,6 +137,18 @@ static int ra_cfg_get(const char *cfg, const char *key, char *out, size_t n) {
                     out[l] = 0;
                     return 1;
                 }
+            }
+            /* An ini's unquoted value (Flycast's emu.cfg: "PerGameVmu = yes"). */
+            const char *eq = strchr(line, '=');
+            if (eq && (!eol || eq < eol)) {
+                const char *v = eq + 1, *end = eol ? eol : v + strlen(v);
+                while (v < end && (*v == ' ' || *v == '\t')) v++;
+                while (end > v && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r')) end--;
+                size_t l = (size_t)(end - v);
+                if (l >= n) l = n - 1;
+                memcpy(out, v, l);
+                out[l] = 0;
+                return 1;
             }
         }
         line = strchr(line, '\n');
@@ -191,7 +207,7 @@ static void override_names(const char *rom_path, char *game, size_t gn, char *cd
 
 /* A core option, looked up the way RetroArch does: per game, per content
  * folder, per core, then the global options file. */
-static int core_option(const profile_map *m, const char *game, const char *cdir, char *out, size_t n) {
+static int core_option(const profile_map *m, const char *key, const char *game, const char *cdir, char *out, size_t n) {
     const char *names[3] = {game, cdir, m->core_name};
     char path[PATH_MAX_LEN];
     for (int i = 0; i < 4; i++) {
@@ -202,11 +218,37 @@ static int core_option(const profile_map *m, const char *game, const char *cdir,
             snprintf(path, sizeof path, "%s/retroarch-core-options.cfg", m->ra_cfg_dir);
         }
         char *txt = read_file(path, NULL);
-        int found = txt && ra_cfg_get(txt, m->req_key, out, n);
+        int found = txt && ra_cfg_get(txt, key, out, n);
         free(txt);
         if (found) return 1;
     }
     return 0;
+}
+
+/* val is one of the comma separated list's values. */
+static int in_list_ci(const char *val, const char *list) {
+    char buf[256], *save = NULL;
+    str_copy(buf, sizeof buf, list);
+    for (char *t = strtok_r(buf, ",", &save); t; t = strtok_r(NULL, ",", &save))
+        if (str_ieq(t, val)) return 1;
+    return 0;
+}
+
+/* Which memory cards the emulator keeps now, "per_game" or "shared", from
+ * the setting the platform's "cards" names (a core option, or a line of the
+ * emulator's own settings file), else its default. */
+static void cards_mode_now(profile_map *m) {
+    char val[96] = "";
+    int found = 0;
+    if (m->cards_option[0] && m->ra_cfg_dir[0]) found = core_option(m, m->cards_option, NULL, NULL, val, sizeof val);
+    else if (m->cards_file[0] && m->cards_key[0]) {
+        char *txt = read_file(m->cards_file, NULL);
+        found = txt && ra_cfg_get(txt, m->cards_key, val, sizeof val);
+        free(txt);
+    }
+    str_copy(m->cards_mode, sizeof m->cards_mode, m->cards_default);
+    if (found && in_list_ci(val, m->cards_per_game)) str_copy(m->cards_mode, sizeof m->cards_mode, "per_game");
+    else if (found && in_list_ci(val, m->cards_shared)) str_copy(m->cards_mode, sizeof m->cards_mode, "shared");
 }
 
 static void check_requirement(const profile_map *m, const char *game, const char *cdir, int *sync, char *note,
@@ -216,13 +258,24 @@ static void check_requirement(const profile_map *m, const char *game, const char
     if (m->sync_off) str_copy(note, nn, "save sync is off for this platform");
     if (!m->req_key[0] || !m->base_sync_saves) return;
     char val[64];
-    if (!m->ra_cfg_dir[0] || !core_option(m, game, cdir, val, sizeof val)) str_copy(val, sizeof val, m->req_default);
-    if (str_ieq(val, m->req_value)) return;
+    if (!m->ra_cfg_dir[0] || !core_option(m, m->req_key, game, cdir, val, sizeof val)) str_copy(val, sizeof val, m->req_default);
+    if (in_list_ci(val, m->req_value)) return;
     *sync = 0;
     if (m->req_hint[0])
         str_copy(note, nn, m->req_hint);
     else
         snprintf(note, nn, "saves sync when core option %s is \"%s\" (now \"%s\")", m->req_key, m->req_value, val);
+}
+
+int profile_ra_dir(const profile_map *m, const char *key, char *out, size_t n) {
+    char path[PATH_MAX_LEN];
+    out[0] = 0;
+    if (!m->ra_cfg_dir[0]) return 0;
+    path_join(path, sizeof path, m->ra_cfg_dir, "retroarch.cfg");
+    char *cfg = read_file(path, NULL);
+    if (cfg) ra_apply(cfg, key, m->root, out, n);
+    free(cfg);
+    return out[0] != 0;
 }
 
 void profile_rules_for(const profile_map *m, const char *rom_path, rom_rules *out) {
@@ -276,6 +329,135 @@ static int profile_lists(const cJSON *profile, const char *list, const char *key
 
 int profiles_excludes(const cJSON *profile, const char *key) { return profile_lists(profile, "exclude", key); }
 
+/* Where an app folder's path is inside the app's sandbox: a folder in
+ * <homebrew>/<title>/ is <sandbox>/app0/... ("PPSA99248", "app0/games"). */
+static int app0_path(const char *dir, char *title, size_t tn, char *into, size_t in) {
+    const char *const *hb = plat_info()->homebrew_dirs;
+    for (int i = 0; hb && hb[i]; i++) {
+        size_t l = strlen(hb[i]);
+        if (strncmp(dir, hb[i], l) != 0 || dir[l] != '/') continue;
+        const char *t = dir + l + 1, *rest = strchr(t, '/');
+        if (!rest || rest - t != 9 || !rest[1] || tn < 10) return 0;
+        for (int k = 0; k < 9; k++)
+            if (k < 4 ? !(t[k] >= 'A' && t[k] <= 'Z') : !(t[k] >= '0' && t[k] <= '9')) return 0;
+        memcpy(title, t, 9);
+        title[9] = 0;
+        return snprintf(into, in, "app0%s", rest) < (int)in;
+    }
+    return 0;
+}
+
+/* An extra with "mount_games" plays the main emulator's games through a mount
+ * in its sandbox, so they aren't copied (bfs has no hard links). Not when the
+ * main one's folder holds other systems' games too (Porpoise: GameCube and
+ * Wii), or the extra's own folder has games that aren't the main one's: the
+ * mount would hide them. Copies the main one has too are RommPS's, from
+ * before mounts (library.c clears them out). */
+static void mount_main_games(profile_map *maps, int n, profile_map *x) {
+    if (!x->extra || !x->mount_games || !plat_info()->can_mount) return;
+    char sys[64], title[16], into[256];
+    str_copy(sys, sizeof sys, x->romm_slugs);
+    sys[strcspn(sys, ",")] = 0;
+    const profile_map *m = profile_find_for_platform(maps, n, sys, NULL);
+    if (!m || m == x || m->extra || !strcmp(m->rom_dir, x->rom_dir)) return;
+    if (x->mount_games == 2) {
+        /* It leaves its sandbox and reads the real folder under /data. */
+        const cJSON *ids = cJSON_GetObjectItemCaseSensitive(detect_catalog_entry(x->profile_id), "title_ids");
+        const char *tid = cJSON_IsString(cJSON_GetArrayItem(ids, 0)) ? cJSON_GetArrayItem(ids, 0)->valuestring : "";
+        if (strlen(tid) != 9 || strncmp(x->rom_dir, "/data/", 6) != 0 || !x->rom_dir[6]) return;
+        str_copy(title, sizeof title, tid);
+        if (snprintf(into, sizeof into, "%s", x->rom_dir) >= (int)sizeof into) return;
+    } else if (!app0_path(x->rom_dir, title, sizeof title, into, sizeof into)) {
+        return;
+    }
+    /* Another emulator playing the games in this one's folder (SwanStationPS5
+     * in PSXS5's) would see them go while the mount is on: both keep copies. */
+    for (int k = 0; k < n; k++) {
+        const char *theirs = maps[k].own_rom_dir[0] ? maps[k].own_rom_dir : maps[k].rom_dir;
+        /* Unless it gets the same mount there too (PSXS5 and SwanStationPS5
+         * on /data/PSXS5/games, each while it runs). */
+        const int mounts_too = maps[k].extra && maps[k].mount_games == x->mount_games && x->mount_games == 2;
+        if (&maps[k] != x && strcmp(maps[k].profile_id, x->profile_id) != 0 && !strcmp(theirs, x->rom_dir) && !mounts_too) {
+            snprintf(x->mount_note, sizeof x->mount_note, "%s plays the games in its folder too: they're copied from %s",
+                     maps[k].profile_name, m->profile_name);
+            return;
+        }
+    }
+    for (int k = 0; k < n; k++)
+        if (&maps[k] != m && !strcmp(maps[k].rom_dir, m->rom_dir) && strcmp(maps[k].profile_id, m->profile_id) == 0) {
+            snprintf(x->mount_note, sizeof x->mount_note, "%s keeps other systems' games in the same folder",
+                     m->profile_name);
+            return;
+        }
+    /* With our mount on it (the app runs), what's there is the main one's. */
+    DIR *d = plat_is_mount(x->rom_dir) ? NULL : opendir(x->rom_dir);
+    struct dirent *de;
+    int own = 0;
+    while (d && (de = readdir(d))) {
+        if (de->d_name[0] == '.' || ext_in_list(de->d_name, ".part,.tmp")) continue;
+        char there[PATH_MAX_LEN];
+        path_join(there, sizeof there, m->rom_dir, de->d_name);
+        own += !file_exists(there) && !dir_exists(there);
+    }
+    if (d) closedir(d);
+    if (own) {
+        x->mount_blocked = own;
+        snprintf(x->mount_note, sizeof x->mount_note, "%d game%s of its own in %s: they're copied from %s instead", own,
+                 own == 1 ? "" : "s", x->rom_dir, m->profile_name);
+        return;
+    }
+    str_copy(x->own_rom_dir, sizeof x->own_rom_dir, x->rom_dir);
+    str_copy(x->rom_dir, sizeof x->rom_dir, m->rom_dir);
+    str_copy(x->mount_title, sizeof x->mount_title, title);
+    str_copy(x->mount_into, sizeof x->mount_into, into);
+}
+
+/* One memory card method per system, never both: the one the user chose
+ * (config_card_mode) if the system's main emulator can keep it, else the one
+ * the main emulator keeps now. An emulator keeping the other method syncs no
+ * cards at all: shared ones aren't backed up, and its own per game aren't
+ * synced, with a note saying why. */
+static void card_methods(profile_map *maps, int cnt) {
+    for (int i = 0; i < cnt; i++) {
+        profile_map *m = &maps[i];
+        if (!m->cards_mode[0]) continue;
+        char sys[64];
+        str_copy(sys, sizeof sys, m->romm_slugs);
+        sys[strcspn(sys, ",")] = 0;
+        const profile_map *main = m;
+        for (int k = 0; k < cnt; k++) {
+            char sk[64];
+            str_copy(sk, sizeof sk, maps[k].romm_slugs);
+            sk[strcspn(sk, ",")] = 0;
+            if (!maps[k].extra && maps[k].cards_mode[0] && !strcmp(sk, sys)) {
+                main = &maps[k];
+                break;
+            }
+        }
+        const char *chosen = config_card_mode(sys);
+        const char *method = chosen[0] && in_list_ci(chosen, main->cards_modes) ? chosen : main->cards_mode;
+        str_copy(m->cards_method, sizeof m->cards_method, method);
+        m->cards_active = !strcmp(m->cards_mode, method);
+        /* Keeping shared cards, a game's own card files (left from before) don't sync. */
+        if (m->cards_active && !strcmp(method, "shared")) {
+            m->sync_saves = m->base_sync_saves = 0;
+            if (!m->sync_note[0]) str_copy(m->sync_note, sizeof m->sync_note, "Shared memory cards: synced whole, as RomM memory cards.");
+        }
+        if (m->cards_active) continue;
+        if (!strcmp(method, "shared")) {
+            m->sync_saves = m->base_sync_saves = 0;
+            str_copy(m->sync_note, sizeof m->sync_note,
+                     "Its memory cards don't sync: it keeps one per game, and this system uses shared cards.");
+        } else if (m->cards_change[0]) {
+            snprintf(m->sync_note, sizeof m->sync_note, "Its memory cards don't sync: they're shared, and this system uses one per game. %s.",
+                     m->cards_change);
+        } else {
+            str_copy(m->sync_note, sizeof m->sync_note,
+                     "Its memory cards don't sync: they're shared, and this system uses one per game.");
+        }
+    }
+}
+
 int profiles_expand(const cJSON *profiles, profile_map **out) {
     int cap = 0, cnt = 0;
     profile_map *maps = NULL;
@@ -286,7 +468,6 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
         str_copy(root, sizeof root, jstr(p, NULL, "root", ""));
 
         char ra_save[PATH_MAX_LEN] = "", ra_state[PATH_MAX_LEN] = "", ra_sys[PATH_MAX_LEN] = "";
-        char ra_playlists[PATH_MAX_LEN] = "";
         int ra_in_content[2] = {0, 0}, ra_by_content[2] = {0, 0}, ra_by_core[2] = {0, 0};
         char ra_cfg_dir[PATH_MAX_LEN] = "";
         const char *ra_tpl = jstr(p, NULL, "retroarch_cfg", NULL);
@@ -304,7 +485,6 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
                 if (slash) *slash = 0;
                 apply_ra_cfg(cfg, root, none, ra_save, ra_state, sizeof ra_save, ra_in_content, ra_by_content, ra_by_core);
                 ra_apply(cfg, "system_directory", root, ra_sys, sizeof ra_sys);
-                ra_apply(cfg, "playlist_directory", root, ra_playlists, sizeof ra_playlists);
                 free(cfg);
                 break;
             }
@@ -315,8 +495,32 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
         cJSON_ArrayForEach(e, plats) {
             if (profiles_excludes(p, profiles_system_key(e))) continue; /* another emulator plays it */
             if (cnt == cap) {
-                cap = cap ? cap * 2 : 16;
-                maps = realloc(maps, sizeof *maps * (size_t)cap);
+                /* Room for every entry at once: each is 13 KB, and the PS4's
+                 * payload can't always find room to grow a big array. */
+                int want = 0;
+                const cJSON *q, *f;
+                cJSON_ArrayForEach(q, profiles) {
+                    if (!jbool(q, NULL, "enabled", 1)) continue;
+                    cJSON_ArrayForEach(f, cJSON_GetObjectItemCaseSensitive(q, "platforms"))
+                        want += !profiles_excludes(q, profiles_system_key(f));
+                }
+                /* Short of memory for a moment (the PS4 payload, while downloads
+                 * finish together): it frees up, so wait for it a little. */
+                const size_t bytes = sizeof *maps * (size_t)(want > cap ? want : cap + 1);
+                profile_map *grown = realloc(maps, bytes);
+                for (int tries = 1; !grown && tries < 10; tries++) {
+                    usleep(200 * 1000);
+                    grown = realloc(maps, bytes);
+                    if (grown) LOGI("memory for %d emulator platforms after %d tries", want, tries + 1);
+                }
+                if (!grown) {
+                    LOGE("no memory for %d emulator platforms (largest free block %d MB)", want, mem_largest_mb());
+                    free(maps);
+                    *out = NULL;
+                    return 0;
+                }
+                maps = grown;
+                cap = want > cap ? want : cap + 1;
             }
             profile_map *m = &maps[cnt];
             memset(m, 0, sizeof *m);
@@ -336,6 +540,8 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
                                   plat_data_dir(), "rom_dir", NULL, NULL};
             str_template(m->rom_dir, sizeof m->rom_dir, jstr(p, e, "rom_dir", "{root}/roms/{platform}"), vars);
             vars[7] = m->rom_dir;
+            str_template(m->update_dir, sizeof m->update_dir, jstr(p, e, "update_dir", "{rom_dir}"), vars);
+            str_template(m->dlc_dir, sizeof m->dlc_dir, jstr(p, e, "dlc_dir", jstr(p, e, "update_dir", "{rom_dir}")), vars);
             str_template(m->save_dir, sizeof m->save_dir, jstr(p, e, "save_dir", "{rom_dir}"), vars);
             str_template(m->state_dir, sizeof m->state_dir, jstr(p, e, "state_dir", "{rom_dir}"), vars);
             str_template(m->bios_dir, sizeof m->bios_dir, jstr(p, e, "bios_dir", "{root}/bios"), vars);
@@ -350,8 +556,7 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
             const char *core = jstr(p, e, "core_name", "");
             const int pcsx2 = str_ieq(core, "LRPS2") || str_ieq(core, "PCSX2") || str_ieq(core, "PS5SX2");
             const char *sub = jstr(p, e, "firmware_subdir", pcsx2 && ra_tpl ? "pcsx2/bios" : "");
-            if (sub[0]) path_join(m->firmware_dir, sizeof m->firmware_dir, m->bios_dir, sub);
-            else str_copy(m->firmware_dir, sizeof m->firmware_dir, m->bios_dir);
+            str_copy(m->firmware_subdir, sizeof m->firmware_subdir, sub);
             for (int k = 0; k < 2; k++) {
                 m->explicit_dir[k] = cJSON_GetObjectItemCaseSensitive(e, k ? "state_dir" : "save_dir") != NULL;
                 if (m->explicit_dir[k]) continue;
@@ -360,7 +565,6 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
                 m->by_core[k] = ra_by_core[k];
             }
             str_copy(m->core_name, sizeof m->core_name, jstr(p, e, "core_name", ""));
-            str_copy(m->playlist_dir, sizeof m->playlist_dir, ra_playlists);
             str_copy(m->save_layout, sizeof m->save_layout, jstr(p, e, "save_layout", ""));
             str_copy(m->bundle_dirs, sizeof m->bundle_dirs, jstr(p, e, "bundle_dirs", ""));
 
@@ -399,9 +603,27 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
                     if (w < 0 || (size_t)w >= sizeof m->core_values - o) break;
                     o += (size_t)w;
                 }
+                str_copy(m->core_auto, sizeof m->core_auto, jstr(cs, NULL, "auto", ""));
+                str_template(m->core_log, sizeof m->core_log, jstr(cs, NULL, "log", ""), vars);
+                str_copy(m->core_log_line, sizeof m->core_log_line, jstr(cs, NULL, "log_line", ""));
+                o = 0;
+                cJSON_ArrayForEach(v, cJSON_GetObjectItemCaseSensitive(cs, "log_names")) {
+                    if (!cJSON_IsString(v)) continue;
+                    int w = snprintf(m->core_log_names + o, sizeof m->core_log_names - o, "%s%s=%s", o ? "," : "",
+                                     v->string, v->valuestring);
+                    if (w < 0 || (size_t)w >= sizeof m->core_log_names - o) break;
+                    o += (size_t)w;
+                }
             }
-            str_template(m->memcards, sizeof m->memcards, jstr(p, e, "memcards", ""), vars);
+            /* Shared cards can sit in the BIOS folder RetroArch's config names
+             * (Flycast's <system>/dc): {bios}. */
+            const char *cvars[] = {"root", root, "bios", m->bios_dir, "data", plat_data_dir(), NULL};
+            str_template(m->memcards, sizeof m->memcards, jstr(p, e, "memcards", ""), cvars);
+            str_template(m->game_ids, sizeof m->game_ids, jstr(p, e, "game_ids", ""), vars);
+            str_copy(m->disc_id, sizeof m->disc_id, jstr(p, e, "disc_id", ""));
             m->extra = profile_lists(p, "extra", profiles_system_key(e));
+            const cJSON *mg = state_setting(p, e, "mount_games");
+            m->mount_games = cJSON_IsTrue(mg) ? 1 : cJSON_IsString(mg) && !strcmp(mg->valuestring, "data") ? 2 : 0;
             m->sync_saves = m->base_sync_saves = jbool(p, e, "sync_saves", 1);
             const char *mode = jstr(p, e, "sync", "all"); /* per platform, or the emulator's (before 1.2) */
             m->sync_off = !strcmp(mode, "off");
@@ -409,6 +631,34 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
             if (m->sync_off) m->sync_saves = m->base_sync_saves = 0;
             str_copy(m->root, sizeof m->root, root);
             str_copy(m->ra_cfg_dir, sizeof m->ra_cfg_dir, ra_cfg_dir);
+            /* "cards": which memory cards the emulator keeps for the system:
+             * {"default": "per_game" | "shared", "modes": "per_game,shared",
+             *  "change": how the user gets one card per game, "setting": how to tell which
+             *  is on: {"core_option": key} or {"file", "key"}, with the
+             *  "per_game" and "shared" values (comma separated) and the
+             *  core option's "default"}. */
+            const cJSON *cards = cJSON_GetObjectItemCaseSensitive(e, "cards");
+            if (!cards) cards = cJSON_GetObjectItemCaseSensitive(p, "cards");
+            if (cJSON_IsObject(cards)) {
+                const cJSON *set = cJSON_GetObjectItemCaseSensitive(cards, "setting");
+                str_copy(m->cards_default, sizeof m->cards_default, jstr(cards, NULL, "default", "per_game"));
+                str_copy(m->cards_modes, sizeof m->cards_modes, jstr(cards, NULL, "modes", m->cards_default));
+                str_copy(m->cards_change, sizeof m->cards_change, jstr(cards, NULL, "change", ""));
+                str_copy(m->cards_option, sizeof m->cards_option, jstr(set, NULL, "core_option", ""));
+                str_template(m->cards_file, sizeof m->cards_file, jstr(set, NULL, "file", ""), vars);
+                str_copy(m->cards_key, sizeof m->cards_key, jstr(set, NULL, "key", ""));
+                str_copy(m->cards_per_game, sizeof m->cards_per_game, jstr(set, NULL, "per_game", ""));
+                str_copy(m->cards_shared, sizeof m->cards_shared, jstr(set, NULL, "shared", ""));
+                /* A core's per-game cards sync only while its option says so. */
+                if (m->cards_option[0] && !m->req_key[0]) {
+                    str_copy(m->req_key, sizeof m->req_key, m->cards_option);
+                    str_copy(m->req_value, sizeof m->req_value, m->cards_per_game);
+                    str_copy(m->req_default, sizeof m->req_default, jstr(set, NULL, "default", ""));
+                    if (m->cards_change[0])
+                        snprintf(m->req_hint, sizeof m->req_hint, "The memory cards are shared by every game. %s to give each game its own card, which then syncs.", m->cards_change);
+                }
+                cards_mode_now(m);
+            }
             const cJSON *req = cJSON_GetObjectItemCaseSensitive(e, "sync_requires_option");
             if (cJSON_IsObject(req)) {
                 str_copy(m->req_key, sizeof m->req_key, jstr(req, NULL, "key", ""));
@@ -441,8 +691,30 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
                 maps[i].own_slot = 0;
         }
     }
+    for (int i = 0; i < cnt; i++) mount_main_games(maps, cnt, &maps[i]);
+    card_methods(maps, cnt);
     *out = maps;
     return cnt;
+}
+
+cJSON *profile_firmware_rules(const cJSON *profiles, const profile_map *m) {
+    char sys[64];
+    str_copy(sys, sizeof sys, m->romm_slugs);
+    sys[strcspn(sys, ",")] = 0;
+    const cJSON *p, *e;
+    cJSON_ArrayForEach(p, profiles) {
+        if (strcmp(jstr(p, NULL, "id", "custom"), m->profile_id) != 0) continue;
+        cJSON_ArrayForEach(e, cJSON_GetObjectItemCaseSensitive(p, "platforms")) {
+            if (strcmp(profiles_system_key(e), sys) != 0) continue;
+            const cJSON *rules = state_setting(p, e, "firmware");
+            if (cJSON_IsObject(rules)) return cJSON_Duplicate(rules, 1);
+            /* Folders the user picked, with no preset: BIOS files only where
+             * a BIOS folder was picked too, not guessed below the games. */
+            if (!strncmp(m->profile_id, "custom", 6) && !jstr(p, e, "bios_dir", NULL)) return cJSON_Parse("{\"skip\":true}");
+            return NULL;
+        }
+    }
+    return NULL;
 }
 
 int profile_map_handles(const profile_map *m, const char *slug, const char *fs_slug) {

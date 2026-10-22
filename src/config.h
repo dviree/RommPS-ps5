@@ -10,7 +10,9 @@ typedef struct {
     char server_url[512];     /* https://romm.example.com (no trailing slash) */
     char token[256];          /* rmm_... client API token */
     char device_id[64];       /* RomM device UUID */
-    char device_name[64];
+    char device_name[64];     /* what this console is called on RomM and in names it uploads */
+    int device_name_auto;     /* device_name follows the console's own name (saved as "") */
+    char romm_device_name[64]; /* the name RomM has for the device, last we told it */
     char client_device_identifier[40]; /* sent when pairing */
     char username[64];
     int tls_verify;
@@ -34,10 +36,9 @@ typedef struct {
     cJSON *profiles;
     int profiles_custom;      /* 0: built-in profiles, not written to config.json */
     int setup_complete;       /* background syncs wait for the setup wizard */
-    char ps2_cards[16];       /* "per_game" or "backup" */
+    char ps2_cards[16];       /* PS2's memory card method: "per_game", "shared" or "" (as its emulator keeps them) */
     char ui_theme[24];        /* web UI theme id (ui/themes/<id>.css) */
     int cover_cache;          /* keep every game's cover on the console (covers.h) */
-    int autostart_chosen;     /* someone turned autostart on or off here (1.1.1 on) */
     char server_version[32];
 } config_t;
 
@@ -47,6 +48,9 @@ void config_lock(void);
 void config_unlock(void);
 
 int config_load(void);  /* loads or creates defaults */
+/* The memory card method chosen for a system ("per_game", "shared"), or ""
+ * for the one its main emulator keeps (profiles.c). Caller holds the lock. */
+const char *config_card_mode(const char *system);
 int config_save(void);
 
 /* The config as JSON, with or without the token. */

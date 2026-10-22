@@ -15,7 +15,8 @@
 void covers_init(void);
 
 /* path: a RomM asset path ("/assets/..."). 0 with the body (malloc'd, the
- * caller frees it) and its MIME type, 1 if RomM has no such asset, -1 on error. */
+ * caller frees it) and its MIME type, 1 if RomM has no such asset, -1 if RomM
+ * couldn't be asked this time (worth trying again), -2 for a path that isn't one. */
 int covers_fetch(const char *path, char **body, size_t *len, const char **type);
 
 /* Fetches a cover ahead of time, in the background, if it isn't cached. */

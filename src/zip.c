@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 #include <zlib.h>
@@ -40,10 +41,11 @@ static void put32(unsigned char *p, uint32_t v) {
 static uint16_t get16(const unsigned char *p) { return (uint16_t)(p[0] | p[1] << 8); }
 static uint32_t get32(const unsigned char *p) { return (uint32_t)get16(p) | (uint32_t)get16(p + 2) << 16; }
 
-static void dos_time(uint16_t *t, uint16_t *d) {
-    time_t now = time(NULL);
+/* An entry's time: when its file was last written, so whoever unpacks it
+ * knows how old it is (memory cards, src/memcard.c). */
+static void dos_time(time_t when, uint16_t *t, uint16_t *d) {
     struct tm tm;
-    localtime_r(&now, &tm);
+    localtime_r(&when, &tm);
     *t = (uint16_t)(tm.tm_hour << 11 | tm.tm_min << 5 | tm.tm_sec / 2);
     *d = (uint16_t)((tm.tm_year - 80) << 9 | (tm.tm_mon + 1) << 5 | tm.tm_mday);
 }
@@ -56,8 +58,6 @@ int zip_write(const char *zip_path, const zip_member *members, int count) {
     unsigned char *central = NULL;
     size_t central_len = 0;
     uint32_t offset = 0;
-    uint16_t t, d;
-    dos_time(&t, &d);
     int rc = 0;
     const size_t bufsize = 64 * 1024;
     unsigned char *buf = malloc(bufsize);
@@ -71,6 +71,9 @@ int zip_write(const char *zip_path, const zip_member *members, int count) {
         }
         uint32_t size;
         uint32_t crc = crc_file(in, buf, bufsize, &size);
+        struct stat st;
+        uint16_t t, d;
+        dos_time(fstat(fileno(in), &st) == 0 ? st.st_mtime : time(NULL), &t, &d);
         rewind(in);
         const char *name = members[i].name;
         uint16_t nl = (uint16_t)strlen(name);
@@ -297,4 +300,25 @@ int zip_content_hash(const char *zip_path, char out[33]) {
     free(e);
     free(z);
     return rc;
+}
+
+time_t zip_first_time(const char *zip_path) {
+    unsigned char lh[30];
+    FILE *fp = fopen(zip_path, "rb");
+    if (!fp) return 0;
+    const size_t n = fread(lh, 1, sizeof lh, fp);
+    fclose(fp);
+    if (n != sizeof lh || get32(lh) != 0x04034b50) return 0;
+    const uint16_t t = get16(lh + 10), d = get16(lh + 12);
+    if (!d) return 0;
+    struct tm tm = {0};
+    tm.tm_year = (d >> 9) + 80;
+    tm.tm_mon = ((d >> 5) & 15) - 1;
+    tm.tm_mday = d & 31;
+    tm.tm_hour = t >> 11;
+    tm.tm_min = (t >> 5) & 63;
+    tm.tm_sec = (t & 31) * 2;
+    tm.tm_isdst = -1;
+    const time_t when = mktime(&tm);
+    return when < 0 ? 0 : when;
 }

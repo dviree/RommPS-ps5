@@ -26,51 +26,74 @@
 
 /* Bump this when generated profiles gain new keys, or existing installs keep
  * their old profile forever (ask me how I know). */
-#define PROFILE_GENERATION 2
+#define PROFILE_GENERATION 3
 
-/* libretro database names to RomM slugs. The first slug is the folder name. */
+/* libretro database names to RomM slugs (the first is the folder name), and
+ * the system's ES-DE name: PS5 RetroArch 3.0 and newer's folder for it. */
 static const struct {
     const char *db;
     const char *slugs;
+    const char *esde;
 } DB_MAP[] = {
-    {"Nintendo - Nintendo Entertainment System", "nes,famicom"},
-    {"Nintendo - Family Computer Disk System", "fds"},
-    {"Nintendo - Super Nintendo Entertainment System", "snes,sfam"},
-    {"Nintendo - Satellaview", "satellaview"},
-    {"Nintendo - Game Boy", "gb"},
-    {"Nintendo - Game Boy Color", "gbc"},
-    {"Nintendo - Game Boy Advance", "gba"},
-    {"Nintendo - Nintendo 64", "n64"},
-    {"Nintendo - Nintendo DS", "nds"},
-    {"Nintendo - Virtual Boy", "virtualboy"},
-    {"Nintendo - GameCube", "ngc,gamecube"},
-    {"Nintendo - Wii", "wii"},
-    {"Sega - Mega Drive - Genesis", "genesis,genesis-slash-megadrive,megadrive"},
-    {"Sega - Master System - Mark III", "sms,mastersystem"},
-    {"Sega - Game Gear", "gamegear,gg"},
-    {"Sega - Mega-CD - Sega CD", "segacd,sega-cd"},
-    {"Sega - SG-1000", "sg1000"},
-    {"Sega - 32X", "sega32,sega-32x"},
-    {"Sega - Saturn", "saturn"},
-    {"Sega - Dreamcast", "dc,dreamcast"},
-    {"Sony - PlayStation", "psx,ps1"},
-    {"Sony - PlayStation 2", "ps2"},
-    {"Sony - PlayStation Portable", "psp"},
-    {"FBNeo - Arcade Games", "arcade,fbneo,neogeoaes,neogeomvs,cps1,cps2,cps3"},
-    {"MAME", "arcade,mame"},
-    {"NEC - PC Engine - TurboGrafx 16", "tg16,turbografx16--1,pce,pcengine"},
-    {"NEC - PC Engine CD - TurboGrafx-CD", "turbografx-cd,pcecd"},
-    {"SNK - Neo Geo Pocket", "neo-geo-pocket,ngp"},
-    {"SNK - Neo Geo Pocket Color", "neo-geo-pocket-color,ngpc"},
-    {"Bandai - WonderSwan", "wonderswan,ws"},
-    {"Bandai - WonderSwan Color", "wonderswan-color,wsc"},
-    {"Atari - 2600", "atari2600"},
-    {"Atari - 7800", "atari7800"},
-    {"Atari - Lynx", "lynx"},
-    {"Commodore - 64", "c64"},
-    {"Commodore - Amiga", "amiga"},
-    {"DOS", "dos"},
+    {"Nintendo - Nintendo Entertainment System", "nes,famicom", "nes"},
+    {"Nintendo - Family Computer Disk System", "fds", "fds"},
+    {"Nintendo - Super Nintendo Entertainment System", "snes,sfam", "snes"},
+    {"Nintendo - Satellaview", "satellaview", "satellaview"},
+    {"Nintendo - Game Boy", "gb", "gb"},
+    {"Nintendo - Game Boy Color", "gbc", "gbc"},
+    {"Nintendo - Game Boy Advance", "gba", "gba"},
+    {"Nintendo - Nintendo 64", "n64", "n64"},
+    {"Nintendo - Nintendo DS", "nds", "nds"},
+    {"Nintendo - Virtual Boy", "virtualboy", "virtualboy"},
+    {"Nintendo - GameCube", "ngc,gamecube", "gc"},
+    {"Nintendo - Wii", "wii", "wii"},
+    {"Sega - Mega Drive - Genesis", "genesis,genesis-slash-megadrive,megadrive", "genesis"},
+    {"Sega - Master System - Mark III", "sms,mastersystem", "mastersystem"},
+    {"Sega - Game Gear", "gamegear,gg", "gamegear"},
+    {"Sega - Mega-CD - Sega CD", "segacd,sega-cd", "segacd"},
+    {"Sega - SG-1000", "sg1000", "sg-1000"},
+    {"Sega - 32X", "sega32,sega-32x", "sega32x"},
+    {"Sega - Saturn", "saturn", "saturn"},
+    {"Sega - Dreamcast", "dc,dreamcast", "dreamcast"},
+    {"Sony - PlayStation", "psx,ps1", "psx"},
+    {"Sony - PlayStation 2", "ps2", "ps2"},
+    {"Sony - PlayStation Portable", "psp", "psp"},
+    {"FBNeo - Arcade Games", "arcade,fbneo,neogeoaes,neogeomvs,cps1,cps2,cps3", "fbneo"},
+    {"MAME", "arcade,mame", "mame"},
+    {"NEC - PC Engine - TurboGrafx 16", "tg16,turbografx16--1,pce,pcengine", "pcengine"},
+    {"NEC - PC Engine CD - TurboGrafx-CD", "turbografx-cd,pcecd", "pcenginecd"},
+    {"SNK - Neo Geo Pocket", "neo-geo-pocket,ngp", "ngp"},
+    {"SNK - Neo Geo Pocket Color", "neo-geo-pocket-color,ngpc", "ngpc"},
+    {"Bandai - WonderSwan", "wonderswan,ws", "wonderswan"},
+    {"Bandai - WonderSwan Color", "wonderswan-color,wsc", "wonderswancolor"},
+    {"Atari - 2600", "atari2600", "atari2600"},
+    {"Atari - 7800", "atari7800", "atari7800"},
+    {"Atari - Lynx", "lynx", "atarilynx"},
+    {"Commodore - 64", "c64", "c64"},
+    {"Commodore - Amiga", "amiga", "amiga"},
+    {"DOS", "dos", "dos"},
+    {"Nintendo - Nintendo 3DS", "3ds", "n3ds"},
+    {"Nintendo - Pokemon Mini", "pokemon-mini", "pokemini"},
+    {"Nintendo - Sufami Turbo", "sufami-turbo", "sufami"},
+    {"Nintendo - Wii (Digital)", "wii", "wii"},
+    {"NEC - PC Engine SuperGrafx", "supergrafx", "supergrafx"},
+    {"NEC - PC-FX", "pc-fx", "pcfx"},
+    {"SNK - Neo Geo CD", "neo-geo-cd", "neogeocd"},
+    {"The 3DO Company - 3DO", "3do", "3do"},
+    {"Atari - 5200", "atari5200", "atari5200"},
+    {"Atari - Jaguar", "jaguar", "atarijaguar"},
+    {"Sega - PICO", "sega-pico", "pico"},
+    {"Commodore - CD32", "amiga-cd32", "amigacd32"},
+    {"Commodore - CDTV", "commodore-cdtv", "cdtv"},
+    {"ScummVM", "scummvm", "scummvm"},
 };
+
+const char *detect_esde_name(const cJSON *entry) {
+    const char *db = detect_db_name(entry);
+    for (size_t i = 0; db && i < sizeof DB_MAP / sizeof DB_MAP[0]; i++)
+        if (!strcmp(DB_MAP[i].db, db)) return DB_MAP[i].esde;
+    return NULL;
+}
 
 const char *detect_db_name(const cJSON *entry) {
     const char *db = jget_str(entry, "db", NULL);
@@ -123,16 +146,43 @@ static cJSON *slug_array(const char *csv) {
     return a;
 }
 
-/* The save format a RetroArch core keeps, where another emulator keeps the
- * same: a raw 128 KB PS1 memory card, or N64's combined .srm (EEPROM, four
- * controller paks, SRAM and flash). */
-static const char *save_format_of(const char *system, const char *corename) {
-    if (!strcmp(system, "psx") && (strstr(corename, "Beetle PSX") || str_ieq(corename, "PCSX-ReARMed") ||
-                                   str_ieq(corename, "SwanStation")))
-        return "psx-card";
-    if (!strcmp(system, "n64") && (strstr(corename, "ParaLLEl") || strstr(corename, "Mupen64Plus")))
-        return "n64-srm";
-    return NULL;
+/* What a core needs beyond the defaults, from platform/retroarch_cores.json:
+ * the first rule whose names (or "contains") and systems match adds its
+ * "entry" keys to the core's platform entry. */
+#include "retroarch_cores_json.h" /* generated from platform/retroarch_cores.json */
+
+static int name_in(const cJSON *list, const char *name, int contains) {
+    const cJSON *n;
+    cJSON_ArrayForEach(n, list)
+        if (cJSON_IsString(n) && (contains ? strstr(name, n->valuestring) != NULL : str_ieq(name, n->valuestring))) return 1;
+    return 0;
+}
+
+/* Adds the matching rule's keys to e: all of them, or (missing_only) those e
+ * doesn't have, for a profile saved before the rule had them. How many. */
+static int apply_core_rules(cJSON *e, const char *system, const char *corename, int missing_only) {
+    int added = 0;
+    static cJSON *rules;
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&lock);
+    if (!rules) rules = cJSON_Parse(RETROARCH_CORES_JSON);
+    const cJSON *r;
+    cJSON_ArrayForEach(r, cJSON_GetObjectItemCaseSensitive(rules, "rules")) {
+        const cJSON *names = cJSON_GetObjectItemCaseSensitive(r, "names"), *has = cJSON_GetObjectItemCaseSensitive(r, "contains"),
+                    *systems = cJSON_GetObjectItemCaseSensitive(r, "systems");
+        if ((names || has) && !name_in(names, corename, 0) && !name_in(has, corename, 1)) continue;
+        if (systems && !name_in(systems, system, 0)) continue;
+        const cJSON *k;
+        cJSON_ArrayForEach(k, cJSON_GetObjectItemCaseSensitive(r, "entry")) {
+            if (missing_only && cJSON_GetObjectItemCaseSensitive(e, k->string)) continue;
+            cJSON_DeleteItemFromObjectCaseSensitive(e, k->string);
+            cJSON_AddItemToObject(e, k->string, cJSON_Duplicate(k, 1));
+            added++;
+        }
+        break;
+    }
+    pthread_mutex_unlock(&lock);
+    return added;
 }
 
 /* One platform entry per system; the first core found for a system wins. */
@@ -163,23 +213,9 @@ static void add_core_platforms(cJSON *plats, cJSON *cores, const char *core_id, 
         cJSON_AddStringToObject(e, "db", db);
         cJSON_AddStringToObject(e, "emulator", core_id);
         cJSON_AddStringToObject(e, "core_name", corename);
-        /* Saves other emulators keep in the same format share one save on RomM. */
-        const char *format = save_format_of(first, corename);
-        if (format) cJSON_AddStringToObject(e, "save_format", format);
-        if (str_ieq(corename, "LRPS2") || str_ieq(corename, "PCSX2")) {
-            /* Per-game cards (<game>.ps2) sync like any other save. */
-            cJSON_AddStringToObject(e, "save_exts", ".ps2");
-            cJSON *req = cJSON_CreateObject();
-            cJSON_AddStringToObject(req, "key", "pcsx2_shared_memory_cards");
-            cJSON_AddStringToObject(req, "value", "disabled");
-            cJSON_AddStringToObject(req, "default", "enabled");
-            cJSON_AddStringToObject(req, "hint", "LRPS2 uses one shared memory card for all games. Turn off Shared Memory Cards in the core options to give each game its own card, which then syncs.");
-            cJSON_AddItemToObject(e, "sync_requires_option", req);
-        } else if (str_ieq(corename, "PPSSPP")) {
-            cJSON_AddStringToObject(e, "save_layout", "psp");
-        } else if (str_ieq(corename, "Dolphin")) {
-            cJSON_AddStringToObject(e, "save_layout", !strcmp(first, "wii") ? "wii" : "gci");
-        }
+        /* Saves other emulators keep in the same format (save_format) share
+         * one save on RomM; save files, cards and layouts per core. */
+        apply_core_rules(e, first, corename, 0);
         cJSON_AddItemToArray(plats, e);
     }
 }
@@ -227,6 +263,9 @@ static cJSON *retroarch_candidate(const char *root) {
 
     char name[128] = "RetroArch", title_id[16] = "";
     app_title(root, name, sizeof name, title_id, sizeof title_id);
+    /* No app folder to name it (the PS4's builds): told apart by their folder. */
+    if (!title_id[0] && strcmp(path_basename(root), "retroarch") != 0)
+        snprintf(name, sizeof name, "RetroArch (%s)", path_basename(root));
     if (!strstr(name, "RetroArch") && !strstr(name, "retroarch") && !has_cfg) return NULL;
 
     cJSON *plats = cJSON_CreateArray(), *cores = cJSON_CreateArray();
@@ -298,7 +337,7 @@ static cJSON *retroarch_candidate(const char *root) {
     } else {
         cJSON_Delete(plats); /* no .info files, keep the default platforms */
     }
-    ra2_update_profile(profile);
+    ra2_update_profile(profile, NULL);
 
     cJSON *c = cJSON_CreateObject();
     cJSON_AddStringToObject(c, "kind", "retroarch");
@@ -481,18 +520,39 @@ cJSON *detect_emulators(void) {
 
 /* Keys a newer preset has that a saved profile lacks (a state folder added
  * to Porpoise's, say) are added to it. Nothing already there changes, so
- * folders the user picked stay. */
+ * folders the user picked stay; but for the keys nobody can set but the
+ * preset, which follow it (PSXS5's cores, as its versions change them). */
+static const char *const PRESET_ONLY[] = {"state_core_setting"};
+
 static int fill_from_catalog(cJSON *p) {
     const cJSON *entry = detect_catalog_entry(jget_str(p, "id", ""));
     const cJSON *preset = entry ? cJSON_GetObjectItemCaseSensitive(entry, "profile") : NULL, *k;
     cJSON *pe;
-    if (!preset) return 0;
     int added = 0;
-    cJSON_ArrayForEach(k, preset)
-        if (strcmp(k->string, "platforms") && !cJSON_GetObjectItemCaseSensitive(p, k->string)) {
+    /* A RetroArch core's platform entry saved before its rule had a key
+     * (memcards, cards...): what the rule says now. */
+    cJSON_ArrayForEach(pe, cJSON_GetObjectItemCaseSensitive(p, "platforms")) {
+        const cJSON *first = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(pe, "romm"), 0);
+        const char *core = jget_str(pe, "core_name", "");
+        if (cJSON_IsString(first) && core[0]) added += apply_core_rules(pe, first->valuestring, core, 1);
+    }
+    if (!preset) {
+        if (added) LOGI("the %s profile got %d setting%s from RetroArch's core rules", jget_str(p, "name", ""), added, added == 1 ? "" : "s");
+        return added;
+    }
+    cJSON_ArrayForEach(k, preset) {
+        if (!strcmp(k->string, "platforms")) continue;
+        const cJSON *have = cJSON_GetObjectItemCaseSensitive(p, k->string);
+        int preset_only = 0;
+        for (size_t i = 0; i < sizeof PRESET_ONLY / sizeof PRESET_ONLY[0]; i++) preset_only |= !strcmp(k->string, PRESET_ONLY[i]);
+        if (!have) {
             cJSON_AddItemToObject(p, k->string, cJSON_Duplicate(k, 1));
             added++;
+        } else if (preset_only && !cJSON_Compare(have, k, 1)) {
+            cJSON_ReplaceItemInObjectCaseSensitive(p, k->string, cJSON_Duplicate(k, 1));
+            added++;
         }
+    }
     cJSON_ArrayForEach(pe, cJSON_GetObjectItemCaseSensitive(p, "platforms")) {
         const cJSON *first = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(pe, "romm"), 0), *ce;
         if (!cJSON_IsString(first)) continue;

@@ -5,6 +5,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include <cstdint>
+
 #include "core/input.hpp"
 #include "core/tween.hpp"
 #include "rommps_look.hpp"
@@ -38,6 +40,11 @@ struct Row
     bool enabled = true;
     bool danger = false; // an action that can't be undone
     int expander = 0;    // 1: closed, 2: open: a chevron before the label (Cross opens what's under it)
+    // A small icon before the label (a platform's logo): the room is kept with
+    // logo_slot even while its texture (0) is still loading.
+    bool logo_slot = false;
+    std::uint32_t logo = 0;
+    float logo_aspect = 1.0f;
 };
 
 struct RowEvent

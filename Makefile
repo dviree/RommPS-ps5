@@ -9,6 +9,7 @@
 #   make ps4-pkg                       PS4 home screen app (OpenOrbis), with the payload inside
 #   make install-ps4 PS4_HOST=<ip>     copy the PS4 payload to /data/payloads over FTP (run it from GoldHEN's payload menu)
 #   make ps5 VERSION=1.2.3             override the version baked into the build
+#   make ps4-pkg NETLOG=1              test build that broadcasts its log on the LAN (tools/netlog.py)
 #   make tools                         release-sign, for signing releases (tools/release-sign.c)
 #
 # Code shared by every console is in src/. Each console has its own folder in
@@ -19,11 +20,11 @@
 CHDR_SRCS := $(filter-out %microflac.cpp,$(wildcard third_party/libchdr/src/*.c)) \
         third_party/libchdr/deps/lzma/src/LzmaDec.c third_party/libchdr/deps/zstd/zstddeclib.c
 SRCS := src/main.c src/util.c src/http.c src/romm.c src/config.c src/state.c \
-        src/profiles.c src/sync.c src/watch.c src/detect.c src/ra2.c src/playlist.c src/autostart.c src/memcard.c src/zip.c src/bundle.c src/gcmem.c src/statefmt.c src/events.c src/gameid.c src/covers.c src/library.c src/pair.c src/web.c src/update.c \
+        src/profiles.c src/sync.c src/watch.c src/detect.c src/ra2.c src/playlist.c src/autostart.c src/memcard.c src/zip.c src/bundle.c src/gcmem.c src/statefmt.c src/events.c src/gameid.c src/covers.c src/library.c src/firmware.c src/pair.c src/web.c src/update.c src/jsonlean.c \
         third_party/cJSON.c third_party/md5.c third_party/monocypher.c third_party/monocypher-ed25519.c \
         $(CHDR_SRCS)
 HDRS := $(wildcard src/*.h) third_party/cJSON.h third_party/md5.h third_party/monocypher.h third_party/monocypher-ed25519.h
-UI_HEADER := build/gen/ui_index.h
+GEN_HEADERS := build/gen/ui_index.h build/gen/retroarch_cores_json.h
 COMMON_CFLAGS := -std=gnu11 -O2 -Wall -Wextra -Wno-unused-parameter -Wno-unknown-warning-option -Wno-unreachable-code-generic-assoc -Isrc -Ithird_party -Ibuild/gen \
         -Ithird_party/libchdr/include -DCHDR_SYSTEM_ZLIB
 ifdef VERSION
@@ -35,6 +36,11 @@ BUILD_ID ?= $(shell git describe --always --dirty 2>/dev/null)
 ifneq ($(BUILD_ID),)
 COMMON_CFLAGS += -DAPP_BUILD='"$(BUILD_ID)"'
 endif
+# Test builds: NETLOG=1 also broadcasts the log on the LAN, curl's details
+# included. tools/netlog.py shows it. Never in a release.
+ifdef NETLOG
+COMMON_CFLAGS += -DROMM_NETLOG
+endif
 COMMON_CFLAGS += $(EXTRA_CFLAGS)
 
 .PHONY: unit all host ps5 ps4 tools deploy install install-ps4 run clean
@@ -44,6 +50,12 @@ all: host
 build/gen/ui_index.h: ui/index.html ui/style.css $(wildcard ui/themes/*.css) build/gen/inter-font.css third_party/qrcode.js tools/embed.py
 	@mkdir -p $(dir $@)
 	python3 tools/embed.py $< $@ UI_INDEX_HTML
+
+# What RetroArch's cores need beyond the defaults (src/detect.c), on every console.
+build/gen/retroarch_cores_json.h: platform/retroarch_cores.json tools/embed.py
+	@mkdir -p $(dir $@)
+	python3 -c "import json,sys; json.load(open(sys.argv[1]))" $<
+	python3 tools/embed.py $< $@ RETROARCH_CORES_JSON
 
 # Inter (SIL Open Font License, third_party/Inter-LICENSE.txt), inlined into the UI.
 build/gen/inter-font.css: third_party/inter-latin.woff2 tools/font_css.py
@@ -57,13 +69,18 @@ HOST_BIN := build/host/romm-sync
 host: $(HOST_BIN)
 
 # Host builds also trust the test key in tests/, so the e2e test can sign updates.
-$(HOST_BIN): $(SRCS) platform/host/platform.c $(HDRS) $(UI_HEADER)
+$(HOST_BIN): $(SRCS) platform/host/platform.c $(HDRS) $(GEN_HEADERS)
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(COMMON_CFLAGS) -DROMM_UPDATE_TEST_KEY -o $@ $(SRCS) platform/host/platform.c -lcurl -lz -lpthread
 
 # Unit tests for the parts with file formats of their own.
-unit: build/host/gcmem_test
+unit: build/host/gcmem_test build/host/jsonlean_cli
 	build/host/gcmem_test
+	python3 tests/jsonlean_test.py build/host/jsonlean_cli
+
+build/host/jsonlean_cli: tests/jsonlean_cli.c src/jsonlean.c src/jsonlean.h
+	@mkdir -p $(dir $@)
+	$(HOST_CC) -std=gnu11 -g -Wall -Wextra -fsanitize=address,undefined -Isrc -o $@ tests/jsonlean_cli.c src/jsonlean.c
 
 build/host/gcmem_test: tests/gcmem_test.c src/gcmem.c src/gcmem.h
 	@mkdir -p $(dir $@)

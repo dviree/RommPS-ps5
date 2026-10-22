@@ -1,7 +1,9 @@
 /* platform.h for macOS and Linux, used for development and tests.
  * ROMM_SYNC_DATA sets the data folder (default ./host-data). Writing a title id
  * to <data>/foreground pretends a game is running. It presents itself as a PS5,
- * so the end-to-end tests cover the PS5 paths and release assets. */
+ * so the end-to-end tests cover the PS5 paths and release assets.
+ * ROMM_SYNC_MOUNTS=<folder> makes it a console that can mount, with apps in
+ * that folder; plat_mounts_set writes its list to <data>/mounts.txt. */
 #include <arpa/inet.h>
 #include <ifaddrs.h>
 #include <netinet/in.h>
@@ -17,7 +19,7 @@
 
 static char g_data[PATH_MAX_LEN];
 
-static const char *const HOMEBREW_DIRS[] = {NULL}; /* ROMM_SYNC_HOMEBREW */
+static const char *HOMEBREW_DIRS[] = {NULL, NULL}; /* ROMM_SYNC_HOMEBREW; ROMM_SYNC_MOUNTS */
 static const char *const EMULATOR_DIRS[] = {NULL};
 
 static plat_info_t INFO = {
@@ -44,6 +46,11 @@ int plat_init(void) {
     signal(SIGPIPE, SIG_IGN);
     const char *su = getenv("ROMM_SYNC_SELF_UPDATE");
     if (su && *su) INFO.self_update = atoi(su);
+    const char *mounts = getenv("ROMM_SYNC_MOUNTS");
+    if (mounts && *mounts) {
+        INFO.can_mount = 1;
+        HOMEBREW_DIRS[0] = mounts;
+    }
     const char *d = getenv("ROMM_SYNC_DATA");
     str_copy(g_data, sizeof g_data, d && *d ? d : "./host-data");
     mkdir_p(g_data);
@@ -95,12 +102,30 @@ int plat_launch_elf(const void *elf, size_t len) {
     return write_file_atomic(p, elf, len);
 }
 
+int plat_is_mount(const char *path) { (void)path; return 0; }
+
+void plat_mounts_set(const plat_mount *mounts, int n) {
+    char p[PATH_MAX_LEN], tmp[PATH_MAX_LEN + 8];
+    path_join(p, sizeof p, g_data, "mounts.txt");
+    snprintf(tmp, sizeof tmp, "%s.tmp", p);
+    FILE *f = fopen(tmp, "w");
+    if (!f) return;
+    for (int i = 0; i < n; i++) fprintf(f, "%s|%s|%s\n", mounts[i].title, mounts[i].from, mounts[i].into);
+    fclose(f);
+    rename(tmp, p);
+}
+
 const char *plat_name(void) { return INFO.name; }
 
 void plat_describe(char *buf, size_t n) {
     struct utsname u;
     if (uname(&u)) snprintf(buf, n, "host build");
     else snprintf(buf, n, "host build on %s %s %s", u.sysname, u.release, u.machine);
+}
+
+void plat_console_name(char *buf, size_t n) {
+    const char *env = getenv("ROMM_SYNC_CONSOLE_NAME");
+    snprintf(buf, n, "%s", env ? env : "");
 }
 
 void plat_local_ip(char *buf, size_t n) {

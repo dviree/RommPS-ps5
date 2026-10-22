@@ -5,6 +5,10 @@
 FROM --platform=linux/amd64 ubuntu:24.04
 
 ARG SDK_VERSION=v0.9
+# The SDK's startup code (crt1.o) from a later commit: v0.9 can't start on
+# firmware 13.52 or 14.00, whose kernel offsets came after it (crt/kernel.c,
+# crt/patch.c). Drop this once a release has them.
+ARG SDK_CRT_COMMIT=573b4a0d0d5fa8695cfeee5f5e2f0447c550035d
 ARG PACBREW_VERSION=v0.3.3
 ARG OPENORBIS_VERSION=v0.5.4
 
@@ -21,6 +25,11 @@ RUN wget -q -O /tmp/sdk.zip \
     && rm /tmp/sdk.zip \
     && chmod +x /opt/ps4-payload-sdk/bin/*
 
+RUN git clone -q --filter=blob:none https://github.com/ps4-payload-dev/sdk /tmp/sdk-src \
+    && git -C /tmp/sdk-src checkout -q ${SDK_CRT_COMMIT} \
+    && make -C /tmp/sdk-src/crt LLVM_CONFIG=llvm-config-18 >/dev/null \
+    && install -m 644 /tmp/sdk-src/crt/crt1.o /opt/ps4-payload-sdk/target/lib/crt1.o \
+    && rm -rf /tmp/sdk-src
 # Libraries land in the SDK's target/user/homebrew, next to the SDK itself.
 RUN wget -q -O /tmp/pb.tar.gz \
         https://github.com/ps4-payload-dev/pacbrew/releases/download/${PACBREW_VERSION}/ps4-payload-dev.tar.gz \

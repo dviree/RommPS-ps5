@@ -12,7 +12,8 @@
 #include "zip.h"
 
 int bundle_supported(const char *layout) {
-    return layout && (!strcmp(layout, "psp") || !strcmp(layout, "gci") || !strcmp(layout, "wii"));
+    return layout && (!strcmp(layout, "psp") || !strcmp(layout, "gci") || !strcmp(layout, "wii") ||
+                      !strcmp(layout, "3ds") || !strcmp(layout, "wiiu"));
 }
 
 static void add(bundle *b, const char *path, const char *name) {
@@ -44,7 +45,7 @@ static void add_tree(bundle *b, const char *dir, const char *prefix, int depth) 
         else
             str_copy(name, sizeof name, de->d_name);
         if (dir_exists(path)) {
-            if (depth < 4) add_tree(b, path, name, depth + 1);
+            if (depth < 8) add_tree(b, path, name, depth + 1);
         } else {
             add(b, path, name);
         }
@@ -73,6 +74,37 @@ static void wii_title_hex(const char *id, char *out) {
     for (int i = 0; i < 4; i++) sprintf(out + i * 2, "%02x", (unsigned char)id[i]);
 }
 
+/* A 3DS or Wii U title id, "0004000000066C00": its halves in lowercase. */
+static int title_halves(const char *id, char hi[9], char lo[9]) {
+    if (strlen(id) != 16) return -1;
+    for (int i = 0; i < 16; i++) {
+        char c = id[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return -1;
+        (i < 8 ? hi : lo)[i % 8] = (char)(c >= 'A' && c <= 'F' ? c - 'A' + 'a' : c);
+    }
+    hi[8] = lo[8] = 0;
+    return 0;
+}
+
+/* Cemu's account on this console, from settings.xml beside mlc01 ("<base>"
+ * is mlc01/usr/save): <PersistentId>2147483649</PersistentId> is 80000001. */
+static void wiiu_account(const char *base, char out[16]) {
+    char cfg[PATH_MAX_LEN];
+    str_copy(cfg, sizeof cfg, base);
+    for (int k = 0; k < 3; k++) {
+        char *p = strrchr(cfg, '/');
+        if (p) *p = 0;
+    }
+    str_copy(out, 16, "80000001");
+    char path[PATH_MAX_LEN];
+    path_join(path, sizeof path, cfg, "settings.xml");
+    char *xml = read_file(path, NULL);
+    const char *at = xml ? strstr(xml, "<PersistentId>") : NULL;
+    unsigned long v = at ? strtoul(at + 14, NULL, 10) : 0;
+    if (v >= 0x80000000UL && v <= 0xFFFFFFFFUL) snprintf(out, 16, "%08lx", v);
+    free(xml);
+}
+
 int bundle_open(bundle *b, const char *layout, const char *id, char bases[][PATH_MAX_LEN], int nbases) {
     memset(b, 0, sizeof *b);
     if (!bundle_supported(layout) || !id[0] || nbases < 1) return -1;
@@ -86,6 +118,7 @@ int bundle_open(bundle *b, const char *layout, const char *id, char bases[][PATH
             break;
         }
     const char *base = bases[pick];
+    str_copy(b->base, sizeof b->base, base);
 
     if (!strcmp(layout, "psp")) {
         str_copy(b->dir, sizeof b->dir, base);
@@ -115,12 +148,37 @@ int bundle_open(bundle *b, const char *layout, const char *id, char bases[][PATH
             if (ok) add(b, path, de->d_name);
         }
         if (d) closedir(d);
+    } else if (!strcmp(layout, "3ds")) {
+        char hi[9], lo[9], root[64], meta[PATH_MAX_LEN];
+        if (title_halves(id, hi, lo) != 0) return -1;
+        snprintf(b->dir, sizeof b->dir, "%s/%s/%s/data/00000001", base, hi, lo);
+        snprintf(root, sizeof root, "%s/%s/data/00000001", hi, lo);
+        add_tree(b, b->dir, root, 0);
+        snprintf(meta, sizeof meta, "%s.metadata", b->dir);
+        snprintf(root, sizeof root, "%s/%s/data/00000001.metadata", hi, lo);
+        if (b->n && file_exists(meta)) add(b, meta, root);
+    } else if (!strcmp(layout, "wiiu")) {
+        char hi[9], lo[9], dir[PATH_MAX_LEN], name[64];
+        if (title_halves(id, hi, lo) != 0) return -1;
+        wiiu_account(base, b->account);
+        snprintf(b->dir, sizeof b->dir, "%s/%s/%s", base, hi, lo);
+        snprintf(dir, sizeof dir, "%s/user/%s", b->dir, b->account);
+        snprintf(name, sizeof name, "%s/user/account", lo);
+        add_tree(b, dir, name, 0);
+        snprintf(dir, sizeof dir, "%s/user/common", b->dir);
+        snprintf(name, sizeof name, "%s/user/common", lo);
+        add_tree(b, dir, name, 0);
+        if (b->n) { /* the title's meta only goes with a save */
+            snprintf(dir, sizeof dir, "%s/meta", b->dir);
+            snprintf(name, sizeof name, "%s/meta", lo);
+            add_tree(b, dir, name, 0);
+        }
     } else {
         char hex[9];
         if (strlen(id) < 4) return -1;
         wii_title_hex(id, hex);
         snprintf(b->dir, sizeof b->dir, "%s/title/00010000/%s", base, hex);
-        add_tree(b, b->dir, "", 0);
+        add_tree(b, b->dir, hex, 0);
     }
     return 0;
 }
@@ -166,6 +224,101 @@ int bundle_zip(const bundle *b, const char *zip_path) {
     return rc;
 }
 
+/* The folder named name somewhere below dir (at most depth levels down),
+ * whose parent is called parent when that's given. */
+static int find_dir(const char *dir, const char *name, const char *parent, int depth, char *out, size_t n) {
+    DIR *d = opendir(dir);
+    struct dirent *de;
+    int found = 0;
+    while (d && !found && (de = readdir(d))) {
+        if (de->d_name[0] == '.') continue;
+        char path[PATH_MAX_LEN];
+        path_join(path, sizeof path, dir, de->d_name);
+        if (!dir_exists(path)) continue;
+        if (!strcasecmp(de->d_name, name) && (!parent || !strcasecmp(path_basename(dir), parent))) {
+            str_copy(out, n, path);
+            found = 1;
+        } else if (depth > 0) {
+            found = find_dir(path, name, parent, depth - 1, out, n) == 0;
+        }
+    }
+    if (d) closedir(d);
+    return found ? 0 : -1;
+}
+
+/* Puts the folder from where to (replacing to), across drives too. */
+static int put_folder(const char *from, const char *to) {
+    remove_tree(to);
+    if (mkdir_parent(to) != 0) return -1;
+    if (rename(from, to) == 0) return 0;
+    return link_or_copy(from, to);
+}
+
+/* The save inside an unpacked zip, in whatever form it came. */
+static int place_unpacked(bundle *b, const char *tmp) {
+    char src[PATH_MAX_LEN], hex[9];
+    if (!strcmp(b->layout, "wii")) {
+        /* "<id>/..." (RomM's save units), or the folder's contents as 1.2 sent them. */
+        wii_title_hex(b->game_id, hex);
+        path_join(src, sizeof src, tmp, hex);
+        return put_folder(dir_exists(src) ? src : tmp, b->dir);
+    }
+    if (!strcmp(b->layout, "3ds")) {
+        /* data/00000001 wherever it is: "<hi>/<lo>/data/00000001", "data/00000001"
+         * or the whole path from the SD card. */
+        if (find_dir(tmp, "00000001", "data", 8, src, sizeof src) != 0) return -1;
+        char meta[PATH_MAX_LEN + 16], local_meta[PATH_MAX_LEN + 16];
+        snprintf(meta, sizeof meta, "%s.metadata", src);
+        snprintf(local_meta, sizeof local_meta, "%s.metadata", b->dir);
+        if (put_folder(src, b->dir) != 0) return -1;
+        if (file_exists(meta)) {
+            unlink(local_meta);
+            if (rename(meta, local_meta) != 0) link_or_copy(meta, local_meta);
+        }
+        return 0;
+    }
+    /* wiiu: "<lo>/...", or the save folder's contents, or Cemu's export (an
+     * account's files and a cemu_meta file). The account's files go to this
+     * console's account; meta stays as it is unless the zip has it. */
+    char root[PATH_MAX_LEN], hi[9], lo[9], cemu_meta[PATH_MAX_LEN];
+    if (title_halves(b->game_id, hi, lo) != 0) return -1;
+    path_join(root, sizeof root, tmp, lo);
+    if (!dir_exists(root)) str_copy(root, sizeof root, tmp);
+    char user[PATH_MAX_LEN], account[PATH_MAX_LEN], to[PATH_MAX_LEN];
+    path_join(user, sizeof user, root, "user");
+    path_join(cemu_meta, sizeof cemu_meta, root, "cemu_meta");
+    snprintf(to, sizeof to, "%s/user/%s", b->dir, b->account);
+    if (!dir_exists(user) && file_exists(cemu_meta)) {
+        unlink(cemu_meta);
+        return put_folder(root, to);
+    }
+    path_join(account, sizeof account, user, "account");
+    if (!dir_exists(account)) { /* another console's account folder: 8xxxxxxx */
+        DIR *d = opendir(user);
+        struct dirent *de;
+        account[0] = 0;
+        while (d && !account[0] && (de = readdir(d)))
+            if (de->d_name[0] == '8' && strlen(de->d_name) == 8) path_join(account, sizeof account, user, de->d_name);
+        if (d) closedir(d);
+    }
+    int rc = 0, any = 0;
+    if (account[0] && dir_exists(account)) {
+        rc |= put_folder(account, to);
+        any = 1;
+    }
+    char common[PATH_MAX_LEN], meta[PATH_MAX_LEN];
+    path_join(common, sizeof common, user, "common");
+    snprintf(to, sizeof to, "%s/user/common", b->dir);
+    if (dir_exists(common)) {
+        rc |= put_folder(common, to);
+        any = 1;
+    }
+    path_join(meta, sizeof meta, root, "meta");
+    snprintf(to, sizeof to, "%s/meta", b->dir);
+    if (any && dir_exists(meta)) rc |= put_folder(meta, to);
+    return any ? rc : -1;
+}
+
 int bundle_replace(bundle *b, const char *zip_path, const char *tmp_dir) {
     /* Unpack somewhere else first. A bad zip should cost us a download, not
      * someone's 40 hour save. */
@@ -174,50 +327,37 @@ int bundle_replace(bundle *b, const char *zip_path, const char *tmp_dir) {
         remove_tree(tmp_dir);
         return -1;
     }
-    remove_tree(tmp_dir);
-
-    if (!strcmp(b->layout, "psp")) {
-        /* Remove whole save folders; the zip holds them as top-level folders. */
-        for (int i = 0; i < b->n; i++) {
-            char folder[PATH_MAX_LEN], *slash;
-            str_copy(folder, sizeof folder, b->files[i].name);
-            slash = strchr(folder, '/');
-            if (!slash) continue;
-            *slash = 0;
-            char path[PATH_MAX_LEN];
-            path_join(path, sizeof path, b->dir, folder);
-            remove_tree(path);
+    int rc;
+    if (!strcmp(b->layout, "psp") || !strcmp(b->layout, "gci")) {
+        remove_tree(tmp_dir);
+        if (!strcmp(b->layout, "psp")) {
+            /* Remove whole save folders; the zip holds them as top-level folders. */
+            for (int i = 0; i < b->n; i++) {
+                char folder[PATH_MAX_LEN], *slash;
+                str_copy(folder, sizeof folder, b->files[i].name);
+                slash = strchr(folder, '/');
+                if (!slash) continue;
+                *slash = 0;
+                char path[PATH_MAX_LEN];
+                path_join(path, sizeof path, b->dir, folder);
+                remove_tree(path);
+            }
+        } else {
+            for (int i = 0; i < b->n; i++) unlink(b->files[i].path);
         }
-    } else if (!strcmp(b->layout, "gci")) {
-        for (int i = 0; i < b->n; i++) unlink(b->files[i].path);
+        mkdir_p(b->dir);
+        rc = zip_extract_all(zip_path, b->dir) < 0 ? -1 : 0;
     } else {
-        remove_tree(b->dir);
+        rc = place_unpacked(b, tmp_dir);
+        remove_tree(tmp_dir);
     }
-    mkdir_p(b->dir);
-    int rc = zip_extract_all(zip_path, b->dir) < 0 ? -1 : 0;
 
-    char id[16], dir[PATH_MAX_LEN], layout[8];
+    char id[24], base[1][PATH_MAX_LEN], layout[8];
     str_copy(id, sizeof id, b->game_id);
     str_copy(layout, sizeof layout, b->layout);
-    str_copy(dir, sizeof dir, b->dir);
+    str_copy(base[0], sizeof base[0], b->base);
     bundle_free(b);
     /* List the files again from the same folder. */
-    char base[1][PATH_MAX_LEN];
-    if (!strcmp(layout, "psp")) {
-        str_copy(base[0], sizeof base[0], dir);
-    } else if (!strcmp(layout, "gci")) {
-        str_copy(base[0], sizeof base[0], dir);
-        char *p = strrchr(base[0], '/'); /* strip "/Card A" */
-        if (p) *p = 0;
-        p = strrchr(base[0], '/'); /* and the region */
-        if (p) *p = 0;
-    } else {
-        str_copy(base[0], sizeof base[0], dir);
-        for (int k = 0; k < 3; k++) {
-            char *p = strrchr(base[0], '/');
-            if (p) *p = 0;
-        }
-    }
     bundle_open(b, layout, id, base, 1);
     return rc;
 }
