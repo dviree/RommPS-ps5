@@ -37,6 +37,7 @@
 #include "ui/motion.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <ctime>
@@ -97,6 +98,8 @@ class RommPS final : public app::Concept
   public:
     explicit RommPS(app::Context &context) : context_(context), app_(rommps::app())
     {
+        // Before the first answer is read (that's in update): names keep what these fonts can draw
+        rommps::set_text_fonts(context.fonts);
         apply_palette(rommps::Palette{}, true);
     }
 
@@ -455,7 +458,9 @@ class RommPS final : public app::Concept
             actions.push_back({"Download", true, 0});
         // A Switch game's update and DLC, which come with it.
         if (!info.addons.empty())
-            actions.push_back({"Updates and DLC (" + std::to_string(info.addons.size()) + ")", true, 5});
+            actions.push_back({std::string(info.bundle ? "In this folder (" : "Updates and DLC (") +
+                                   std::to_string(info.addons.size()) + ")",
+                               true, 5});
         return actions;
     }
 
@@ -714,6 +719,11 @@ class RommPS final : public app::Concept
             const rommps::Download &d = app_.queue()[static_cast<std::size_t>(queue_row_)];
             if (d.cancellable())
                 hold_to_cancel(input, dt, &d, feedback);
+            else if (d.retryable() && input.is_pressed(Action::confirm))
+            {
+                app_.retry_download(d.id);
+                feedback.play(audio::Cue::select);
+            }
             else if (input.is_pressed(Action::confirm))
                 refuse(feedback, 0.0f);
         }
@@ -785,8 +795,8 @@ class RommPS final : public app::Concept
                 list.rounded_rect({left - 14, 80, 14, 11}, 2, c);                                   // body
                 left -= 14 + 10;
             }
-            left -= ui::text(list, fonts.regular, fonts.regular.font->fit(" @ " + host, 22, 460), left, 90, 22, L.muted,
-                             gfx::Align::right);
+            left -= ui::text(list, fonts.regular, fonts.regular.font->fit(rommps::plain_text((" @ " + host).c_str()), 22, 460), left,
+                             90, 22, L.muted, gfx::Align::right);
             left -= ui::text(list, fonts.semibold, fonts.semibold.font->fit(s.user, 22, 240), left, 90, 22, L.text,
                              gfx::Align::right);
         }
@@ -841,8 +851,8 @@ class RommPS final : public app::Concept
                                  "with your HEN's payload loader.",
                       x, panel.y + 190, 28, 1060, 42, L.panel_muted, 4);
         if (!starting && !app_.payload_error().empty())
-            ui::text(list, fonts.regular, fonts.regular.font->fit(app_.payload_error(), 22, 1060), x, panel.y + 340, 22,
-                     L.panel_muted.with_alpha(0.8f));
+            ui::text(list, fonts.regular, fonts.regular.font->fit(rommps::plain_text(app_.payload_error().c_str()), 22, 1060), x,
+                     panel.y + 340, 22, L.panel_muted.with_alpha(0.8f));
         if (s.known && !s.error.empty())
             ui::text(list, fonts.regular, fonts.regular.font->fit(s.error, 22, 1060), x, panel.y + 380, 22,
                      L.panel_muted.with_alpha(0.6f));
@@ -995,7 +1005,9 @@ class RommPS final : public app::Concept
             const rommps::Download &d = downloads[static_cast<std::size_t>(i)];
             const float y = top + (static_cast<float>(i) - scroll) * kRowH;
             ui::text(list, fonts.semibold, context_.fonts.semibold.font->fit(d.name, 28, 1100), kMargin, y + 42, 28, L.text);
-            std::string meta = d.platform + "  \xC2\xB7  ";
+            // "PlayStation  ·  Waiting". A download that failed before RomM said
+            // which platform the game is on has none: no dot in front then.
+            std::string meta = d.platform.empty() ? "" : d.platform + "  \xC2\xB7  ";
             if (d.running())
             {
                 char text[96];
@@ -1003,8 +1015,14 @@ class RommPS final : public app::Concept
                               rommps::human_size(d.total).c_str());
                 meta += text;
             }
-            else if (d.status == "error")
-                meta += d.error;
+            else if (d.status == "error" && !d.error.empty())
+            {
+                // The service's errors are sentences in lower case; the row's
+                // other states start with a capital.
+                std::string error = d.error;
+                error[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(error[0])));
+                meta += error;
+            }
             else if (d.syncing())
                 meta += "Syncing saves";
             else if (d.status == "done" && !d.saves_note().empty())
@@ -1013,7 +1031,7 @@ class RommPS final : public app::Concept
             {
                 static const char *const kStates[][2] = {{"queued", "Waiting"},
                                                          {"cancelling", "Cancelling"},
-                                                         {"cancelled", "Cancelled, nothing kept"},
+                                                         {"cancelled", "Cancelled"},
                                                          {"done", "Downloaded"}};
                 for (const auto &st : kStates)
                     if (d.status == st[0])
@@ -1136,6 +1154,15 @@ class RommPS final : public app::Concept
             y += 42;
         }
         const rommps::Details &info = app_.details(g->id);
+        // A Switch game's title id, as a tag: what to look for in ProsperoEden.
+        if (!info.title_id.empty())
+        {
+            const std::string tag = "TITLE ID  " + info.title_id;
+            const float w = fonts.semibold.font->measure(tag, 18) + 28;
+            list.bordered_rect({x, y - 24, w, 34}, 17, acc.with_alpha(0.12f), 1.5f, acc.with_alpha(0.5f));
+            ui::text(list, fonts.semibold, tag, x + 14, y - 1, 18, L.panel_text.with_alpha(0.85f));
+            y += 50;
+        }
         if (addons_open_)
             draw_addons(list, info, x, y, sheet.y + sheet.h - 60.0f, acc);
         else
@@ -1144,20 +1171,31 @@ class RommPS final : public app::Concept
         list.pop_opacity();
     }
 
-    // A Switch game's update and DLC, a row each.
+    // A Switch game's update and DLC, a row each with its title id; then a
+    // collection's other games and theirs.
     void draw_addons(gfx::DrawList &list, const rommps::Details &info, float x, float y, float bottom, Color acc) const
     {
         const ui::Fonts &fonts = context_.fonts;
         const rommps::Look &L = look();
-        ui::text(list, fonts.semibold, "UPDATES AND DLC", x, y, 20, acc, gfx::Align::left, 4.0f);
+        ui::text(list, fonts.semibold, info.bundle ? "IN THIS FOLDER" : "UPDATES AND DLC", x, y, 20, acc,
+                 gfx::Align::left, 4.0f);
         y += 46;
         const int n = static_cast<int>(info.addons.size());
         for (int i = addons_top_; i < n && i < addons_top_ + kAddonRows && y < bottom; ++i, y += 40)
         {
             const rommps::Details::Addon &a = info.addons[static_cast<std::size_t>(i)];
-            ui::text(list, fonts.semibold, a.update ? "Update" : "DLC", x, y, 20, acc);
-            ui::text(list, fonts.regular, fonts.regular.font->fit(a.name, 20, 440), x + 100, y, 20, L.panel_text);
-            ui::text(list, fonts.regular, rommps::human_size(a.size), x + 660, y, 20, L.panel_muted, gfx::Align::right);
+            const bool own = i < n - info.bundle;
+            static const char *const kKind[] = {"Update", "DLC", "Game"};
+            // From the right: the size, the title id, then the name in what's left.
+            const std::string size = rommps::human_size(a.size);
+            const float id_right = x + 660 - fonts.regular.font->measure(size, 20) - 24;
+            const float id_left = a.title_id.empty() ? id_right : id_right - fonts.regular.font->measure(a.title_id, 18);
+            ui::text(list, fonts.semibold, kKind[a.kind], x, y, 20, own ? acc : L.panel_muted);
+            ui::text(list, fonts.regular, fonts.regular.font->fit(a.name, 20, std::max(80.0f, id_left - 20 - (x + 100))),
+                     x + 100, y, 20, L.panel_text);
+            if (!a.title_id.empty())
+                ui::text(list, fonts.regular, a.title_id, id_right, y, 18, L.panel_muted, gfx::Align::right);
+            ui::text(list, fonts.regular, size, x + 660, y, 20, L.panel_muted, gfx::Align::right);
         }
         if (n > kAddonRows)
             ui::text(list, fonts.regular,
@@ -1353,10 +1391,12 @@ class RommPS final : public app::Concept
         else if (tab_ == kQueue)
         {
             // Cross on a download that's still going stops it and deletes what
-            // came so far; Square takes the finished ones off the list.
+            // came so far, on one that failed or was cancelled tries it again;
+            // Square takes the finished ones off the list.
             const auto &downloads = app_.queue();
-            const bool on_active = queue_row_ < static_cast<int>(downloads.size()) &&
-                                   downloads[static_cast<std::size_t>(queue_row_)].cancellable();
+            const bool on_row = queue_row_ < static_cast<int>(downloads.size());
+            const bool on_active = on_row && downloads[static_cast<std::size_t>(queue_row_)].cancellable();
+            const bool on_failed = on_row && downloads[static_cast<std::size_t>(queue_row_)].retryable();
             const bool any_finished = std::any_of(downloads.begin(), downloads.end(),
                                                   [](const rommps::Download &d) { return d.finished(); });
             std::vector<ui::Hint> hints{pages};
@@ -1364,6 +1404,8 @@ class RommPS final : public app::Concept
                 hints.push_back({ui::Button::square, "Clear finished"});
             if (on_active)
                 hints.push_back({ui::Button::cross, "Hold to cancel and delete"});
+            if (on_failed)
+                hints.push_back({ui::Button::cross, "Retry"});
             hint_row(list, fonts, style, hints.data(), static_cast<int>(hints.size()));
         }
         else

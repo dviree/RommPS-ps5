@@ -4,6 +4,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "rommps_app.hpp"
 
+#include "ui/fonts.hpp"
+
 #include "cJSON.h"
 #include "stb_image.h" // implemented by base/VulkanglTFModel.cpp
 
@@ -111,42 +113,266 @@ double num(const cJSON *o, const char *key, double fallback = 0)
     return cJSON_IsNumber(v) ? v->valuedouble : fallback;
 }
 
-// The kit's fonts are baked for ASCII: accented letters fold to their plain
-// ones ("Pok\xC3\xA9mon" reads "Pokemon"), typographic quotes and dashes to
-// their ASCII forms, and anything else to "?".
+// The faces the screen draws text with (set_text_fonts). plain() keeps a
+// character only when all of them have it.
+const hui::gfx::Font *g_text_fonts[4] = {};
+
+// What ps5/ui/setup-kit.sh bakes into them: the kit's "european" set and its
+// symbols. Only asked before the fonts are loaded.
+bool baked(unsigned cp)
+{
+    if ((cp >= 0xA1 && cp <= 0x17F) || (cp >= 0x410 && cp <= 0x44F))
+        return true;
+    switch (cp)
+    {
+    case 0x401: case 0x451: case 0x2013: case 0x2014: case 0x2018: case 0x2019: case 0x201C: case 0x201D:
+    case 0x201E: case 0x2022: case 0x2026: case 0x20AC: case 0x2122: case 0x2190: case 0x2191: case 0x2192:
+    case 0x2193: case 0x2713:
+        return true;
+    }
+    return false;
+}
+
+bool drawable(unsigned cp)
+{
+    if (!g_text_fonts[0])
+        return baked(cp);
+    for (const hui::gfx::Font *f : g_text_fonts)
+        if (f && !f->has_glyph(cp))
+            return false;
+    return true;
+}
+
+void put_utf8(std::string &out, unsigned cp)
+{
+    if (cp < 0x80)
+        out += static_cast<char>(cp);
+    else if (cp < 0x800)
+        out += static_cast<char>(0xC0 | cp >> 6), out += static_cast<char>(0x80 | (cp & 0x3F));
+    else if (cp < 0x10000)
+        out += static_cast<char>(0xE0 | cp >> 12), out += static_cast<char>(0x80 | (cp >> 6 & 0x3F)),
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+    else
+        out += static_cast<char>(0xF0 | cp >> 18), out += static_cast<char>(0x80 | (cp >> 12 & 0x3F)),
+            out += static_cast<char>(0x80 | (cp >> 6 & 0x3F)), out += static_cast<char>(0x80 | (cp & 0x3F));
+}
+
+constexpr unsigned kNothing = 0xFFFFFFFFu;
+
+// The next character of text, advancing p. Bytes that aren't UTF-8 are read
+// as Latin-1 (old file names are), a stray continuation byte as nothing; a
+// broken sequence never becomes a control character.
+unsigned next_char(const unsigned char *&p)
+{
+    const unsigned lead = *p++;
+    if (lead < 0x80)
+        return lead;
+    const int more = lead >= 0xC2 && lead <= 0xDF ? 1 : lead >= 0xE0 && lead <= 0xEF ? 2 : lead >= 0xF0 && lead <= 0xF4 ? 3 : 0;
+    if (!more)
+        return lead >= 0xC0 ? lead : kNothing;
+    unsigned cp = lead & (0x3F >> more);
+    for (int i = 0; i < more; ++i)
+    {
+        if ((p[i] & 0xC0) != 0x80)
+            return lead; // the bytes after it stay, as characters of their own
+        cp = cp << 6 | (p[i] & 0x3F);
+    }
+    p += more;
+    // Too long a form, a surrogate, past Unicode: nothing to show
+    static const unsigned kLeast[] = {0, 0x80, 0x800, 0x10000};
+    if (cp < kLeast[more] || (cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF)
+        return kNothing;
+    return cp;
+}
+
+// Marks that sit on the letter before them (decomposed text: "e" then U+0301).
+bool combining(unsigned cp)
+{
+    return (cp >= 0x300 && cp <= 0x36F) || (cp >= 0x1AB0 && cp <= 0x1AFF) || (cp >= 0x1DC0 && cp <= 0x1DFF) ||
+           (cp >= 0x20D0 && cp <= 0x20FF) || (cp >= 0xFE20 && cp <= 0xFE2F);
+}
+
+// What a name can carry that shows as nothing: control codes, a soft hyphen, zero widths,
+// direction marks, variation selectors, the byte order mark.
+bool invisible(unsigned cp)
+{
+    return (cp >= 0x80 && cp < 0xA0) || cp == 0xAD || (cp >= 0x200B && cp <= 0x200F) || (cp >= 0x202A && cp <= 0x202E) ||
+           (cp >= 0x2060 && cp <= 0x2064) || (cp >= 0xFE00 && cp <= 0xFE0F) || cp == 0xFEFF;
+}
+
+// A letter and the mark after it, as one character: 0 when there's none.
+unsigned compose(char base, unsigned mark)
+{
+    static const struct
+    {
+        unsigned mark;
+        const char *bases;
+        const char16_t *made;
+    } kMarks[] = {
+        {0x300, "AEIOUaeiou", u"ÀÈÌÒÙàèìòù"},
+        {0x301, "AEIOUYaeiouyCcLlNnRrSsZz",
+         u"ÁÉÍÓÚÝáéíóúý"
+         u"ĆćĹĺŃńŔŕŚśŹź"},
+        {0x302, "AEIOUaeiouCcGgHhJjSsWwYy",
+         u"ÂÊÎÔÛâêîôû"
+         u"ĈĉĜĝĤĥĴĵŜŝŴŵŶŷ"},
+        {0x303, "ANOanoIiUu", u"ÃÑÕãñõĨĩŨũ"},
+        {0x304, "AEIOUaeiou", u"ĀĒĪŌŪāēīōū"},
+        {0x306, "AEGIOUaegiou", u"ĂĔĞĬŎŬăĕğĭŏŭ"},
+        {0x307, "CEGIZcegz", u"ĊĖĠİŻċėġż"},
+        {0x308, "AEIOUYaeiouy", u"ÄËÏÖÜŸäëïöüÿ"},
+        {0x30A, "AaUu", u"ÅåŮů"},
+        {0x30B, "OoUu", u"ŐőŰű"},
+        {0x30C, "CDELNRSTZcdelnrstz",
+         u"ČĎĚĽŇŘŠŤŽčďěľňřšťž"},
+        {0x327, "CcGgKkLlNnRrSsTt",
+         u"ÇçĢģĶķĻļŅņŖŗŞşŢţ"},
+        {0x328, "AEIUaeiu", u"ĄĘĮŲąęįų"},
+    };
+    for (const auto &m : kMarks)
+        if (m.mark == mark)
+            for (int i = 0; m.bases[i]; ++i)
+                if (m.bases[i] == base)
+                    return m.made[i];
+    return 0;
+}
+
+// Appends what a character the fonts lack reads as, in ASCII; false for one
+// with no stand-in (Japanese, say).
+bool fold(unsigned cp, std::string &out)
+{
+    static const char *const kSymbols[] = {// U+00A0 to U+00BF
+        " ", "", "c", "GBP", "", "JPY", "|", "S", "", "(C)", "a", "\"", "-", "", "(R)", "",
+        "o", "+/-", "2", "3", "'", "u", "", ".", "", "1", "o", "\"", "1/4", "1/2", "3/4", ""};
+    static const char kLatin1[] = // U+00C0 to U+00FF; Æ, Þ, ß, æ and þ are below
+        "AAAAAAACEEEEIIII" "DNOOOOOxOUUUUYTs" "aaaaaaaceeeeiiii" "dnooooo/ouuuuyty";
+    static const char kExtendedA[] = // U+0100 to U+017F; Ĳ, ĳ, Œ and œ are below
+        "AaAaAaCcCcCcCcDd" "DdEeEeEeEeEeGgGg" "GgGgHhHhIiIiIiIi" "IiIiJjKkkLlLlLlL"
+        "lLlNnNnNnnNnOoOo" "OoOoRrRrRrSsSsSs" "SsTtTtTtUuUuUuUu" "UuUuWwYyYZzZzZzs";
+    static const char kPinyin[] = "AaIiOoUuUuUuUuUu"; // U+01CD to U+01DC: Ǎ ǎ Ǐ ǐ ... ǜ
+    // Greek and Cyrillic capitals in Latin letters; the small ones are these in lower case
+    static const char *const kGreek[] = {// U+0391 to U+03A9 (U+03A2, unused, as final sigma's slot)
+        "A", "B", "G", "D", "E", "Z", "I", "Th", "I", "K", "L", "M", "N", "X", "O", "P", "R", "s", "S",
+        "T", "Y", "F", "Ch", "Ps", "O"};
+    static const char *const kCyrillic[] = {// U+0410 to U+042F
+        "A", "B", "V", "G", "D", "E", "Zh", "Z", "I", "Y", "K", "L", "M", "N", "O", "P",
+        "R", "S", "T", "U", "F", "Kh", "Ts", "Ch", "Sh", "Shch", "", "Y", "", "E", "Yu", "Ya"};
+    auto lower = [&out](const char *s) {
+        for (; *s; ++s)
+            out += static_cast<char>(std::tolower(static_cast<unsigned char>(*s)));
+        return true;
+    };
+    auto put = [&out](const char *s) { return out += s, true; };
+    auto one = [&out](char c) { return out += c, true; };
+    if (cp >= 0xA0 && cp <= 0xBF)
+        return put(kSymbols[cp - 0xA0]);
+    if (cp >= 0xC0 && cp <= 0xFF)
+        return cp == 0xC6 ? put("AE") : cp == 0xDE ? put("Th") : cp == 0xDF ? put("ss") : cp == 0xE6 ? put("ae")
+               : cp == 0xFE ? put("th") : one(kLatin1[cp - 0xC0]);
+    if (cp >= 0x100 && cp <= 0x17F)
+        return cp == 0x132 ? put("IJ") : cp == 0x133 ? put("ij") : cp == 0x152 ? put("OE") : cp == 0x153 ? put("oe")
+               : one(kExtendedA[cp - 0x100]);
+    if (cp >= 0x1CD && cp <= 0x1DC)
+        return one(kPinyin[cp - 0x1CD]);
+    if (cp >= 0x391 && cp <= 0x3A9)
+        return put(kGreek[cp - 0x391]);
+    if (cp >= 0x3B1 && cp <= 0x3C9)
+        return lower(kGreek[cp - 0x3B1]);
+    if (cp >= 0x410 && cp <= 0x42F)
+        return put(kCyrillic[cp - 0x410]);
+    if (cp >= 0x430 && cp <= 0x44F)
+        return lower(kCyrillic[cp - 0x430]);
+    if (cp >= 0xFF01 && cp <= 0xFF5E) // full-width ASCII
+        return one(static_cast<char>(cp - 0xFEE0));
+    if ((cp >= 0x2000 && cp <= 0x200A) || cp == 0x2028 || cp == 0x2029 || cp == 0x202F || cp == 0x205F || cp == 0x3000)
+        return one(' ');
+    switch (cp)
+    {
+    case 0x192: return put("f");
+    case 0x1A0: return put("O");
+    case 0x1A1: return put("o");
+    case 0x1AF: return put("U");
+    case 0x1B0: return put("u");
+    case 0x218: return put("S");
+    case 0x219: return put("s");
+    case 0x21A: return put("T");
+    case 0x21B: return put("t");
+    case 0x2BC: return put("'");
+    case 0x2C6: return put("^");
+    case 0x2DC: return put("~");
+    case 0x386: return put("A");
+    case 0x388: return put("E");
+    case 0x389: case 0x38A: return put("I");
+    case 0x38C: case 0x38F: return put("O");
+    case 0x38E: return put("Y");
+    case 0x390: case 0x3AE: case 0x3AF: case 0x3CA: return put("i");
+    case 0x3AC: return put("a");
+    case 0x3AD: return put("e");
+    case 0x3CB: case 0x3CD: return put("y");
+    case 0x3CC: case 0x3CE: return put("o");
+    case 0x401: return put("Yo");
+    case 0x451: return put("yo");
+    case 0x2010: case 0x2011: case 0x2012: case 0x2013: case 0x2014: case 0x2015: case 0x2212: return put("-");
+    case 0x2018: case 0x2019: case 0x201A: case 0x201B: case 0x2032: return put("'");
+    case 0x201C: case 0x201D: case 0x201E: case 0x201F: case 0x2033: return put("\"");
+    case 0x2039: return put("<");
+    case 0x203A: return put(">");
+    case 0x2020: return put("+");
+    case 0x2022: case 0x2605: case 0x2606: return put("*");
+    case 0x2024: return put(".");
+    case 0x2025: return put("..");
+    case 0x2026: return put("...");
+    case 0x2030: return put("%");
+    case 0x2044: case 0x2215: return put("/");
+    case 0x20AC: return put("EUR");
+    case 0x2116: return put("No");
+    case 0x2122: return put("TM");
+    case 0x2190: return put("<-");
+    case 0x2192: return put("->");
+    }
+    return false;
+}
+
+// Text the screen's fonts can draw: what they have stays ("Pokémon",
+// "Luigi’s Mansion"), anything else folds to its nearest ASCII ("Ō" reads "O",
+// "ß" "ss", "™" "TM" in a font without them); a decomposed accent joins its
+// letter, or goes. Only a character with no stand-in at all is "?".
 std::string plain(const char *text)
 {
-    static const char *const kLatin1 = // U+00C0 to U+00FF
-        "AAAAAAACEEEEIIII" "DNOOOOOxOUUUUYTs" "aaaaaaaceeeeiiii" "dnooooo/ouuuuyty";
     std::string out;
     const auto *p = reinterpret_cast<const unsigned char *>(text);
+    std::size_t base_at = 0; // where the last plain letter is in out, for a mark after it
+    char base = 0;
     while (*p)
     {
-        unsigned cp = *p++;
-        int more = cp >= 0xF0 ? 3 : cp >= 0xE0 ? 2 : cp >= 0xC0 ? 1 : 0;
-        if (more)
-            cp &= 0x3F >> more;
-        while (more-- > 0 && (*p & 0xC0) == 0x80)
-            cp = (cp << 6) | (*p++ & 0x3F);
+        const unsigned cp = next_char(p);
+        if (cp == kNothing || invisible(cp))
+            continue;
         if (cp < 0x80)
+        {
+            base = std::isalpha(static_cast<int>(cp)) ? static_cast<char>(cp) : 0;
+            base_at = out.size();
             out += static_cast<char>(cp);
-        else if (cp >= 0xC0 && cp <= 0xFF)
-            out += kLatin1[cp - 0xC0];
-        else if (cp == 0x2018 || cp == 0x2019)
-            out += '\'';
-        else if (cp == 0x201C || cp == 0x201D)
-            out += '"';
-        else if (cp == 0x2013 || cp == 0x2014)
-            out += '-';
-        else if (cp == 0x2026)
-            out += "...";
-        else if (cp == 0xA0)
-            out += ' ';
-        else if (cp == 0xB7)
-            out += "\xC2\xB7"; // the middle dot is in the fonts: the app uses it too
-        else if (cp == 0xB0)
-            out += "\xC2\xB0"; // the degree sign is in the fonts ("1080 Avalanche")
-        else
+            continue;
+        }
+        if (combining(cp))
+        {
+            const unsigned made = base ? compose(base, cp) : 0;
+            if (made && drawable(made))
+            {
+                out.resize(base_at);
+                put_utf8(out, made);
+            }
+            base = 0; // a second mark on the same letter goes
+            continue;
+        }
+        base = 0;
+        if (cp != 0xA0 && drawable(cp))
+        {
+            put_utf8(out, cp);
+            continue;
+        }
+        if (!fold(cp, out))
             out += '?';
     }
     return out;
@@ -203,6 +429,13 @@ std::string plain_text(const char *text)
     return plain(text ? text : "");
 }
 
+void set_text_fonts(const hui::ui::Fonts &fonts)
+{
+    const hui::ui::FontRef *faces[] = {&fonts.regular, &fonts.semibold, &fonts.display, &fonts.mono};
+    for (int i = 0; i < 4; ++i)
+        g_text_fonts[i] = faces[i]->font;
+}
+
 App &app()
 {
     static App instance;
@@ -216,7 +449,7 @@ App::App() : api_("127.0.0.1", payload_port())
 
 void App::say(const std::string &message)
 {
-    toast_ = message;
+    toast_ = plain(message.c_str()); // the service's errors carry names and paths
     toast_age_ = 0;
 }
 
@@ -478,7 +711,7 @@ void App::refresh_status()
         }
         if (!r.ok())
         {
-            status_.error = r.message();
+            status_.error = plain(r.message().c_str());
             return;
         }
         std::unique_ptr<cJSON, void (*)(cJSON *)> j(r.json(), cJSON_Delete);
@@ -507,12 +740,12 @@ void App::refresh_status()
         status_.paired = flag(j.get(), "paired");
         status_.setup_complete = flag(j.get(), "setup_complete");
         status_.server = str(j.get(), "server_url");
-        status_.user = str(j.get(), "username");
-        status_.server_trouble = str(j.get(), "server_trouble");
+        status_.user = plain(str(j.get(), "username"));
+        status_.server_trouble = plain(str(j.get(), "server_trouble"));
         status_.uptime = num(j.get(), "uptime");
         const cJSON *sync = cJSON_GetObjectItemCaseSensitive(j.get(), "sync");
         status_.syncing = flag(sync, "running");
-        status_.phase = str(sync, "phase");
+        status_.phase = plain(str(sync, "phase"));
         status_.last_run = num(sync, "last_run");
         status_.sync_count = static_cast<int>(num(sync, "sync_count"));
         status_.tracked_saves = static_cast<int>(num(sync, "tracked_saves"));
@@ -520,7 +753,7 @@ void App::refresh_status()
         // The payload adds each sync at the end of its history: the last one is the newest.
         const cJSON *history = cJSON_GetObjectItemCaseSensitive(sync, "history");
         const cJSON *last = cJSON_GetArrayItem(history, cJSON_GetArraySize(history) - 1);
-        status_.last_result = last ? (str(last, "error")[0] ? str(last, "error") : "OK") : "";
+        status_.last_result = last ? (str(last, "error")[0] ? plain(str(last, "error")) : "OK") : "";
         status_.last_up = static_cast<int>(num(last, "uploaded"));
         status_.last_down = static_cast<int>(num(last, "downloaded"));
         status_.server_version = str(j.get(), "server_version");
@@ -530,7 +763,7 @@ void App::refresh_status()
         cJSON_ArrayForEach(folder, cJSON_GetObjectItemCaseSensitive(move, "folders"))
         {
             const std::string from = str(folder, "from");
-            status_.retroarch_folders += (status_.retroarch_folders.empty() ? "" : ", ") + from.substr(from.find_last_of('/') + 1);
+            status_.retroarch_folders += (status_.retroarch_folders.empty() ? "" : ", ") + plain(from.substr(from.find_last_of('/') + 1).c_str());
         }
         const cJSON *covers = cJSON_GetObjectItemCaseSensitive(j.get(), "covers");
         status_.covers_state = str(covers, "state");
@@ -551,7 +784,7 @@ void App::refresh_status()
             status_.pairing = str(pairing, "status");
         if (pairing)
         {
-            status_.pairing_message = str(pairing, "message");
+            status_.pairing_message = plain(str(pairing, "message"));
             status_.user_code = str(pairing, "user_code");
             status_.verification_url = str(pairing, "verification_url");
         }
@@ -586,7 +819,7 @@ void App::refresh_platforms()
             plat.id = static_cast<int>(num(p, "id"));
             plat.name = plain(str(p, "name"));
             plat.slug = str(p, "slug");
-            plat.profile = str(p, "profile");
+            plat.profile = plain(str(p, "profile"));
             plat.rom_count = static_cast<int>(num(p, "rom_count"));
             if (plat.rom_count > 0)
                 list.push_back(std::move(plat));
@@ -676,7 +909,7 @@ void App::send_page(const std::string &key, int page)
             GameList &l = *it->second.list;
             if (!r.ok())
             {
-                l.error = r.message();
+                l.error = plain(r.message().c_str());
                 if (static_cast<int>(l.pages.size()) > page)
                     l.pages[static_cast<std::size_t>(page)] = 0; // asked again when looked at
                 return;
@@ -760,9 +993,22 @@ const Details &App::details(int rom_id)
         out.archived = plain(str(j.get(), "archived"));
         out.updates = static_cast<int>(num(j.get(), "updates"));
         out.dlc = static_cast<int>(num(j.get(), "dlc"));
+        out.title_id = str(j.get(), "title_id");
+        const auto addon = [](const cJSON *a) {
+            const char *k = str(a, "kind");
+            return Details::Addon{!std::strcmp(k, "update") ? Details::Addon::update
+                                  : !std::strcmp(k, "dlc")  ? Details::Addon::dlc
+                                                            : Details::Addon::game,
+                                  plain(str(a, "name")), str(a, "title_id"), num(a, "size")};
+        };
         const cJSON *a;
         cJSON_ArrayForEach(a, cJSON_GetObjectItemCaseSensitive(j.get(), "addons"))
-            out.addons.push_back({std::strcmp(str(a, "kind"), "update") == 0, plain(str(a, "name")), num(a, "size")});
+            out.addons.push_back(addon(a));
+        cJSON_ArrayForEach(a, cJSON_GetObjectItemCaseSensitive(j.get(), "bundle"))
+        {
+            out.addons.push_back(addon(a));
+            out.bundle++;
+        }
     });
     return d;
 }
@@ -871,7 +1117,7 @@ void App::refresh_queue()
             dl.name = plain(str(d, "name"));
             dl.platform = plain(str(d, "platform"));
             dl.status = str(d, "status");
-            dl.error = str(d, "error");
+            dl.error = plain(str(d, "error"));
             dl.done = num(d, "done");
             dl.total = num(d, "total");
             dl.speed = num(d, "speed");
@@ -957,6 +1203,17 @@ void App::cancel_download(int job_id)
     });
 }
 
+void App::retry_download(int job_id)
+{
+    char body[64];
+    std::snprintf(body, sizeof body, "{\"id\":%d}", job_id);
+    api_.post("/api/downloads/retry", body, [this](const Response &r) {
+        if (!r.ok())
+            say("Couldn't retry: " + r.message());
+        refresh_queue();
+    });
+}
+
 void App::remove_game(int rom_id)
 {
     char body[64];
@@ -1038,8 +1295,8 @@ void App::refresh_update()
         Update u;
         u.known = true;
         u.state = str(j.get(), "state");
-        u.message = str(j.get(), "message");
-        u.error = str(j.get(), "error");
+        u.message = plain(str(j.get(), "message"));
+        u.error = plain(str(j.get(), "error"));
         u.current = str(j.get(), "current");
         u.latest = str(j.get(), "latest");
         u.available = flag(j.get(), "available");
@@ -1100,12 +1357,12 @@ void App::pair_start(const std::string &server_url, bool tls_verify)
         if (!r.ok())
         {
             status_.pairing = "error";
-            status_.pairing_message = r.message();
+            status_.pairing_message = plain(r.message().c_str());
             return;
         }
         std::unique_ptr<cJSON, void (*)(cJSON *)> j(r.json(), cJSON_Delete);
         status_.pairing = str(j.get(), "status");
-        status_.pairing_message = str(j.get(), "message");
+        status_.pairing_message = plain(str(j.get(), "message"));
         status_.user_code = str(j.get(), "user_code");
         status_.verification_url = str(j.get(), "verification_url");
         config_.known = false; // the server's address changed

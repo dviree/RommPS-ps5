@@ -3,6 +3,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "rows.hpp"
 
+#include "rommps_app.hpp"
+
 #include <algorithm>
 #include <cstdio>
 #include <cctype>
@@ -136,7 +138,7 @@ void RowList::draw(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, const 
             continue;
         if (row.kind == RowKind::header)
         {
-            std::string caps = row.label;
+            std::string caps = plain_text(row.label.c_str());
             for (char &ch : caps)
                 ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
             ui::text(list, fonts.semibold, caps, bounds.x + 32, y + kRowHeight - 20, 18, look.muted);
@@ -164,7 +166,7 @@ void RowList::draw(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, const 
         {
             const float size = 24.0f;
             const float chevrons = row.kind == RowKind::choice ? 30.0f : 0.0f;
-            const std::string value = fonts.semibold.font->fit(row.value, size, bounds.w * 0.45f);
+            const std::string value = fonts.semibold.font->fit(plain_text(row.value.c_str()), size, bounds.w * 0.45f);
             const float w = ui::text(list, fonts.semibold, value, right - chevrons, y + kRowHeight * 0.5f + 9, size,
                                      (row.kind == RowKind::info ? soft : ink).with_alpha(dim), hui::gfx::Align::right);
             if (row.kind == RowKind::choice && row.enabled)
@@ -210,9 +212,11 @@ void RowList::draw(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, const 
             lx += kLogo * 1.6f + 8;
         }
         const float room = std::max(200.0f, bounds.w - 64 - used - (lx - x));
-        ui::text(list, fonts.semibold, fonts.semibold.font->fit(row.label, 26, room), lx, label_y, 26, ink.with_alpha(dim));
+        // Rows carry names, paths and the service's errors as they came
+        ui::text(list, fonts.semibold, fonts.semibold.font->fit(plain_text(row.label.c_str()), 26, room), lx, label_y, 26,
+                 ink.with_alpha(dim));
         if (two_lines)
-            ui::text(list, fonts.regular, fonts.regular.font->fit(row.detail, 19, room), lx, label_y + 30, 19,
+            ui::text(list, fonts.regular, fonts.regular.font->fit(plain_text(row.detail.c_str()), 19, room), lx, label_y + 30, 19,
                      soft.with_alpha(dim));
     }
     list.pop_clip();

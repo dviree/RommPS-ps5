@@ -69,8 +69,9 @@ static void set_defaults(void) {
 
 /* The console's own name, or else "PlayStation 4" or "PlayStation 5". */
 static void auto_device_name(char *out, size_t n) {
-    plat_console_name(out, n);
-    if (!out[0]) str_copy(out, n, plat_info()->console);
+    char name[128];
+    plat_console_name(name, sizeof name);
+    str_copy_utf8(out, n, name[0] ? name : plat_info()->console);
 }
 
 /* A device name given in a config, or "" to follow the console's. The
@@ -85,7 +86,7 @@ static void set_device_name(const char *name) {
         str_copy(g_cfg.device_name, sizeof g_cfg.device_name, autoname);
     } else {
         g_cfg.device_name_auto = 0;
-        str_copy(g_cfg.device_name, sizeof g_cfg.device_name, name);
+        str_copy_utf8(g_cfg.device_name, sizeof g_cfg.device_name, name); /* half a character: invalid JSON to RomM */
     }
 }
 

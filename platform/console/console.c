@@ -4,6 +4,7 @@
  * single-instance check (ftpsrv main-orbis.c and main-prospero.c, which use the
  * same kinfo_proc offsets), notifications and the LAN address (websrv). */
 #include "console.h"
+#include "util.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -297,7 +298,10 @@ static void *notify_thread(void *arg) {
         g_notify_head = (g_notify_head + 1) % NOTIFY_QUEUE;
         g_notify_count--;
         pthread_mutex_unlock(&g_notify_lock);
-        sceKernelSendNotificationRequest(0, &req, sizeof req, 0);
+        /* The shell can turn one down; without this a lost notice leaves no trace. */
+        const int rc = sceKernelSendNotificationRequest(0, &req, sizeof req, 0);
+        if (rc) LOGW("notification not shown (0x%08x): %s", (unsigned)rc, req.message);
+        else LOGD("notification shown: %s", req.message);
     }
     return NULL;
 }

@@ -37,6 +37,8 @@ int library_on_console(int rom_id);
 int library_queue_rom(int rom_id, const char *name, const char *cover, char *err, int en);
 int library_queue_firmware(int platform_id, char *err, int en);
 int library_cancel(int id, char *err, int en);
+/* A failed or cancelled download, queued again. 0, or -1 with err set. */
+int library_retry(int id, char *err, int en);
 int library_clear_finished(void);
 int library_delete_rom(int rom_id, char *err, int en);
 cJSON *library_downloads(void);

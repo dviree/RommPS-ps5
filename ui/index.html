@@ -283,7 +283,7 @@ if (/PlayStation/.test(navigator.userAgent)) document.documentElement.className 
   </div>
   <div class="card" id="systemsCard" style="display:none">
     <h2>Emulator for each system</h2>
-    <p class="muted">Pick the emulator for each system.</p>
+    <p class="muted">Systems more than one of your emulators can play. The rest have only one.</p>
     <div id="systems"></div>
   </div>
   <div class="card" data-collapse="folders">
@@ -757,7 +757,7 @@ function loadEmus() {
     var hasPs2 = list.some(function (c) { return (c.cores || []).indexOf("LRPS2") >= 0; });
     $("ps2Choice").style.display = hasPs2 ? "" : "none";
     var v = state.status && state.status.server_version, ok = serverAtLeast(v, "5.3.0");
-    var backup = document.querySelector('input[name=ps2][value=backup]');
+    var backup = document.querySelector('input[name=ps2][value=shared]');
     backup.disabled = !ok;
     $("ps2BackupChoice").classList.toggle("disabled", !ok);
     $("ps2BackupNote").textContent = ok ? "" : "Your server runs RomM " + (v || "an older version") + ".";
@@ -869,17 +869,19 @@ function loadPlatforms() {
     list.sort(function (a, b) { return (b.profile ? 1 : 0) - (a.profile ? 1 : 0) || a.name.localeCompare(b.name); });
     state.platforms = list;
     $("platforms").innerHTML = list.map(function (p) {
-      // RomM's own platform icons; v= refreshes copies cached before they were sized.
-      var icon = "/cover?v=2&p=" + encodeURIComponent("/assets/platforms/" + p.slug.toLowerCase() + ".svg");
-      var alt = "/cover?v=2&p=" + encodeURIComponent("/assets/platforms/" + p.fs_slug.toLowerCase() + ".svg");
-      return '<button class="plat" data-id="' + p.id + '"><div class="logo"><img alt="" src="' + icon + '" data-alt="' + alt + '" onerror="platIconError(this)"></div>' +
+      // RomM's own platform icons: an .svg where it has one, else the .ico
+      // (DOS, Vita, Master System...); v= refreshes copies cached before they were sized.
+      var at = function (slug, ext) { return "/cover?v=2&p=" + encodeURIComponent("/assets/platforms/" + slug.toLowerCase() + ext); };
+      var alts = [at(p.fs_slug, ".svg"), at(p.slug, ".ico")].join(" ");
+      return '<button class="plat" data-id="' + p.id + '"><div class="logo"><img alt="" src="' + at(p.slug, ".svg") + '" data-alt="' + alts + '" onerror="platIconError(this)"></div>' +
         '<span class="n">' + esc(p.name) + "</span><small>" + p.rom_count + (p.rom_count == 1 ? " game" : " games") + "</small>" +
         '<small class="' + (p.profile ? "ok" : "muted") + '">' + esc(p.profile || "No emulator") + "</small></button>";
     }).join("") || '<p class="muted">No platforms on the server.</p>';
   }).catch(function (e) { $("platforms").innerHTML = '<p class="err">' + esc(e.message) + "</p>"; });
 }
 function platIconError(img) {
-  if (img.dataset.alt && img.src.indexOf(img.dataset.alt) < 0) { var a = img.dataset.alt; img.dataset.alt = ""; img.src = a; return; }
+  var alts = (img.dataset.alt || "").split(" ").filter(function (a) { return a && img.src.indexOf(a) < 0; });
+  if (alts.length) { img.dataset.alt = alts.slice(1).join(" "); img.src = alts[0]; return; }
   var name = img.closest(".plat").querySelector(".n").textContent;
   var initials = name.replace(/[^A-Za-z0-9 ]/g, "").split(" ").map(function (w) { return /^[0-9]+$/.test(w) ? w : (w[0] || ""); }).join("").slice(0, 4);
   img.parentNode.innerHTML = "<span>" + esc(initials.toUpperCase()) + "</span>";
@@ -1119,15 +1121,17 @@ function pollLibraryDownloads() { api("GET", "/api/downloads").then(syncLibraryD
 for (var i = 1; i <= 8; i++) $("concurrency").insertAdjacentHTML("beforeend", "<option>" + i + "</option>");
 $("clearDl").onclick = function () { api("POST", "/api/downloads/clear").then(loadDownloads); };
 $("dl").onclick = function (ev) {
-  var b = ev.target.closest("button[data-cancel]"); if (!b) return;
+  var b = ev.target.closest("button[data-cancel],button[data-retry]"); if (!b) return;
   b.disabled = true;
-  api("POST", "/api/downloads/cancel", { id: +b.dataset.cancel }).then(loadDownloads).catch(function (e) { toast(e.message, 1); });
+  var retry = b.dataset.retry !== undefined;
+  api("POST", retry ? "/api/downloads/retry" : "/api/downloads/cancel", { id: +(retry ? b.dataset.retry : b.dataset.cancel) })
+    .then(loadDownloads).catch(function (e) { toast(e.message, 1); });
 };
 function downloadRow(d) {
   var active = d.status === "queued" || d.status === "downloading";
   var pct = d.total ? Math.min(100, Math.round(d.done * 100 / d.total)) : (d.status === "done" ? 100 : 0);
   var meta;
-  if (d.status === "error") meta = '<span class="err">' + esc(d.error) + "</span>";
+  if (d.status === "error") meta = '<span class="err">' + esc(cap(d.error)) + "</span>";
   else if (d.status === "done") meta = '<span class="ok">Done</span> ' + fmtSize(d.total) + (jobSaves(d) ? ", " + jobSaves(d) : "");
   else if (d.status === "syncing") meta = "Syncing saves";
   else if (d.status === "cancelled") meta = '<span class="muted">Cancelled</span>';
@@ -1138,7 +1142,8 @@ function downloadRow(d) {
   return '<div class="dl-item installed-item"><div class="row">' + cover + '<div' + (cover ? ' style="flex:1"' : "") + '>' +
     '<div>' + (d.platform ? pill(d.platform) : "") + (d.type === "firmware" ? pill("BIOS", "off") : "") + "</div>" +
     '<div class="t"><b>' + esc(d.name) + "</b></div>" +
-    '<div class="meta">' + meta + "</div></div>" + (active ? '<button class="small" data-cancel="' + d.id + '">Cancel</button>' : "") + "</div>" +
+    '<div class="meta">' + meta + "</div></div>" + (active ? '<button class="small" data-cancel="' + d.id + '">Cancel</button>' : "") +
+    (d.status === "error" || d.status === "cancelled" ? '<button class="small" data-retry="' + d.id + '">Retry</button>' : "") + "</div>" +
     (active || d.status === "cancelling" || d.status === "syncing" ? '<div class="bar"><i style="width:' + pct + '%"></i></div>' : "") + "</div>";
 }
 function loadDownloads() {

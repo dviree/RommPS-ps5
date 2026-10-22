@@ -113,9 +113,14 @@ static int down_gate(const char *url, int *probe, http_resp *out) {
     return -1;
 }
 
+static http_back_fn g_on_back;
+
+void http_on_back(http_back_fn fn) { g_on_back = fn; }
+
 static void down_note(const char *url, int no_answer, int probe) {
     char o[256];
     url_origin(url, o, sizeof o);
+    int back = 0;
     pthread_mutex_lock(&g_down_lock);
     const int same = !strcmp(o, g_down);
     if (no_answer) {
@@ -130,17 +135,24 @@ static void down_note(const char *url, int no_answer, int probe) {
     } else if (same) {
         LOGI("%s answers again", o);
         g_down[0] = 0;
+        back = 1;
     }
     if (probe) g_down_probing = 0;
     pthread_mutex_unlock(&g_down_lock);
+    if (back && g_on_back) g_on_back(o);
 }
 
 /* No connection at all: refused, no such host, or the connect timeout. */
 static int no_answer(CURL *c, CURLcode rc) {
     if (rc == CURLE_COULDNT_CONNECT || rc == CURLE_COULDNT_RESOLVE_HOST) return 1;
-    curl_off_t connected = 0;
-    curl_easy_getinfo(c, CURLINFO_CONNECT_TIME_T, &connected);
-    return rc == CURLE_OPERATION_TIMEDOUT && connected == 0;
+    if (rc != CURLE_OPERATION_TIMEDOUT) return 0;
+    /* Timed out before a single line of an answer: a server that's hung
+     * (paused, wedged) takes the connection and then says nothing, which is
+     * as good as not being there. One that's slow mid-answer isn't that. */
+    long status = 0, headers = 0;
+    curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &status);
+    curl_easy_getinfo(c, CURLINFO_HEADER_SIZE, &headers);
+    return status == 0 && headers == 0;
 }
 
 static void share_lock(CURL *c, curl_lock_data data, curl_lock_access access, void *ud) {
@@ -293,9 +305,16 @@ static CURL *easy_new(const char *url, struct curl_slist **hdrs, const char *aut
 static int finish(CURL *c, CURLcode rc, membuf *m, http_resp *out, const char *url, const char *errbuf, int probe) {
     memset(out, 0, sizeof *out);
     out->no_answer = rc != CURLE_OK && no_answer(c, rc);
+    out->aborted = rc == CURLE_ABORTED_BY_CALLBACK;
     down_note(url, out->no_answer, probe);
     if (rc != CURLE_OK) {
         snprintf(out->error, sizeof out->error, "%s", curl_easy_strerror(rc));
+        /* A download (CURLOPT_FAILONERROR) stopped by the server's answer:
+         * say which, so a 404 isn't "HTTP response code said error". */
+        if (rc == CURLE_HTTP_RETURNED_ERROR) {
+            curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &out->status);
+            snprintf(out->error, sizeof out->error, "HTTP %ld", out->status);
+        }
         /* "Timeout was reached" alone can't tell a server that never answered
          * from one that went quiet halfway, or a console with no network. */
         long os_err = 0;

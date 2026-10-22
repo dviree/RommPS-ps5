@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "config.h"
 #include "platform.h"
@@ -289,12 +290,35 @@ int romm_register_device(const char *base, const char *token, char *device_id, i
     return rc;
 }
 
+/* A transfer cut off halfway (RomM restarted, paused, the Wi-Fi dropped)
+ * picks up where it stopped, for as long as each go gets further. One that
+ * gets nothing more ends it: RomM is away, and the download waits for it. */
+#define DOWNLOAD_TRIES 5
+
 int romm_download(const char *path, const char *dest, http_progress_fn cb, void *ud,
                   http_resp *resp) {
-    char base[512], auth[300], url[2048];
+    char base[512], auth[300], url[2048], part[PATH_MAX_LEN];
     current_auth(base, sizeof base, auth, sizeof auth);
     snprintf(url, sizeof url, "%s%s", base, path);
-    return http_download(url, auth, dest, 1, cb, ud, resp);
+    snprintf(part, sizeof part, "%s.part", dest);
+    int rc = -1;
+    for (int go = 1; go <= DOWNLOAD_TRIES; go++) {
+        const int64_t before = file_size(part);
+        rc = http_download(url, auth, dest, 1, cb, ud, resp);
+        if (rc != 0 && resp->status == 404)
+            /* RomM still lists it, its disk doesn't have it: renamed or moved since its last scan. */
+            snprintf(resp->error, sizeof resp->error,
+                     "RomM lists this game, but %.120s is missing from its server. If it was moved or renamed, "
+                     "rescan the platform in RomM",
+                     path_basename(dest));
+        if (rc == 0 || resp->status || resp->no_answer || resp->aborted) break;
+        const int64_t after = file_size(part);
+        if (after <= (before > 0 ? before : 0)) break;
+        LOGI("download of %s cut off at %lld bytes (%s): carrying on", path_basename(dest), (long long)after,
+             resp->error);
+        sleep(2);
+    }
+    return rc;
 }
 
 cJSON *romm_upload(const char *method, const char *path, const char *field, const char *file,

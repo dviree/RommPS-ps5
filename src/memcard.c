@@ -3,6 +3,7 @@
 #include "events.h"
 
 #include <dirent.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -124,7 +125,8 @@ static int find_card(const card *cd, int create) {
 }
 
 /* The card's newest version on RomM that can be downloaded: 0 if none, -1 if
- * the card is gone (404), -2 if RomM couldn't be asked. */
+ * the card is gone (404), -2 if RomM couldn't be asked. Newest is the highest
+ * id, whatever order RomM lists them in. */
 static int latest_version(int card_id, time_t *at) {
     char api[96];
     long st = 0;
@@ -134,12 +136,75 @@ static int latest_version(int card_id, time_t *at) {
     const cJSON *v;
     cJSON_ArrayForEach(v, list) {
         if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(v, "missing_from_fs"))) continue;
-        id = (int)jget_num(v, "id", 0);
+        const int vid = (int)jget_num(v, "id", 0);
+        if (vid <= id) continue;
+        id = vid;
         *at = iso8601_parse(jget_str(v, "created_at", ""));
-        break;
     }
     cJSON_Delete(list);
     return id;
+}
+
+static uint32_t le16(const unsigned char *p) { return (uint32_t)(p[0] | p[1] << 8); }
+static uint32_t le32(const unsigned char *p) { return le16(p) | le16(p + 2) << 16; }
+
+/* A card file that's one byte over and over: one never formatted (PCSX2
+ * makes them all 0xFF), or zeroed. */
+static int unformatted(FILE *fp) {
+    unsigned char b[65536];
+    int first = -1;
+    size_t n;
+    rewind(fp);
+    while ((n = fread(b, 1, sizeof b, fp)) > 0)
+        for (size_t i = 0; i < n; i++) {
+            if (first < 0) first = b[i];
+            if (b[i] != first || (first != 0xff && first != 0)) return 0;
+        }
+    return first >= 0;
+}
+
+/* How many saves a card holds: 0 for a freshly formatted or never formatted
+ * one, -1 when it's no card we can read (then it's never called blank). PS1
+ * cards, PS2 cards (with or without ECC) and Dreamcast VMUs. */
+static int card_saves(const char *path) {
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return -1;
+    unsigned char b[2048];
+    const int64_t size = file_size(path);
+    int saves = -1;
+    size_t n = fread(b, 1, sizeof b, fp);
+    if (n == sizeof b && b[0] == 'M' && b[1] == 'C' && size == 128 * 1024) {
+        /* PS1: directory frames 1-15, 0x51 starts a save */
+        saves = 0;
+        for (int i = 1; i < 16; i++) saves += b[i * 128] == 0x51;
+    } else if (n >= 0x40 && !memcmp(b, "Sony PS2 Memory Card Format ", 28)) {
+        /* PS2: the root directory's "." entry counts its entries, "." and ".." included */
+        const uint32_t page = le16(b + 0x28), ppc = le16(b + 0x2a), clusters = le32(b + 0x30);
+        const uint32_t alloc = le32(b + 0x34), root = le32(b + 0x3c);
+        const int64_t raw = (int64_t)clusters * ppc * page, ecc = (int64_t)clusters * ppc * (page + page / 32);
+        const int64_t stride = size == ecc ? page + page / 32 : size == raw ? page : 0;
+        unsigned char e[8];
+        if (page == 512 && ppc && stride && fseek(fp, (long)((int64_t)(alloc + root) * ppc * stride), SEEK_SET) == 0 &&
+            fread(e, 1, sizeof e, fp) == sizeof e && (le16(e) & 0x8020) == 0x8020)
+            saves = le32(e + 4) >= 2 ? (int)le32(e + 4) - 2 : 0;
+    } else if (size == 128 * 1024) {
+        /* Dreamcast VMU: the root block (255) says where the directory is;
+         * each 32-byte entry's first byte is 0 when unused */
+        unsigned char rb[512], dir[512];
+        if (fseek(fp, 255 * 512, SEEK_SET) == 0 && fread(rb, 1, sizeof rb, fp) == sizeof rb) {
+            const uint32_t at = le16(rb + 0x4a), blocks = le16(rb + 0x4c);
+            if (at < 255 && blocks && blocks <= at + 1 && blocks <= 16) {
+                saves = 0;
+                for (uint32_t k = 0; k < blocks && saves >= 0; k++) {
+                    if (fseek(fp, (long)(at - k) * 512, SEEK_SET) != 0 || fread(dir, 1, sizeof dir, fp) != sizeof dir) saves = -1;
+                    for (int i = 0; i < 16 && saves >= 0; i++) saves += dir[i * 32] != 0;
+                }
+            }
+        }
+    }
+    if (saves < 0 && unformatted(fp)) saves = 0;
+    fclose(fp);
+    return saves;
 }
 
 static void remember(const card *cd, int card_id, const char *hash, int version_id) {
@@ -188,13 +253,16 @@ static void backup_local(const char *path) {
     copy_file(path, bak);
 }
 
-/* RomM's version replaces this console's card (kept in backups first).
- * 0, or -1 with err set. */
-static int download_card(const card *cd, int version_id, char *err, int en) {
-    char api[128], zip[PATH_MAX_LEN], dir[PATH_MAX_LEN], got[PATH_MAX_LEN] = "", tmp[PATH_MAX_LEN];
+/* RomM's version, fetched into tmp/card-v<id>/ (drop it with fetched_drop):
+ * got is the card in it, written when the card was last written (0 if the
+ * zip doesn't say). 0, or -1 with err set. */
+static int fetch_card(int version_id, char *got, size_t gn, time_t *written, char *err, int en) {
+    char api[128], zip[PATH_MAX_LEN], dir[PATH_MAX_LEN];
     snprintf(api, sizeof api, "/api/memory-cards/versions/%d/content", version_id);
     snprintf(zip, sizeof zip, "%s/tmp/card-v%d.zip", plat_data_dir(), version_id);
     snprintf(dir, sizeof dir, "%s/tmp/card-v%d", plat_data_dir(), version_id);
+    got[0] = 0;
+    *written = 0;
     mkdir_parent(zip);
     http_resp r;
     if (romm_download(api, zip, NULL, NULL, &r) != 0) {
@@ -203,13 +271,15 @@ static int download_card(const card *cd, int version_id, char *err, int en) {
         return -1;
     }
     /* The one file in it, whatever another emulator named it. */
+    remove_tree(dir);
     mkdir_p(dir);
     int rc = zip_extract_all(zip, dir); /* how many files it wrote */
+    *written = zip_first_time(zip);
     unlink(zip);
     DIR *d = rc > 0 ? opendir(dir) : NULL;
     struct dirent *de;
     while (d && (de = readdir(d)))
-        if (de->d_name[0] != '.' && !got[0]) path_join(got, sizeof got, dir, de->d_name);
+        if (de->d_name[0] != '.' && !got[0]) path_join(got, gn, dir, de->d_name);
     if (d) closedir(d);
     /* A card is the same file wherever it's kept (its RomM name is the file's,
      * under its system): only an empty one is refused. */
@@ -218,11 +288,26 @@ static int download_card(const card *cd, int version_id, char *err, int en) {
         remove_tree(dir);
         return -1;
     }
+    return 0;
+}
+
+static void fetched_drop(const char *got) {
+    char dir[PATH_MAX_LEN];
+    str_copy(dir, sizeof dir, got);
+    char *slash = strrchr(dir, '/');
+    if (slash) *slash = 0;
+    remove_tree(dir);
+}
+
+/* A fetched card replaces this console's (kept in backups first). 0, or -1
+ * with err set. */
+static int install_card(const card *cd, const char *got, char *err, int en) {
+    char tmp[PATH_MAX_LEN];
     backup_local(cd->path);
     snprintf(tmp, sizeof tmp, "%s.rommps", cd->path);
     mkdir_parent(cd->path);
-    rc = copy_file(got, tmp) == 0 && rename(tmp, cd->path) == 0 ? 0 : -1;
-    remove_tree(dir);
+    const int rc = copy_file(got, tmp) == 0 && rename(tmp, cd->path) == 0 ? 0 : -1;
+    fetched_drop(got);
     if (rc) {
         unlink(tmp);
         snprintf(err, (size_t)en, "could not write %s", cd->path);
@@ -230,9 +315,16 @@ static int download_card(const card *cd, int version_id, char *err, int en) {
     return rc;
 }
 
+static int download_card(const card *cd, int version_id, char *err, int en) {
+    char got[PATH_MAX_LEN];
+    time_t written;
+    if (fetch_card(version_id, got, sizeof got, &written, err, en) != 0) return -1;
+    return install_card(cd, got, err, en);
+}
+
 /* One card, both ways. 1 if one went up, 2 if one came down, 0 for nothing,
- * -1 on an error. */
-static int sync_card(const card *cd) {
+ * -1 on an error. upload_only: a game runs and may have the card open. */
+static int sync_card(const card *cd, int upload_only) {
     char ident[128], hash[33] = "", err[128];
     card_identity(cd, ident, sizeof ident);
     const int here = file_exists(cd->path) && md5_file_hex(cd->path, hash) == 0;
@@ -251,15 +343,19 @@ static int sync_card(const card *cd) {
     if (remote == -2) return -1;
     if (remote == -1) card_id = 0, remote = 0; /* deleted on RomM: made again below */
 
+    /* Versions only count up: an older one (ours went missing on RomM) is no news. */
     const int local_changed = here && strcmp(hash, synced_hash) != 0;
-    const int remote_changed = remote > 0 && remote != synced_version;
-    int up = local_changed && !remote_changed;
-    int down = remote_changed && (!local_changed || remote_at > file_mtime(cd->path));
-    if (local_changed && remote_changed) {
-        up = !down;
-        LOGI("memory card %s changed here and on RomM: keeping the newer, %s", cd->name, up ? "this console's" : "RomM's");
-    }
-    if (down && sync_game_running()) return 0; /* the emulator has it open: after the game */
+    const int remote_changed = remote > synced_version;
+    const int both = local_changed && remote_changed; /* also every card's first sync since 1.3 */
+    /* A card wiped or made fresh here comes back from RomM instead of going up. */
+    const int blank_here = here && card_saves(cd->path) == 0;
+    int up = local_changed && !remote_changed && !(blank_here && remote > 0);
+    int down = remote > 0 && !up && (remote_changed || (local_changed && blank_here));
+    /* Not while any game runs, the sync at its start included: an emulator
+     * that has the card open keeps writing to the file it opened, and one
+     * swapped in under it would lose everything saved after. (Waking from
+     * rest also looks like a game starting.) */
+    if (down && (upload_only || sync_game_running())) return 0;
     if (down && !here) {
         /* A card this console doesn't have yet, for an emulator that's here. */
         char parent[PATH_MAX_LEN];
@@ -267,6 +363,34 @@ static int sync_card(const card *cd) {
         char *slash = strrchr(parent, '/');
         if (slash) *slash = 0;
         if (!dir_exists(parent)) return 0;
+    }
+    char got[PATH_MAX_LEN] = "";
+    if (down) {
+        /* RomM's copy first, to see what it is. */
+        time_t written = 0;
+        if (fetch_card(remote, got, sizeof got, &written, err, sizeof err) != 0) {
+            LOGE("memory card %s: %s", cd->path, err);
+            return -1;
+        }
+        char theirs[33] = "";
+        md5_file_hex(got, theirs);
+        if (here && !strcmp(theirs, hash)) { /* the same card: nothing to move */
+            fetched_drop(got);
+            remember(cd, card_id, hash, remote);
+            return 0;
+        }
+        if (here) {
+            /* A blank card never beats one with saves; otherwise the one
+             * written last wins (zips older than 1.3 only say when they went up). */
+            const int mine = card_saves(cd->path), theirs_n = card_saves(got);
+            if (mine == 0 && theirs_n > 0) down = 1;
+            else if (theirs_n == 0 && mine > 0) down = 0;
+            else if (both) down = (written ? written : remote_at) > file_mtime(cd->path);
+            if (both) LOGI("memory card %s changed here and on RomM: keeping %s", cd->name, down ? "RomM's" : "this console's");
+            else if (!down) LOGI("memory card %s: RomM's copy is blank, this console's goes up instead", cd->name);
+            up = !down;
+        }
+        if (!down) fetched_drop(got);
     }
     if (up) {
         if (!card_id) card_id = find_card(cd, 1);
@@ -281,7 +405,7 @@ static int sync_card(const card *cd) {
         return 1;
     }
     if (down) {
-        if (download_card(cd, remote, err, sizeof err) != 0) {
+        if (install_card(cd, got, err, sizeof err) != 0) {
             LOGE("memory card %s: %s", cd->path, err);
             return -1;
         }
@@ -296,13 +420,13 @@ static int sync_card(const card *cd) {
     return 0;
 }
 
-int memcard_sync(int *down) {
+int memcard_sync(int upload_only, int *down) {
     *down = 0;
     if (!memcard_enabled()) return 0;
     card cards[MAX_CARDS];
     int n = cards_list(cards, MAX_CARDS), up = 0;
     for (int i = 0; i < n; i++) {
-        int r = sync_card(&cards[i]);
+        int r = sync_card(&cards[i], upload_only);
         if (r == 1) up++;
         if (r == 2) (*down)++;
     }

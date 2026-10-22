@@ -290,7 +290,8 @@ static void move_autorun(const char *name) {
 
 /* Other romm-sync ELFs in /data/payloads: older names, a PS5 build, a test
  * build's leftovers. GoldHEN lists them all in its payload menu, and running
- * the wrong one looks just like RomM Sync failing to start. */
+ * the wrong one looks just like RomM Sync failing to start. The payload's own
+ * update in progress (romm-sync-ps4.elf.tmp) is left alone. */
 static void remove_stale_payloads(void) {
     DIR *d = opendir(PAYLOAD_DIR);
     struct dirent *e;
@@ -302,7 +303,9 @@ static void remove_stale_payloads(void) {
     }
     while ((e = readdir(d)) && n < 16) {
         size_t l = strlen(e->d_name);
-        if (strncmp(e->d_name, "romm-sync", 9) != 0 || !strcmp(e->d_name, "romm-sync-ps4.elf")) continue;
+        if (strncmp(e->d_name, "romm-sync", 9) != 0 || !strcmp(e->d_name, "romm-sync-ps4.elf") ||
+            !strcmp(e->d_name, "romm-sync-ps4.elf.tmp"))
+            continue;
         if (!(l > 4 && !strcmp(e->d_name + l - 4, ".elf")) && !(l > 8 && !strcmp(e->d_name + l - 8, ".elf.tmp"))) continue;
         snprintf(names[n++], sizeof names[0], "%s", e->d_name);
     }
@@ -599,7 +602,8 @@ int main(void) {
     sceCommonDialogInitialize();
 
     installed = install_payload();
-    remove_stale_payloads();
+    /* Only with ours in place: AutoRun entries move to it. */
+    if (installed >= 0 && access(PAYLOAD_PATH, F_OK) == 0) remove_stale_payloads();
 #ifdef ROMM_NETLOG
     netlog_report();
 #endif

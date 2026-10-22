@@ -94,6 +94,41 @@ static void on_crash(int sig) {
     raise(sig);
 }
 
+/* Emulators found on the console that setup never saw (installed later, or
+ * new to this version): said once, so they don't go unnoticed. Ones the user
+ * turned off still have a profile, and aren't news. */
+static void announce_new_emulators(void) {
+    if (!g_cfg.profiles_custom) return; /* setup offers them all anyway */
+    cJSON *found = detect_emulators();
+    char names[160] = "";
+    int fresh = 0;
+    const cJSON *c, *p;
+    state_lock();
+    cJSON *seen = state_section("emulators_seen");
+    cJSON_ArrayForEach(c, found) {
+        const char *id = jget_str(c, "id", jget_str(c, "kind", "")), *root = jget_str(c, "root", "");
+        int known = cJSON_GetObjectItemCaseSensitive(seen, root) != NULL;
+        config_lock();
+        cJSON_ArrayForEach(p, g_cfg.profiles)
+            known |= !strcmp(jget_str(p, "id", ""), id) || (root[0] && !strcmp(jget_str(p, "root", ""), root));
+        config_unlock();
+        if (known) continue;
+        cJSON_AddTrueToObject(seen, root);
+        const char *name = jget_str(c, "name", id);
+        if (++fresh <= 3) snprintf(names + strlen(names), sizeof names - strlen(names), "%s%s", fresh > 1 ? ", " : "", name);
+        events_add("emulator", "found", 0, root, name, "Turn it on in Emulator Settings");
+    }
+    if (fresh) state_save();
+    state_unlock();
+    cJSON_Delete(found);
+    if (!fresh) return;
+    events_save();
+    LOGI("new emulators found: %s%s", names, fresh > 3 ? " and more" : "");
+    if (fresh > 3) plat_notify("RommPS found new emulators: %s and %d more. Turn them on in Emulator Settings.", names, fresh - 3);
+    else plat_notify("RommPS found %s: %s. Turn %s on in Emulator Settings.", fresh == 1 ? "a new emulator" : "new emulators",
+                     names, fresh == 1 ? "it" : "them");
+}
+
 static void *app_main(void *arg) {
     (void)arg;
     int init = plat_init();
@@ -131,6 +166,7 @@ static void *app_main(void *arg) {
     /* RetroArch 2.0 keeps games in new folders. */
     ra2_check(1);
     events_load();
+    announce_new_emulators();
     /* Copies of older versions left on the console are brought up to date. */
     autostart_repair();
     http_global_init(plat_ca_bundle(), g_cfg.tls_verify);

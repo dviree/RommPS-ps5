@@ -2,11 +2,13 @@
 #include "sync.h"
 #include "covers.h"
 
+#include <ctype.h>
 #include <dirent.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -41,6 +43,7 @@ typedef struct job {
     double speed; /* bytes/s, smoothed */
     char note[80]; /* Running job updates this after a download. */
     sync_game_result saves; /* what the sync after the download brought */
+    int when_back;            /* failed with RomM not answering: goes again once it does */
     double sample_t;
     int64_t sample_bytes;
     struct job *next;
@@ -97,10 +100,25 @@ static int cancelled(job *j) {
     return c;
 }
 
+/* Whether RomM is away: known not to answer, or not answering now. A
+ * transfer cut off half way doesn't say so by itself, hence the ask. */
+static int romm_away(void) {
+    char why[160];
+    if (romm_no_answer(why, sizeof why)) return 1;
+    long st = 0;
+    cJSON_Delete(romm_call("GET", "/api/heartbeat", NULL, &st));
+    return st == 0 && romm_no_answer(why, sizeof why);
+}
+
 static void job_end(job *j, job_status st, const char *fmt, const char *arg) {
+    const int away = st == JOB_ERROR && !cancelled(j) && romm_away();
     pthread_mutex_lock(&g_q_lock);
     j->status = j->cancel ? JOB_CANCELLED : st;
     if (fmt && j->status == JOB_ERROR) snprintf(j->error, sizeof j->error, fmt, arg ? arg : "");
+    if (j->status == JOB_ERROR && away) {
+        j->when_back = 1;
+        str_copy(j->error, sizeof j->error, "RomM isn't answering. This starts again once it does");
+    }
     if (j->status == JOB_DONE) j->done = j->total;
     pthread_mutex_unlock(&g_q_lock);
     if (j->status == JOB_ERROR) LOGE("download of %s failed: %s", j->name, j->error);
@@ -186,6 +204,18 @@ static nx_kind nx_title(const char *name, unsigned long long *game, unsigned lon
     return kind;
 }
 
+/* The title id a name carries ("0100ABF008968800"), for showing; "" if none. */
+static const char *nx_title_hex(const char *name, char out[17]) {
+    out[0] = 0;
+    for (const char *p = strchr(name, '['); p; p = strchr(p + 1, '['))
+        if (!strncmp(p + 1, "01", 2) && strspn(p + 1, "0123456789abcdefABCDEF") == 16) {
+            for (int i = 0; i < 16; i++) out[i] = (char)toupper((unsigned char)p[1 + i]);
+            out[16] = 0;
+            break;
+        }
+    return out;
+}
+
 /* A file of a game's folder: by its title id, else by RomM's category. */
 static nx_kind nx_file_kind(const char *name, const char *category) {
     unsigned long long game;
@@ -242,8 +272,10 @@ static int nx_add_addon(const cJSON *it, const cJSON *page, int first, void *ctx
     }
     cJSON *o = cJSON_CreateObject();
     cJSON_AddNumberToObject(o, "id", jget_num(it, "id", 0));
+    char tid[17];
     cJSON_AddStringToObject(o, "kind", k == NX_UPDATE ? "update" : "dlc");
     cJSON_AddStringToObject(o, "name", jget_str(it, "fs_name", ""));
+    cJSON_AddStringToObject(o, "title_id", nx_title_hex(jget_str(it, "fs_name", ""), tid));
     cJSON_AddNumberToObject(o, "size", jget_num(it, "fs_size_bytes", 0));
     cJSON_AddItemToArray(fd->out, o);
     return 0;
@@ -749,7 +781,39 @@ static void *worker(void *arg) {
     return NULL;
 }
 
+/* Back in the queue as it was first asked for. Caller holds the lock, and
+ * checked the game isn't already downloading. */
+static void job_requeue(job *j) {
+    j->status = JOB_QUEUED;
+    j->cancel = j->when_back = 0;
+    j->error[0] = j->note[0] = 0;
+    j->done = j->total = j->base = j->sample_bytes = 0;
+    j->speed = j->sample_t = 0;
+    memset(&j->saves, 0, sizeof j->saves);
+}
+
+static int downloading(const job *j) {
+    for (const job *p = g_jobs; p; p = p->next)
+        if (p != j && p->type == j->type && p->target_id == j->target_id && !finished(p)) return 1;
+    return 0;
+}
+
+/* RomM answers again: what failed for want of it goes again. */
+static void romm_back(const char *origin) {
+    int n = 0;
+    pthread_mutex_lock(&g_q_lock);
+    for (job *j = g_jobs; j; j = j->next)
+        if (j->status == JOB_ERROR && j->when_back && !downloading(j)) {
+            job_requeue(j);
+            n++;
+        }
+    if (n) pthread_cond_broadcast(&g_q_cond);
+    pthread_mutex_unlock(&g_q_lock);
+    if (n) LOGI("%s answers again: restarting %d download%s", origin, n, n == 1 ? "" : "s");
+}
+
 void library_init(void) {
+    http_on_back(romm_back);
     for (int i = 0; i < MAX_WORKERS; i++) {
         thread_start(worker, NULL);
     }
@@ -852,6 +916,27 @@ int library_cancel(int id, char *err, int en) {
             snprintf(err, (size_t)en, "the game is downloaded, its saves are syncing");
         } else {
             snprintf(err, (size_t)en, "download already finished");
+        }
+        break;
+    }
+    pthread_mutex_unlock(&g_q_lock);
+    if (rc && !err[0]) snprintf(err, (size_t)en, "no such download");
+    return rc;
+}
+
+int library_retry(int id, char *err, int en) {
+    int rc = -1;
+    pthread_mutex_lock(&g_q_lock);
+    for (job *j = g_jobs; j; j = j->next) {
+        if (j->id != id) continue;
+        if (j->status != JOB_ERROR && j->status != JOB_CANCELLED)
+            snprintf(err, (size_t)en, finished(j) ? "that download finished" : "that download is still going");
+        else if (downloading(j))
+            snprintf(err, (size_t)en, "already downloading");
+        else {
+            job_requeue(j);
+            pthread_cond_broadcast(&g_q_cond);
+            rc = 0;
         }
         break;
     }
@@ -1215,6 +1300,12 @@ static void clear_old_copies(const profile_map *maps, int n) {
             char copy[PATH_MAX_LEN], game[PATH_MAX_LEN];
             path_join(copy, sizeof copy, x->own_rom_dir, de->d_name);
             path_join(game, sizeof game, x->rom_dir, de->d_name);
+            /* The app started meanwhile: its mount shows the main one's games
+             * under the copy's name, and removing "the copy" would remove them. */
+            struct stat cs, gs;
+            if (plat_is_mount(x->own_rom_dir) ||
+                (stat(copy, &cs) == 0 && stat(game, &gs) == 0 && cs.st_ino == gs.st_ino))
+                break;
             if (!same_game(copy, game)) {
                 LOGW("%s: %s isn't the same as %s, kept", x->profile_name, copy, game);
                 continue;
@@ -1348,8 +1439,8 @@ again:;
         maps = NULL;
         n = load_maps(&maps);
     }
+    clear_old_copies(maps, n); /* before the mounts can hide them */
     update_mounts(maps, n);
-    clear_old_copies(maps, n);
     nx_unfold(maps, n);
     for (int i = 0; i < n; i++) {
         const profile_map *x = &maps[i];
@@ -1492,21 +1583,35 @@ cJSON *library_details(int rom_id, char *err, int en) {
         cJSON_AddStringToObject(out, "archived", msg);
     }
     unsigned long long game;
-    /* A Switch game's update and DLC, in its folder or as games of their own:
-     * [{"name", "kind", "size"}], updates first. */
+    /* A Switch game's title id, and its update and DLC, in its folder or as
+     * games of their own: [{"name", "kind", "size", "title_id"}], updates
+     * first. A folder holding a bundle (a collection's games, each with its
+     * own title id) lists the other games and theirs apart, as "bundle":
+     * they come with the download, but aren't this game's. */
     if (nx && !archive && nx_rom(rom, &game) == NX_GAME) {
+        char tid[17];
+        snprintf(tid, sizeof tid, "%016llX", game);
+        cJSON_AddStringToObject(out, "title_id", tid);
         cJSON *list = cJSON_CreateArray(), *found = nx_addons((int)jget_num(rom, "platform_id", 0), game), *a;
+        cJSON *bundle = cJSON_CreateArray();
         const cJSON *f;
         cJSON_ArrayForEach(f, cJSON_GetObjectItemCaseSensitive(rom, "files")) {
             if (extra_file(f)) continue;
-            const nx_kind k = nx_file_kind(jget_str(f, "file_name", ""), jget_str(f, "category", ""));
-            if (k != NX_UPDATE && k != NX_DLC) continue;
+            const char *name = jget_str(f, "file_name", "");
+            unsigned long long of = 0;
+            const nx_kind titled = nx_title(name, &of, NULL);
+            const nx_kind k = nx_file_kind(name, jget_str(f, "category", ""));
+            const int other = titled != NX_NONE && of != game;
+            if (!other && k != NX_UPDATE && k != NX_DLC) continue;
             a = cJSON_CreateObject();
-            cJSON_AddStringToObject(a, "kind", k == NX_UPDATE ? "update" : "dlc");
-            cJSON_AddStringToObject(a, "name", jget_str(f, "file_name", ""));
+            cJSON_AddStringToObject(a, "kind", k == NX_UPDATE ? "update" : k == NX_DLC ? "dlc" : "game");
+            cJSON_AddStringToObject(a, "name", name);
+            cJSON_AddStringToObject(a, "title_id", nx_title_hex(name, tid));
             cJSON_AddNumberToObject(a, "size", jget_num(f, "file_size_bytes", 0));
-            cJSON_AddItemToArray(found, a);
+            cJSON_AddItemToArray(other ? bundle : found, a);
         }
+        if (cJSON_GetArraySize(bundle)) cJSON_AddItemToObject(out, "bundle", bundle);
+        else cJSON_Delete(bundle);
         int updates = 0, dlc = 0;
         for (int pass = 0; pass < 2; pass++)
             cJSON_ArrayForEach(a, found) {
@@ -1515,6 +1620,7 @@ cJSON *library_details(int rom_id, char *err, int en) {
                 cJSON *o = cJSON_CreateObject();
                 cJSON_AddStringToObject(o, "kind", up ? "update" : "dlc");
                 cJSON_AddStringToObject(o, "name", jget_str(a, "name", ""));
+                cJSON_AddStringToObject(o, "title_id", jget_str(a, "title_id", ""));
                 cJSON_AddNumberToObject(o, "size", jget_num(a, "size", 0));
                 cJSON_AddItemToArray(list, o);
                 updates += up;

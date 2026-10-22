@@ -420,6 +420,21 @@ void str_copy(char *dst, size_t n, const char *src) {
     dst[l] = 0;
 }
 
+void str_copy_utf8(char *dst, size_t n, const char *src) {
+    if (!n) return;
+    if (!src) src = "";
+    size_t l = strlen(src);
+    if (l >= n) {
+        l = n - 1;
+        /* src[l] continuing a character that starts before it: cut before that */
+        size_t k = l;
+        while (k > 0 && l - k < 3 && ((unsigned char)src[k] & 0xC0) == 0x80) k--;
+        if (k < l && ((unsigned char)src[k] & 0xC0) == 0xC0) l = k;
+    }
+    memcpy(dst, src, l);
+    dst[l] = 0;
+}
+
 void str_template(char *out, size_t n, const char *tpl, const char *const *vars) {
     size_t o = 0;
     for (const char *p = tpl; *p && o + 1 < n;) {

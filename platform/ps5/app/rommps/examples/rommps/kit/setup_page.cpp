@@ -116,10 +116,11 @@ bool at_least(const std::string &version, int major, int minor, int patch)
 // The end of a text that fits a width, for a field that shows where typing is.
 std::string tail(const hui::gfx::Font &font, const std::string &text, float size, float width)
 {
+    // A character at a time: a cut inside one would draw as "?"
     std::size_t from = 0;
     while (from < text.size() && font.measure(std::string_view(text).substr(from), size) > width)
-        ++from;
-    return from ? "\xE2\x80\xA6" + text.substr(from + 1) : text;
+        from = char_boundary(text, from + 1);
+    return from ? "\xE2\x80\xA6" + text.substr(char_boundary(text, from + 1)) : text;
 }
 
 hui::ui::KeyboardLayout url_layout()
@@ -809,7 +810,7 @@ std::vector<Row> SetupPage::emulator_rows(const App &app, std::vector<RowRef> *r
     };
     auto shorten = [](std::string value) {
         if (value.size() > 34)
-            value = "\xE2\x80\xA6" + value.substr(value.size() - 33);
+            value = "\xE2\x80\xA6" + value.substr(char_boundary(value, value.size() - 33));
         return value;
     };
     // Something set up by its folders: a switch, then its three folders when on.
@@ -1525,8 +1526,9 @@ void SetupPage::draw_heading(hui::gfx::DrawList &list, const hui::ui::Fonts &fon
     else
         std::snprintf(label, sizeof label, "STEP %d OF %d", static_cast<int>(step_) + 1, kSteps);
     ui::text(list, fonts.semibold, label, x, 196, 20, look.accent, Align::left, 4.0f);
-    ui::text(list, fonts.display, title, x - 3, 262, 56, look.text);
-    ui::paragraph(list, fonts.regular, text, x, 312, 26, 1500, 36, look.muted, 2);
+    // The picker's heading names a platform as RomM spells it, and the folder
+    ui::text(list, fonts.display, plain_text(title), x - 3, 262, 56, look.text);
+    ui::paragraph(list, fonts.regular, plain_text(text.c_str()), x, 312, 26, 1500, 36, look.muted, 2);
     list.pop_opacity();
 }
 
@@ -1567,7 +1569,8 @@ void SetupPage::draw_server(hui::gfx::DrawList &list, const hui::ui::Fonts &font
                  kField.x + 4, y, 24, look.text);
     }
     else if (!error_.empty())
-        ui::text(list, fonts.semibold, fonts.semibold.font->fit(error_, 24, kField.w), kField.x + 4, y, 24, look.danger);
+        ui::text(list, fonts.semibold, fonts.semibold.font->fit(plain_text(error_.c_str()), 24, kField.w), kField.x + 4, y, 24,
+                 look.danger);
     else
     {
         ui::draw_button(list, fonts, look.glyphs(), ui::Button::triangle, kField.x + 4, y - 9, 30);
@@ -1604,7 +1607,8 @@ void SetupPage::draw_approve(hui::gfx::DrawList &list, const hui::ui::Fonts &fon
     if (has_qr)
         draw_qr(list, qr, {panel.x + panel.w - 330, panel.y + 70, 290, 290});
     const float cx = has_qr ? panel.x + (panel.w - 360) * 0.5f : panel.cx();
-    ui::text(list, fonts.semibold, fonts.semibold.font->fit(s.verification_url, 30, has_qr ? panel.w - 460 : panel.w - 120),
+    ui::text(list, fonts.semibold,
+             fonts.semibold.font->fit(plain_text(s.verification_url.c_str()), 30, has_qr ? panel.w - 460 : panel.w - 120),
              cx, panel.y + 92, 30,
              look.accent, Align::center);
     std::string code;

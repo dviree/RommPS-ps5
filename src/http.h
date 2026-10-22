@@ -12,6 +12,7 @@ typedef struct {
     size_t len;
     char error[256];
     int no_answer; /* no connection at all: refused, unknown host or timed out */
+    int aborted;   /* the progress callback stopped it */
 } http_resp;
 
 /* Progress callback: return non-zero to abort. total may be 0 if unknown. */
@@ -44,6 +45,11 @@ int http_download_verified(const char *url, const char *dest, http_progress_fn p
 /* 1 while url's server isn't answering: requests to it fail at once, and one
  * at a time checks whether it's back (every 5 to 30 s). */
 int http_down(const char *url);
+
+/* Called (on the thread that found out) when a server that wasn't answering
+ * answers again, with its origin ("http://10.0.0.2:8080"). */
+typedef void (*http_back_fn)(const char *origin);
+void http_on_back(http_back_fn fn);
 
 /* URL-encode a query/path component into a malloc'd string. */
 char *http_escape(const char *s);

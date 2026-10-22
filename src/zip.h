@@ -3,6 +3,7 @@
 #define ROMM_ZIP_H
 
 #include <stddef.h>
+#include <time.h>
 
 typedef struct {
     const char *path; /* file on disk */
@@ -20,6 +21,10 @@ int zip_extract_entry(const char *zip_path, const char *name, const char *dest);
 /* Extracts every file entry under dest_dir. Entry names that would leave
  * dest_dir are refused. Returns the number of files, or -1. */
 int zip_extract_all(const char *zip_path, const char *dest_dir);
+
+/* When the zip's first entry was last written (its file's time when we made
+ * the zip), or 0 if it doesn't say. */
+time_t zip_first_time(const char *zip_path);
 
 /* RomM's content hash for a zip: md5 of the sorted "name:md5" lines. */
 int zip_content_hash(const char *zip_path, char out[33]);

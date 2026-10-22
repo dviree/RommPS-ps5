@@ -2355,7 +2355,7 @@ static int share_saves(scan_ctx *c) {
                 first = 0;
         if (!first) continue;
         char paths[8][PATH_MAX_LEN];
-        int n = 0, newest = -1;
+        int n = 0, newest = -1, newest_blank = 0;
         time_t newest_t = 0;
         for (int k = i; k < c->nroms && n < 8; k++) {
             const local_rom *r = &c->roms[k];
@@ -2364,7 +2364,10 @@ static int share_saves(scan_ctx *c) {
                 continue;
             download_target(r, "", c->slot, c, paths[n], sizeof paths[n]);
             time_t t = file_mtime(paths[n]);
-            if (t > newest_t) newest_t = t, newest = n;
+            /* A blank card (an emulator made a fresh one) never beats one with saves. */
+            const int blank = psx_card_saves(r->map, paths[n]) == 0;
+            if (t > 0 && (newest < 0 || (newest_blank && !blank) || (blank == newest_blank && t > newest_t)))
+                newest_t = t, newest = n, newest_blank = blank;
             n++;
         }
         if (n < 2 || newest < 0) continue;
@@ -2702,7 +2705,7 @@ static void run_sync(const char *reason, int only_rom, sync_result *res) {
         res->states_up = sync_states_up(&c, only_rom);
     }
 
-    if (!only_rom) res->cards = memcard_sync(&res->cards_down);
+    if (!only_rom) res->cards = memcard_sync(upload_only, &res->cards_down);
     /* A save that just came down reaches the other emulators that share it. */
     share_saves(&c);
 
@@ -2827,8 +2830,8 @@ static void *worker(void *arg) {
             if (notify) plat_notify("RommPS: couldn't sync. %s", r.error);
         } else {
             /* Issue #10 - Added notification and log file for memory card operations. */
-            LOGI("sync done: %d up, %d down, %d conflicts, %d failed, %d states, %d cards", r.uploaded,
-                 r.downloaded, r.conflicts, r.failed, r.states_up, r.cards);
+            LOGI("sync done: %d up, %d down, %d conflicts, %d failed, %d states, %d cards up, %d cards down", r.uploaded,
+                 r.downloaded, r.conflicts, r.failed, r.states_up, r.cards, r.cards_down);
             char text[200], games[400];
             if (notify && sync_summary(&r, text, sizeof text)) {
                 if (events_games(mark, 3, games, sizeof games)) plat_notify("RommPS: %s\n%s", text, games);

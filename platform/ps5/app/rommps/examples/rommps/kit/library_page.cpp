@@ -83,10 +83,11 @@ void pop_utf8(std::string &s)
 // The end of a text that fits a width.
 std::string tail(const hui::gfx::Font &font, const std::string &text, float size, float width)
 {
+    // A character at a time: a cut inside one would draw as "?"
     std::size_t from = 0;
     while (from < text.size() && font.measure(std::string_view(text).substr(from), size) > width)
-        ++from;
-    return from ? "\xE2\x80\xA6" + text.substr(from + 1) : text;
+        from = char_boundary(text, from + 1);
+    return from ? "\xE2\x80\xA6" + text.substr(char_boundary(text, from + 1)) : text;
 }
 
 struct GridLayout
@@ -705,8 +706,9 @@ void LibraryPage::draw_grid(hui::gfx::DrawList &list, const hui::ui::Fonts &font
     char count[48] = "";
     if (l.ready())
         std::snprintf(count, sizeof count, l.total == 1 ? "1 game" : "%d games", l.total);
-    ui::text(list, fonts.semibold, ui::upper(fonts.semibold.font->fit(where, 20, 1300)), kMargin, 196, 20, accent,
-             Align::left, 4.0f);
+    // What was typed, in curly quotes (plain_text turns them straight in a font without them)
+    ui::text(list, fonts.semibold, ui::upper(fonts.semibold.font->fit(plain_text(where.c_str()), 20, 1300)), kMargin, 196, 20,
+             accent, Align::left, 4.0f);
     ui::text(list, fonts.regular, count, 1824, 196, 22, look.muted, Align::right);
     const float fade = tween::smoothstep(tween::clamp01(shown_age_ / 0.25f));
     if (g)

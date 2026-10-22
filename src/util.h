@@ -75,6 +75,9 @@ int str_ends_with_ci(const char *s, const char *suffix);
 /* Is the file's extension in a list like ".srm,.sav,.state*"? */
 int ext_in_list(const char *file_name, const char *list);
 void str_copy(char *dst, size_t n, const char *src);
+/* str_copy for names people read (and RomM keeps): a cut never splits a
+ * UTF-8 character. Not for bytes cut at a known length: those may not be UTF-8. */
+void str_copy_utf8(char *dst, size_t n, const char *src);
 /* Fills {key} placeholders. vars holds key, value pairs and ends with NULL. */
 void str_template(char *out, size_t n, const char *tpl, const char *const *vars);
 

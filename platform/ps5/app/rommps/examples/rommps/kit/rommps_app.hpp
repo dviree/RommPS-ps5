@@ -23,6 +23,11 @@
 #include <unordered_set>
 #include <vector>
 
+namespace hui::ui
+{
+struct Fonts;
+}
+
 namespace rommps
 {
 
@@ -75,13 +80,17 @@ struct Details
     int sessions = 0, completion = 0, my_rating = 0;
     std::string archived;    // why it can't be downloaded: it's an archive
     int updates = 0, dlc = 0; // a Switch game's, downloaded with it
+    std::string title_id;     // a Switch game's ("0100ABF008968000"), "" otherwise
     struct Addon
     {
-        bool update = false; // else DLC
-        std::string name;
+        enum Kind { update, dlc, game } kind = update; // game: another one in its folder (a collection)
+        std::string name, title_id;
         double size = 0;
     };
-    std::vector<Addon> addons; // the update first, then the DLC
+    // The update first, then the DLC; then the other games of a collection's
+    // folder and theirs, which come with the download but aren't this game's.
+    std::vector<Addon> addons;
+    int bundle = 0; // how many of addons are those
 };
 
 struct Platform
@@ -165,6 +174,7 @@ struct Download
     bool active() const { return status == "queued" || running() || status == "cancelling" || syncing(); }
     bool cancellable() const { return active() && !syncing(); }
     bool finished() const { return !active(); }
+    bool retryable() const { return status == "error" || status == "cancelled"; }
     std::string saves_note() const;
 };
 
@@ -288,6 +298,7 @@ class App
 
     void download(int rom_id, const std::string &name);
     void cancel_download(int job_id);
+    void retry_download(int job_id);
     void remove_game(int rom_id);
     void clear_finished_queue();
     void sync_now();
@@ -405,9 +416,23 @@ class App
 // The program's one App, created on first use.
 App &app();
 
-// Text for the kit's fonts, which are baked for ASCII: accented letters fold
-// to plain ones ("Pokémon" reads "Pokemon").
+// Text the screen's fonts can draw: the characters they have stay ("Pokémon",
+// "Luigi’s Mansion"), the others fold to their nearest ASCII ("Ō" reads "O" in
+// a font without it), and only one with no stand-in at all reads "?".
 std::string plain_text(const char *text);
+
+// The faces plain_text asks: the ones the screen draws text with. Set once the
+// kit has loaded them, before the payload's first answer is read.
+void set_text_fonts(const hui::ui::Fonts &fonts);
+
+// The first byte at or after at that starts a character of UTF-8 text: where
+// to cut it without halving one.
+inline std::size_t char_boundary(const std::string &text, std::size_t at)
+{
+    while (at < text.size() && (static_cast<unsigned char>(text[at]) & 0xC0) == 0x80)
+        ++at;
+    return at;
+}
 
 } // namespace rommps
 

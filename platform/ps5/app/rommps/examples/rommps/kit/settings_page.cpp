@@ -348,8 +348,9 @@ void SettingsPage::draw(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, c
     float y = panel.y + 64;
     auto item = [&](const char *label, const std::string &value) {
         ui::text(list, fonts.semibold, label, x, y, 16, look.panel_muted, hui::gfx::Align::left, 3.0f);
-        ui::text(list, fonts.regular, fonts.regular.font->fit(value.empty() ? "-" : value, 24, panel.w - 72), x, y + 36, 24,
-                 look.panel_text);
+        // The server's address is as it was typed
+        ui::text(list, fonts.regular, fonts.regular.font->fit(value.empty() ? "-" : plain_text(value.c_str()), 24, panel.w - 72), x,
+                 y + 36, 24, look.panel_text);
         y += 80;
     };
     item("ROMM SERVER", s.server);

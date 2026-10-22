@@ -162,6 +162,18 @@ static int list_has_name(const cJSON *arr, const char *name) {
     return 0;
 }
 
+/* A whole BIOS for an emulator that takes the first one it finds (PS2: 4 MB).
+ * The dumps' companions (.nvm, .mec, rom1, erom) are smaller, and are never
+ * the one to keep or the proof there's one already. */
+#define BIOS_IMAGE_MIN (4 << 20)
+
+static int bios_image(const cJSON *files, int64_t size) {
+    const cJSON *f;
+    if (size < BIOS_IMAGE_MIN) return 0;
+    cJSON_ArrayForEach(f, files) if (usable(f) && size == (int64_t)jget_num(f, "file_size_bytes", -1)) return 1;
+    return 0;
+}
+
 /* An emulator that takes the first BIOS it finds already has one: a file of
  * the size of one of RomM's. */
 static int has_one_already(const char *dir, const cJSON *files) {
@@ -172,9 +184,7 @@ static int has_one_already(const char *dir, const cJSON *files) {
         if (de->d_name[0] == '.') continue;
         char p[PATH_MAX_LEN];
         path_join(p, sizeof p, dir, de->d_name);
-        const int64_t size = file_size(p);
-        const cJSON *f;
-        cJSON_ArrayForEach(f, files) if (usable(f) && size > 0 && size == (int64_t)jget_num(f, "file_size_bytes", -1)) found = 1;
+        found = bios_image(files, file_size(p));
     }
     if (d) closedir(d);
     return found;
@@ -208,11 +218,7 @@ static void tidy_pick_one(const char *dir, const cJSON *files, const cJSON *pick
         if (de->d_name[0] == '.') continue;
         char p[PATH_MAX_LEN], md5[33];
         path_join(p, sizeof p, dir, de->d_name);
-        const int64_t size = file_size(p);
-        int sized = 0;
-        const cJSON *f;
-        cJSON_ArrayForEach(f, files) sized |= usable(f) && size > 0 && size == (int64_t)jget_num(f, "file_size_bytes", -1);
-        if (!sized || md5_file_hex(p, md5) != 0 || !by_md5(files, md5)) continue;
+        if (!bios_image(files, file_size(p)) || md5_file_hex(p, md5) != 0 || !by_md5(files, md5)) continue;
         char nvm[PATH_MAX_LEN];
         long long r = 1000 + nn;
         const cJSON *x;
@@ -263,7 +269,8 @@ static int make_plan(const cJSON *rules, const cJSON *files, const char *dir, pl
         if (has_one_already(dir, files)) return 0;
         const cJSON *best = NULL, *x, *f;
         cJSON_ArrayForEach(x, pick) if (!best && cJSON_IsString(x)) best = by_md5(files, x->valuestring);
-        cJSON_ArrayForEach(f, files) if (!best && usable(f) && cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(f, "is_verified"))) best = f;
+        cJSON_ArrayForEach(f, files) if (!best && cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(f, "is_verified")) &&
+                                         bios_image(files, (int64_t)jget_num(f, "file_size_bytes", -1))) best = f;
         if (best) {
             plan[0].f = best;
             plan[0].named = 0;

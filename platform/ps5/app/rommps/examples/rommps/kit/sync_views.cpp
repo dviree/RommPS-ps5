@@ -154,7 +154,7 @@ Row event_row(const cJSON *e, bool with_game)
         if (!part.empty())
             detail += (detail.empty() ? "" : "  \xC2\xB7  ") + part;
     };
-    more(str(e, "detail"));
+    more(plain_text(str(e, "detail"))); // file names, the service's errors
     if (action != "skipped")
         more(plain_text(str(e, "emulator")));
     more(ago(num(e, "t")));

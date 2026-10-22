@@ -1432,6 +1432,14 @@ static void route(request *r) {
         else send_ok(fd);
         return;
     }
+    if (is_post && !strcmp(r->path, "/api/downloads/retry")) {
+        cJSON *j = body_json(r);
+        int rc = library_retry((int)jget_num(j, "id", 0), err, sizeof err);
+        cJSON_Delete(j);
+        if (rc) send_error(fd, 400, err);
+        else send_ok(fd);
+        return;
+    }
     if (is_post && !strcmp(r->path, "/api/downloads/clear")) {
         library_clear_finished();
         send_ok(fd);

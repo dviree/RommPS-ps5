@@ -186,6 +186,12 @@ def card_latest(c):
     return z.read(z.namelist()[0]).decode("latin1") if z.namelist() else None
 
 
+def card_latest_md5(c):
+    import hashlib
+    t = card_latest(c)
+    return hashlib.md5(t.encode("latin1")).hexdigest() if t is not None else None
+
+
 def platform_public(x):
     fw = [firmware_public(f) for f in DB["firmware"] if f["platform_id"] == x["id"]]
     out = {k: v for k, v in x.items() if k != "embed_firmware"} | {"firmware_count": len(fw)}
@@ -203,6 +209,29 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
+        self.wfile.write(body)
+
+    def send_rom(self, data, ctype):
+        """A game's file, honouring Range as RomM does; after _admin/cut, the
+        next one stops halfway with the connection dropped."""
+        rng, start = self.headers.get("Range", ""), 0
+        if rng.startswith("bytes="):
+            start = int(rng[6:].split("-")[0] or 0)
+        body = data[start:]
+        self.send_response(206 if start else 200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        if start:
+            self.send_header("Content-Range", "bytes %d-%d/%d" % (start, len(data) - 1, len(data)))
+        self.end_headers()
+        cut = DB.pop("cut_next", None)
+        if cut is not None and cut < len(body):
+            import socket
+            self.wfile.write(body[:cut])
+            self.wfile.flush()
+            self.close_connection = True
+            self.connection.shutdown(socket.SHUT_RDWR)
+            return
         self.wfile.write(body)
 
     def body(self):
@@ -296,8 +325,12 @@ class H(BaseHTTPRequestHandler):
                 b = self.json_body()
                 import io, zipfile
                 buf = io.BytesIO()
+                # "path": a card image on disk; "written": when that console last wrote it (epoch).
+                import time as _t
+                data = open(b["path"], "rb").read() if "path" in b else b["content"].encode()
+                info = zipfile.ZipInfo(b["file_name"], _t.localtime(b.get("written", _t.time()))[:6])
                 with zipfile.ZipFile(buf, "w") as z:
-                    z.writestr(b["file_name"], b["content"])
+                    z.writestr(info, data)
                 card = [c for c in DB["cards"].values() if c["emulator"] == b["emulator"] and c["name"] == b["name"]]
                 if not card:
                     cid = next_id()
@@ -307,11 +340,20 @@ class H(BaseHTTPRequestHandler):
                                             "file_size_bytes": len(buf.getvalue()), "created_at": NOW().isoformat(),
                                             "missing_from_fs": False, "content": buf.getvalue()})
                 return self.reply(200, {"ok": True})
+            if p == "/_admin/cut" and method == "POST":
+                DB["cut_next"] = int(self.json_body()["bytes"])
+                return self.reply(200, {"ok": True})
+            if p == "/_admin/offline" and method == "POST":
+                # RomM stopped for a while: connections are refused, then it's back as it was.
+                OFFLINE["for"] = float(self.json_body().get("seconds", 5))
+                threading.Thread(target=SERVER["srv"].shutdown, daemon=True).start()
+                return self.reply(200, {"ok": True})
             if p == "/_admin/firmware" and method == "POST":
                 # A BIOS file; "embed" makes its platform carry its firmware list, as RomM 5 does.
                 b = self.json_body()
                 import base64
                 raw = base64.b64decode(b["content_b64"]) if "content_b64" in b else b["content"].encode()
+                raw += b"\0" * max(0, b.get("pad", 0) - len(raw))  # a real BIOS's size, zeros after the content
                 DB["firmware"].append({"id": next_id(), "platform_id": b["platform_id"], "file_name": b["file_name"],
                                        "content": raw, "is_verified": b.get("is_verified", False),
                                        "missing": b.get("missing", False)})
@@ -327,7 +369,8 @@ class H(BaseHTTPRequestHandler):
                                         "sessions": DB["sessions"],
                                         "asset_hits": DB["asset_hits"], "device_name": DB["device_name"],
                                         "cards": [{"name": c["name"], "emulator": c["emulator"], "versions": len(c["versions"]),
-                                                   "latest": card_latest(c)} for c in DB["cards"].values()]})
+                                                   "latest": card_latest(c), "latest_md5": card_latest_md5(c)}
+                                                  for c in DB["cards"].values()]})
             if not self.authed():
                 return
             dev = qs("device_id")
@@ -365,7 +408,7 @@ class H(BaseHTTPRequestHandler):
                 r = DB["roms"][int(parts[2])]
                 if r.get("files"):
                     if len(r["files"]) == 1:
-                        return self.reply(200, raw=r["files"][0]["content"], ctype="application/octet-stream")
+                        return self.send_rom(r["files"][0]["content"], "application/octet-stream")
                     import io, zipfile
                     buf = io.BytesIO()
                     with zipfile.ZipFile(buf, "w") as zf:
@@ -374,12 +417,14 @@ class H(BaseHTTPRequestHandler):
                         zf.writestr(r["fs_name"] + ".m3u",
                                     "\n".join(f["file_name"] for f in r["files"]).encode())
                     return self.reply(200, raw=buf.getvalue(), ctype="application/zip")
-                return self.reply(200, raw=("ROM:" + r["fs_name"]).encode(), ctype="application/octet-stream")
+                return self.send_rom(("ROM:" + r["fs_name"]).encode(), "application/octet-stream")
             if len(parts) == 6 and parts[:2] == ["api", "roms"] and parts[3:5] == ["files", "content"]:
                 # One file of a folder rom, by its file id.
                 for r in DB["roms"].values():
                     for f in r.get("files") or []:
                         if f["id"] == int(parts[2]):
+                            if f.get("gone"):  # listed, but no longer on RomM's disk: nginx's own 404
+                                return self.reply(404, raw=b"<html>404 Not Found</html>", ctype="text/html")
                             return self.reply(200, raw=f["content"], ctype="application/octet-stream")
                 return self.reply(404, {"detail": "file not found"})
             if p == "/api/firmware":
@@ -537,12 +582,20 @@ class H(BaseHTTPRequestHandler):
         self.route("PUT")
 
 
+SERVER = {}
+OFFLINE = {"for": 0}
+
 if __name__ == "__main__":
+    import time
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8899
-    srv = ThreadingHTTPServer((os.environ.get("MOCK_HOST", "127.0.0.1"), port), H)
-    if len(sys.argv) > 2:
-        import ssl
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ctx.load_cert_chain(sys.argv[2])
-        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
-    srv.serve_forever()
+    while True:
+        srv = ThreadingHTTPServer((os.environ.get("MOCK_HOST", "127.0.0.1"), port), H)
+        if len(sys.argv) > 2:
+            import ssl
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(sys.argv[2])
+            srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+        SERVER["srv"] = srv
+        srv.serve_forever()
+        srv.server_close()
+        time.sleep(OFFLINE["for"])
