@@ -3,6 +3,12 @@
 #   - merging a PR into main from a branch named with a version, e.g.
 #     release/v1.0.2 or v1.0.2-some-fix (the tag is created on the merge commit)
 #   - pushing a version tag manually: git tag v1.0.0 && git push origin v1.0.0
+#
+# Run by hand (Actions > Release > Run workflow, or
+# gh workflow run release.yml -f tag=v1.3.0 -f ref=release/v1.3.0), it instead
+# rebuilds only the PS4 payload from ref and swaps it into the existing tag's
+# release: a PS4 fix that doesn't make the PS5 download anything. Those already
+# on that version reinstall it by hand; the in-app update only offers newer ones.
 name: Release
 
 on:
@@ -11,6 +17,14 @@ on:
   pull_request:
     types: [closed]
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release whose PS4 payload is replaced (v1.3.0)"
+        required: true
+      ref:
+        description: "Branch or commit the PS4 payload is built from"
+        required: true
 
 permissions:
   contents: write
@@ -26,6 +40,7 @@ jobs:
       - name: Resolve version
         id: version
         env:
+          GH_TOKEN: ${{ github.token }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           if [ "$GITHUB_EVENT_NAME" = push ]; then
@@ -37,6 +52,12 @@ jobs:
           fi
           if [ -z "$tag" ]; then
             echo "Branch '$HEAD_REF' has no vX.Y.Z version; skipping release."
+            exit 0
+          fi
+          # A release branch merged again after its release went out (a fix
+          # shipped with the manual PS4 run below, say).
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $tag already exists; skipping."
             exit 0
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
@@ -140,3 +161,61 @@ jobs:
           fi
           gh release create "$TAG" dist/* \
             --target "$SHA" --title "$TAG" --notes-file "$notes"
+
+  replace-ps4:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ inputs.tag }}
+    steps:
+      - name: Check the release
+        run: |
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::'$TAG' isn't a vX.Y.Z tag"
+            exit 1
+          fi
+          gh release view "$TAG" >/dev/null || { echo "::error::no release $TAG to update"; exit 1; }
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: platform/ps4/docker
+          tags: romm-sync-ps4sdk:v0.9-crt1352-oo0.5.4
+          load: true
+          cache-from: type=gha,scope=ps4
+          cache-to: type=gha,mode=max,scope=ps4,ignore-error=true
+
+      - name: Build the PS4 payload
+        run: tools/ps4-build.sh ps4-pkg VERSION="${TAG#v}"
+
+      - name: Sign
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          if [ -z "$RELEASE_SIGNING_KEY" ]; then
+            echo "::error::RELEASE_SIGNING_KEY secret is not set; in-app updates need a signed release."
+            exit 1
+          fi
+          make tools
+          mkdir dist
+          cp build/ps4/romm-sync-ps4.elf build/ps4/romm-sync-ps4.pkg dist/
+          build/host/release-sign manifest "$TAG" dist/romm-sync-ps4.elf > dist/manifest-ps4.json
+          build/host/release-sign sign dist/manifest-ps4.json > dist/manifest-ps4.sig
+          build/host/release-sign check dist/manifest-ps4.json dist/manifest-ps4.sig
+
+      # The PS5's files and their checksums stay as they are.
+      - name: Replace the PS4 files
+        run: |
+          cd dist
+          ps4="romm-sync-ps4.elf romm-sync-ps4.pkg manifest-ps4.json manifest-ps4.sig"
+          gh release download "$TAG" --pattern SHA256SUMS --output old-sums
+          grep -vE '  (romm-sync-ps4\.(elf|pkg)|manifest-ps4\.(json|sig))$' old-sums > SHA256SUMS || true
+          sha256sum $ps4 >> SHA256SUMS
+          gh release upload "$TAG" $ps4 SHA256SUMS --clobber
