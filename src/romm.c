@@ -114,8 +114,10 @@ int romm_list(const char *path, int offset, int limit, romm_list_cb cb, void *ct
         if (status) *status = st;
         /* A page too big to take in (games with a lot of metadata, where memory
          * is tight): the same games again, fewer at a time. Not when RomM
-         * didn't answer at all: fewer games won't change that. */
-        if ((st == 0 || (st == 200 && !page)) && want > 1 && !(st == 0 && romm_no_answer(why, sizeof why))) {
+         * didn't answer at all, or memory is so short that a few games at a
+         * time don't fit either: fewer games won't change that. */
+        if ((st == 0 || (st == 200 && !page)) && want > 1 && !(st == 0 && romm_no_answer(why, sizeof why)) &&
+            !(want <= 4 && http_out_of_memory())) {
             cJSON_Delete(page);
             page_size = want / 2;
             LOGI("%s: trying %d games at a time", path, page_size);

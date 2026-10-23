@@ -55,6 +55,10 @@ int http_down(const char *url);
 typedef void (*http_back_fn)(const char *origin);
 void http_on_back(http_back_fn fn);
 
+/* 1 if a request failed for want of memory in the last 30 s: smaller
+ * requests or the same one again right away won't do better. */
+int http_out_of_memory(void);
+
 /* URL-encode a query/path component into a malloc'd string. */
 char *http_escape(const char *s);
 

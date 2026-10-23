@@ -2491,7 +2491,8 @@ static void run_sync(const char *reason, int only_rom, sync_result *res) {
     scan_ctx c;
     set_phase("scanning local files");
     if (scan_prepare(&c) != 0) {
-        snprintf(res->error, sizeof res->error, "cannot reach RomM server");
+        snprintf(res->error, sizeof res->error, "%s",
+                 c.server_status == 0 && http_out_of_memory() ? "out of memory" : "cannot reach RomM server");
         res->unreachable = c.server_status == 0;
         scan_free(&c);
         return;
