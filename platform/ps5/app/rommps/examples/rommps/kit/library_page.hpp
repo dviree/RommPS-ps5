@@ -1,11 +1,13 @@
 // RommPS: the Library tab.
 //
 //   - Platforms: a grid of RomM's platforms, each with a few of its covers.
-//     Cross opens one, Triangle searches every platform.
-//   - A platform (or a search's results): the focused game's details above a
-//     grid of covers that loads as it scrolls, and an A to Z bar on the right
-//     (Right from the last column to reach it, L2 / R2 to jump a letter).
-//     Triangle searches the platform, Circle goes back.
+//     Square shows RomM's collections there instead (and back). Cross opens
+//     one, Triangle searches every platform.
+//   - A platform or collection (or a search's results): the focused game's
+//     details above a grid of covers that loads as it scrolls, and an A to Z
+//     bar on the right (Right from the last column to reach it, L2 / R2 to
+//     jump a letter). Triangle searches the platform or collection, Circle
+//     goes back.
 //   - Search: the kit's keyboard, the first results updating as you type;
 //     R2 (or Done) shows them all.
 //
@@ -80,24 +82,43 @@ class LibraryPage
         kGrid,
         kSearch
     };
+    // What the tiles below "On this console" are.
+    enum Browse
+    {
+        kByPlatform,
+        kByCollection
+    };
+    // A tile: a platform or a collection, whichever is browsed.
+    struct Tile
+    {
+        Scope scope;
+        std::string name;
+        std::string slug; // the platform's, for its logo ("" for a collection)
+        std::string note; // the emulator; a collection's owner (someone else's) or description
+        bool note_on = false; // the note in the accent colour (a platform an emulator plays)
+        int count = 0;
+    };
+    std::vector<Tile> tiles(App &app) const;
+    // What a list is of: a platform's or collection's name ("" for every platform).
+    static std::string scope_name(App &app, const Scope &scope);
 
     // ---- platforms
     void update_platforms(App &app, const hui::InputFrame &input, hui::ui::Feedback &feedback);
     void draw_platforms(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, const Look &look, App &app, Color accent,
                         float clock, float age) const;
     // ---- a grid of games
-    void open_grid(App &app, int platform_id, const std::string &search);
+    void open_grid(App &app, const Scope &scope, const std::string &search);
     void update_grid(App &app, const hui::InputFrame &input, hui::ui::Feedback &feedback, bool &details);
     // Picks the grid's shape from its first covers, until it settles.
     void settle_shape(App &app, GameList &l) const;
     void move_in_grid(App &app, const hui::InputFrame &input, hui::ui::Feedback &feedback, bool &details);
     void draw_grid(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, const Look &look, App &app, Color accent,
                    float clock, float age) const;
-    GameList &grid(App &app) const { return app.games(grid_platform_, grid_search_); }
+    GameList &grid(App &app) const { return app.games(grid_scope_, grid_search_); }
     int letter_at(const GameList &l, int index) const; // index into l.letters, -1 for none
     void jump_letter(GameList &l, int letter, hui::ui::Feedback &feedback);
     // ---- search
-    void open_search(int platform_id);
+    void open_search(const Scope &scope);
     void update_search(App &app, const hui::InputFrame &input, float dt, hui::ui::Feedback &feedback);
     void draw_search(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, const Look &look, App &app, Color accent,
                      float clock) const;
@@ -109,12 +130,13 @@ class LibraryPage
     float mode_age_ = 0.0f;
     hui::ui::Pulse nudge_;
 
-    // platforms: the tiles
+    // platforms: the tiles, of platforms or collections
+    Browse browse_ = kByPlatform;
     int tile_ = 0;
     hui::tween::Spring tiles_scroll_; // in rows
 
     // a grid
-    int grid_platform_ = 0;
+    Scope grid_scope_;
     std::string grid_search_;
     int index_ = 0;
     // The focused game by RomM's offset, so it stays put when a page turns out
@@ -130,7 +152,7 @@ class LibraryPage
     float shown_age_ = 0.0f;
 
     // search
-    int search_platform_ = 0;
+    Scope search_scope_;
     std::string query_, applied_;
     float typed_age_ = 0.0f;
     hui::ui::Keyboard keys_;

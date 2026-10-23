@@ -1321,12 +1321,40 @@ static void route(request *r) {
         else send_error(fd, 502, err);
         return;
     }
+    if (is_get && !strcmp(r->path, "/api/collections")) {
+        /* Every kind offered, or only kind's. */
+        char kind[32];
+        collection_kind k = COLLECTION_NONE;
+        if (qparam(r, "kind", kind, sizeof kind) && (k = library_collection_kind(kind)) == COLLECTION_NONE) {
+            send_error(fd, 400, "unknown kind of collection");
+            return;
+        }
+        cJSON *j = library_collections(k, err, sizeof err);
+        if (j) send_json(fd, 200, j);
+        else send_error(fd, 502, err);
+        return;
+    }
     if (is_get && !strcmp(r->path, "/api/roms")) {
-        char search[256];
+        /* platform_id narrows to a platform (0 or none: every one); collection_id
+         * to a collection, of collection_kind (regular unless said). */
+        char search[256], kind[32];
+        library_scope scope = {.platform_id = qint(r, "platform_id", 0), .collection = COLLECTION_NONE};
         qparam(r, "search", search, sizeof search);
+        if (qparam(r, "collection_id", scope.collection_id, sizeof scope.collection_id) && scope.collection_id[0]) {
+            if (!qparam(r, "collection_kind", kind, sizeof kind)) str_copy(kind, sizeof kind, "regular");
+            scope.collection = library_collection_kind(kind);
+            if (scope.collection == COLLECTION_NONE) {
+                send_error(fd, 400, "unknown kind of collection");
+                return;
+            }
+            if (!library_collection_id_ok(scope.collection, scope.collection_id)) {
+                send_error(fd, 400, "no such collection");
+                return;
+            }
+        }
         int limit = qint(r, "limit", 60);
         if (limit < 1 || limit > 500) limit = 60;
-        cJSON *j = library_roms(qint(r, "platform_id", 0), search, qint(r, "offset", 0), limit, err, sizeof err);
+        cJSON *j = library_roms(&scope, search, qint(r, "offset", 0), limit, err, sizeof err);
         if (j) send_json(fd, 200, j);
         else send_error(fd, 502, err);
         return;

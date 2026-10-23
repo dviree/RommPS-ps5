@@ -72,6 +72,17 @@ DB = {
         60: {"id": 60, "platform_id": 6, "name": "Test Racer", "fs_name": "Test Racer (U).z64"},
         61: {"id": 61, "platform_id": 6, "name": "Other Racer", "fs_name": "Other Racer (U).z64"},
     },
+    # The user's collections: one across platforms, one empty (hidden by
+    # RommPS); and another user's public one, which RomM lists too.
+    "collections": [
+        {"id": 7, "name": "Favourites", "description": "The best ones", "rom_ids": [11, 20, 12],
+         "user_id": 1, "owner_username": "tester", "is_public": False,
+         "path_cover_small": "", "path_covers_small": ["/assets/romm/resources/roms/1/11/cover/small.png"]},
+        {"id": 8, "name": "Empty", "description": None, "rom_ids": [],
+         "user_id": 1, "owner_username": "tester", "is_public": False},
+        {"id": 9, "name": "Arcade Nights", "description": "", "rom_ids": [11],
+         "user_id": 2, "owner_username": "anna", "is_public": True},
+    ],
     "firmware": [{"id": 1, "platform_id": 1, "file_name": "bsx.bin", "content": b"BSXBIOS"}],
     "saves": {},    # id -> save dict (+ "content")
     "states": {},
@@ -392,11 +403,16 @@ class H(BaseHTTPRequestHandler):
                 return self.reply(200, [x for x in DB["play_sessions"] if not rid or x["rom_id"] == rid])
             if len(parts) == 3 and parts[:2] == ["api", "platforms"]:
                 return self.reply(200, platform_public(next(x for x in DB["platforms"] if x["id"] == int(parts[2]))))
+            if p == "/api/collections":
+                return self.reply(200, [c | {"rom_count": len(c["rom_ids"])} for c in DB["collections"]])
             if p == "/api/roms":
                 ids = [int(x) for x in q.get("platform_ids", [])]
                 term = (qs("search_term") or "").lower()
+                coll = qs("collection_id")
+                in_coll = next((c["rom_ids"] for c in DB["collections"] if str(c["id"]) == coll), []) if coll else None
                 items = sorted((rom_public(r) for r in DB["roms"].values()
-                                if (not ids or r["platform_id"] in ids) and term in r["name"].lower() + r["fs_name"].lower()),
+                                if (not ids or r["platform_id"] in ids) and (in_coll is None or r["id"] in in_coll)
+                                and term in r["name"].lower() + r["fs_name"].lower()),
                                key=lambda r: r["name"].lower())
                 char_index = {}
                 for i, r in enumerate(items):

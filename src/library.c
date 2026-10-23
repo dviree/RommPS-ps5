@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -1260,6 +1261,129 @@ cJSON *library_platforms(char *err, int en) {
     return out;
 }
 
+/* RomM's collection kinds: where it lists them, and what /api/roms takes to
+ * list one's games. Smart collections need nothing more than turning on here;
+ * virtual ones come grouped by a type (genre, developer...), which the
+ * clients will want to pick from first. */
+static const struct {
+    const char *name, *list_path, *rom_param;
+    int numeric_ids, offered;
+} g_collection_kinds[] = {
+    [COLLECTION_REGULAR] = {"regular", "/api/collections", "collection_id", 1, 1},
+    [COLLECTION_SMART] = {"smart", "/api/collections/smart", "smart_collection_id", 1, 0},
+    [COLLECTION_VIRTUAL] = {"virtual", "/api/collections/virtual?type=all", "virtual_collection_id", 0, 0},
+};
+#define COLLECTION_KINDS ((int)(sizeof g_collection_kinds / sizeof g_collection_kinds[0]))
+
+/* What a collection carries that nothing here reads: every game's id and
+ * large cover, about 200 bytes a game. Its small covers stay, for the first. */
+static const char *const COLLECTION_DROP[] = {"rom_ids", "path_covers_large", NULL};
+
+static int collection_offered(collection_kind kind) {
+    return kind >= 0 && (int)kind < COLLECTION_KINDS && g_collection_kinds[kind].offered;
+}
+
+collection_kind library_collection_kind(const char *name) {
+    for (int k = 0; k < COLLECTION_KINDS; k++)
+        if (name && !strcmp(name, g_collection_kinds[k].name) && collection_offered((collection_kind)k))
+            return (collection_kind)k;
+    return COLLECTION_NONE;
+}
+
+int library_collection_id_ok(collection_kind kind, const char *id) {
+    if (!collection_offered(kind) || !id || !id[0]) return 0;
+    if (!g_collection_kinds[kind].numeric_ids) return 1;
+    if (strlen(id) > 9) return 0;
+    for (const char *c = id; *c; c++)
+        if (!isdigit((unsigned char)*c)) return 0;
+    return atoi(id) > 0;
+}
+
+/* The user's own first, then by name, then by kind. */
+static int collection_order(const void *a, const void *b) {
+    const cJSON *x = *(const cJSON *const *)a, *y = *(const cJSON *const *)b;
+    int xo = !jget_str(x, "owner", "")[0], yo = !jget_str(y, "owner", "")[0];
+    if (xo != yo) return yo - xo;
+    int c = strcasecmp(jget_str(x, "name", ""), jget_str(y, "name", ""));
+    if (c) return c;
+    return library_collection_kind(jget_str(x, "kind", "")) - library_collection_kind(jget_str(y, "kind", ""));
+}
+
+/* Adds kind's collections holding games to *all. 0, or -1 with err set. */
+static int collections_of(collection_kind kind, const char *me, cJSON ***all, int *n, int *cap, char *err, int en) {
+    long st = 0;
+    cJSON *list = romm_get_lean(g_collection_kinds[kind].list_path, COLLECTION_DROP, &st);
+    if (st != 200 || !cJSON_IsArray(list)) {
+        if (st == 403)
+            snprintf(err, (size_t)en, "RomM didn't allow reading collections: pair RommPS again to grant it");
+        else if (st || !romm_no_answer(err, en))
+            snprintf(err, (size_t)en, "could not load collections (HTTP %ld)", st);
+        cJSON_Delete(list);
+        return -1;
+    }
+    const cJSON *c;
+    cJSON_ArrayForEach(c, list) {
+        const cJSON *id = cJSON_GetObjectItemCaseSensitive(c, "id");
+        int count = (int)jget_num(c, "rom_count", 0);
+        if (count <= 0) continue;
+        char id_text[64];
+        if (cJSON_IsString(id)) str_copy(id_text, sizeof id_text, id->valuestring);
+        else if (cJSON_IsNumber(id)) snprintf(id_text, sizeof id_text, "%d", id->valueint);
+        else continue;
+        if (*n == *cap) {
+            int grown_cap = *cap ? *cap * 2 : 16;
+            cJSON **grown = realloc(*all, sizeof **all * (size_t)grown_cap);
+            if (!grown) break;
+            *all = grown;
+            *cap = grown_cap;
+        }
+        /* Its own cover, else the first of its games' RomM puts together. */
+        const char *cover = jget_str(c, "path_cover_small", "");
+        const cJSON *covers = cJSON_GetObjectItemCaseSensitive(c, "path_covers_small");
+        if (!cover[0] && cJSON_IsString(cJSON_GetArrayItem(covers, 0)))
+            cover = cJSON_GetArrayItem(covers, 0)->valuestring;
+        /* Another user's (RomM lists their public ones too). Virtual
+         * collections are nobody's, and with no user known all are ours. */
+        const char *owner = jget_str(c, "owner_username", "");
+        if (!me[0] || !strcmp(owner, me)) owner = "";
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "kind", g_collection_kinds[kind].name);
+        cJSON_AddStringToObject(o, "id", id_text);
+        cJSON_AddStringToObject(o, "name", jget_str(c, "name", ""));
+        cJSON_AddStringToObject(o, "description", jget_str(c, "description", ""));
+        cJSON_AddNumberToObject(o, "rom_count", count);
+        cJSON_AddStringToObject(o, "cover", cover);
+        cJSON_AddStringToObject(o, "owner", owner);
+        (*all)[(*n)++] = o;
+    }
+    cJSON_Delete(list);
+    return 0;
+}
+
+cJSON *library_collections(collection_kind only, char *err, int en) {
+    if (only != COLLECTION_NONE && !collection_offered(only)) {
+        snprintf(err, (size_t)en, "unknown kind of collection");
+        return NULL;
+    }
+    char me[sizeof g_cfg.username];
+    config_lock();
+    str_copy(me, sizeof me, g_cfg.username);
+    config_unlock();
+    cJSON **all = NULL;
+    int n = 0, cap = 0, failed = 0;
+    for (int k = 0; k < COLLECTION_KINDS && !failed; k++)
+        if (collection_offered((collection_kind)k) && (only == COLLECTION_NONE || only == (collection_kind)k))
+            failed = collections_of((collection_kind)k, me, &all, &n, &cap, err, en) < 0;
+    cJSON *out = failed ? NULL : cJSON_CreateArray();
+    if (out && n) qsort(all, (size_t)n, sizeof *all, collection_order);
+    for (int i = 0; i < n; i++) {
+        if (out) cJSON_AddItemToArray(out, all[i]);
+        else cJSON_Delete(all[i]);
+    }
+    free(all);
+    return out;
+}
+
 /* An extra emulator turned on for a system gets the games already there, not
  * only the ones downloaded from now on: each game in the system's main
  * emulator's folder is linked into the extra's (a copy across drives). */
@@ -2290,7 +2414,8 @@ static void nx_collapse(cJSON *page) {
  * takes a second or two for a page of a big platform. One thread, working
  * from the latest page shown: what was asked for meanwhile is dropped. */
 static struct {
-    int busy, pending, platform_id, offset, limit, total;
+    int busy, pending, offset, limit, total;
+    library_scope scope;
     char path[sizeof g_pages[0].key], search[256];
     pthread_t thread;
 } g_near;
@@ -2314,7 +2439,8 @@ static void *near_pages_thread(void *arg) {
     g_near.thread = pthread_self();
     while (g_near.pending) {
         g_near.pending = 0;
-        int platform_id = g_near.platform_id, offset = g_near.offset, limit = g_near.limit, total = g_near.total;
+        library_scope scope = g_near.scope;
+        int offset = g_near.offset, limit = g_near.limit, total = g_near.total;
         str_copy(path, sizeof path, g_near.path);
         str_copy(search, sizeof search, g_near.search);
         pthread_mutex_unlock(&g_pages_lock);
@@ -2322,7 +2448,7 @@ static void *near_pages_thread(void *arg) {
         const int near[3] = {offset + limit, offset + 2 * limit, offset - limit};
         for (int k = 0; k < 3; k++) {
             if (near[k] < 0 || near[k] >= total || page_cached(path, near[k], limit)) continue;
-            cJSON_Delete(library_roms(platform_id, search, near[k], limit, err, sizeof err));
+            cJSON_Delete(library_roms(&scope, search, near[k], limit, err, sizeof err));
             pthread_mutex_lock(&g_pages_lock);
             int moved = g_near.pending;
             pthread_mutex_unlock(&g_pages_lock);
@@ -2336,7 +2462,8 @@ static void *near_pages_thread(void *arg) {
     return NULL;
 }
 
-static void fetch_near_pages(const char *path, int platform_id, const char *search, int offset, int limit, int total) {
+static void fetch_near_pages(const char *path, const library_scope *scope, const char *search, int offset, int limit,
+                             int total) {
     if (!(offset + limit < total && !page_cached(path, offset + limit, limit)) &&
         !(offset - limit >= 0 && !page_cached(path, offset - limit, limit)))
         return;
@@ -2346,7 +2473,7 @@ static void fetch_near_pages(const char *path, int platform_id, const char *sear
         return;
     }
     g_near.pending = 1;
-    g_near.platform_id = platform_id;
+    g_near.scope = *scope;
     g_near.offset = offset;
     g_near.limit = limit;
     g_near.total = total;
@@ -2395,16 +2522,25 @@ static int group_versions(int platform_id) {
     return group;
 }
 
-cJSON *library_roms(int platform_id, const char *search, int offset, int limit, char *err, int en) {
-    char path[1024];
+cJSON *library_roms(const library_scope *scope, const char *search, int offset, int limit, char *err, int en) {
+    char path[1024], filter[256] = "";
+    int o = 0;
+    /* Platform 0: every platform (a search across the library, or a
+     * collection's games). Games whose files RomM's last scan didn't find are
+     * left out: they can't come down. */
+    if (scope->platform_id > 0) o += snprintf(filter, sizeof filter, "&platform_ids=%d", scope->platform_id);
+    if (scope->collection != COLLECTION_NONE) {
+        if (!library_collection_id_ok(scope->collection, scope->collection_id)) {
+            snprintf(err, (size_t)en, "no such collection");
+            return NULL;
+        }
+        char *id = http_escape(scope->collection_id);
+        o += snprintf(filter + o, sizeof filter - (size_t)o, "&%s=%s", g_collection_kinds[scope->collection].rom_param, id);
+        free(id);
+    }
+    if (group_versions(scope->platform_id)) snprintf(filter + o, sizeof filter - (size_t)o, "&group_by_meta_id=true");
     char *q = http_escape(search ? search : "");
-    /* Platform 0: every platform (a search across the library). Games whose
-     * files RomM's last scan didn't find are left out: they can't come down. */
-    const char *group = group_versions(platform_id) ? "&group_by_meta_id=true" : "";
-    if (platform_id > 0)
-        snprintf(path, sizeof path, "/api/roms?platform_ids=%d&search_term=%s&order_by=name&order_dir=asc&missing=false%s" ROMS_LEAN, platform_id, q, group);
-    else
-        snprintf(path, sizeof path, "/api/roms?search_term=%s&order_by=name&order_dir=asc&missing=false%s" ROMS_LEAN, q, group);
+    snprintf(path, sizeof path, "/api/roms?search_term=%s%s&order_by=name&order_dir=asc&missing=false" ROMS_LEAN, q, filter);
     free(q);
     char key[sizeof g_pages[0].key];
     snprintf(key, sizeof key, "%s&offset=%d&limit=%d", path, offset, limit);
@@ -2412,7 +2548,7 @@ cJSON *library_roms(int platform_id, const char *search, int offset, int limit, 
     if (out) {
         cJSON_ArrayForEach(it, cJSON_GetObjectItemCaseSensitive(out, "items"))
             cJSON_ReplaceItemInObjectCaseSensitive(it, "installed", cJSON_CreateBool(any_on_console(it)));
-        fetch_near_pages(path, platform_id, search, offset, limit, (int)jget_num(out, "total", 0));
+        fetch_near_pages(path, scope, search, offset, limit, (int)jget_num(out, "total", 0));
         return out;
     }
     out = cJSON_CreateObject();
@@ -2427,6 +2563,6 @@ cJSON *library_roms(int platform_id, const char *search, int offset, int limit, 
     if (!cJSON_GetObjectItemCaseSensitive(out, "total")) cJSON_AddNumberToObject(out, "total", 0);
     nx_collapse(out);
     page_cache_put(key, out);
-    fetch_near_pages(path, platform_id, search, offset, limit, (int)jget_num(out, "total", 0));
+    fetch_near_pages(path, scope, search, offset, limit, (int)jget_num(out, "total", 0));
     return out;
 }

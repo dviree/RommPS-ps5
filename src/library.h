@@ -17,10 +17,31 @@ void library_link_extras(void);
  * once the mount is on. Returns how many, or -1 with err set. */
 int library_own_games(const char *root, const char *system, const char *action, char *err, int en);
 
+/* RomM's kinds of collections: the user's own, saved filters (smart) and the
+ * ones RomM makes from metadata (virtual). Only the kinds turned on in
+ * library.c are offered; the others are refused like an unknown name. */
+typedef enum { COLLECTION_NONE = -1, COLLECTION_REGULAR, COLLECTION_SMART, COLLECTION_VIRTUAL } collection_kind;
+/* "regular", "smart", "virtual" -> its kind, COLLECTION_NONE for anything else or a kind not offered. */
+collection_kind library_collection_kind(const char *name);
+/* 1 when id can name one of kind's collections (regular and smart ones' are numbers). */
+int library_collection_id_ok(collection_kind kind, const char *id);
+/* The collections that hold games, of every kind offered (only's, unless it's
+ * COLLECTION_NONE): [{kind, id, name, description, rom_count, cover, owner}].
+ * The user's own come first, then other users' public ones, each by name;
+ * owner is "" for the user's own. Ids are strings, as virtual collections' are. */
+cJSON *library_collections(collection_kind only, char *err, int en);
+
+/* Which games a list holds: a platform's (0 for every platform), narrowed to
+ * a collection's when collection is set. */
+typedef struct {
+    int platform_id;
+    collection_kind collection; /* COLLECTION_NONE for no collection */
+    char collection_id[64];
+} library_scope;
+
 /* 1 for a file RomM lists as a game that isn't one (metadata.txt, artwork...). */
 int library_not_game(const char *fs_name);
-/* platform_id 0 searches every platform. */
-cJSON *library_roms(int platform_id, const char *search, int offset, int limit, char *err, int en);
+cJSON *library_roms(const library_scope *scope, const char *search, int offset, int limit, char *err, int en);
 /* What RommPS shows about one game: release year, publishers, genres, players,
  * rating, summary, How Long to Beat, the user's last played, status and play time. */
 cJSON *library_details(int rom_id, char *err, int en);

@@ -153,6 +153,19 @@ expect_eq "the sheet's check after downloading again" "$(onc 25)" True
 expect_eq "installed_sig right after our own download" "$(sig)" "$before"
 all=$(curl -sf "$API/api/roms?platform_id=0&search=metroid" | python3 -c "import json,sys; print([(g['name'], g['platform_id']) for g in json.load(sys.stdin)['items']])")
 [[ "$all" == "[('Super Metroid', 1)]" ]] || fail "a search across every platform: $all"
+colls=$(curl -sf "$API/api/collections" | python3 -c "import json,sys; print([(c['kind'], c['id'], c['name'], c['rom_count'], c['owner']) for c in json.load(sys.stdin)])")
+[[ "$colls" == "[('regular', '7', 'Favourites', 3, ''), ('regular', '9', 'Arcade Nights', 1, 'anna')]" ]] || fail "collections, own first, the empty one left out: $colls"
+colls=$(curl -sf "$API/api/collections?kind=regular" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
+[[ "$colls" == 2 ]] || fail "collections of one kind: $colls"
+curl -s -o /dev/null -w "%{http_code}" "$API/api/collections?kind=virtual" | grep -qx 400 || fail "listing a kind of collection not offered must be refused"
+cg=$(curl -sf "$API/api/roms?collection_id=7" | python3 -c "import json,sys; j=json.load(sys.stdin); print(j['total'], [(g['name'], g['platform_id']) for g in j['items']])")
+[[ "$cg" == "3 [('EarthBound', 1), ('Okami', 2), ('Super Metroid', 1)]" ]] || fail "a collection's games, across platforms: $cg"
+cg=$(curl -sf "$API/api/roms?collection_kind=regular&collection_id=7&search=oka" | python3 -c "import json,sys; print([g['name'] for g in json.load(sys.stdin)['items']])")
+[[ "$cg" == "['Okami']" ]] || fail "a search in a collection: $cg"
+curl -s -o /dev/null -w "%{http_code}" "$API/api/roms?collection_kind=virtual&collection_id=x" | grep -qx 400 || fail "a kind of collection not offered must be refused"
+for bad in abc -1 0 7x 99999999999; do
+  curl -s -o /dev/null -w "%{http_code}" "$API/api/roms?collection_id=$bad" | grep -qx 400 || fail "collection id $bad must be refused"
+done
 
 echo "3. nothing changed, nothing transferred"
 post /api/sync >/dev/null; wait_sync 3

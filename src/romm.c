@@ -150,6 +150,16 @@ cJSON *romm_call(const char *method, const char *path, const cJSON *body, long *
     return romm_call_raw(base, auth, method, path, body, status);
 }
 
+cJSON *romm_get_lean(const char *path, const char *const *drop, long *status) {
+    char base[512], auth[300];
+    current_auth(base, sizeof base, auth, sizeof auth);
+    if (!base[0]) {
+        if (status) *status = 0;
+        return NULL;
+    }
+    return call(base, auth, "GET", path, NULL, drop, status);
+}
+
 void romm_error_detail(const cJSON *j, char *out, int n) {
     out[0] = 0;
     const cJSON *d = cJSON_GetObjectItemCaseSensitive(j, "detail");

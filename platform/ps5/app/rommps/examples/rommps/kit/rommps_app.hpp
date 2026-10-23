@@ -2,9 +2,10 @@
 //
 // The payload does the work (sync, downloads, RomM) and serves its state on
 // http://127.0.0.1:<port>/api (src/web.c in the repository). This keeps a
-// copy for the screen: status, platforms, the games of the platforms looked
-// at, downloads and covers, refreshed on timers through the API client
-// (platform/ps5/app/src/rommps_api.hpp) so a frame never waits for it.
+// copy for the screen: status, platforms, collections, the games of the
+// platforms and collections looked at, downloads and covers, refreshed on
+// timers through the API client (platform/ps5/app/src/rommps_api.hpp) so a
+// frame never waits for it.
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
@@ -117,13 +118,50 @@ struct Platform
     int rom_count = 0;
 };
 
-// A list of games from RomM, A to Z: a platform's, a search's (in one
-// platform, or every platform when platform_id is 0). Loaded a page at a time
-// as it's looked at.
+// One of RomM's collections. kind is the payload's name for its sort
+// ("regular" for the user's own; "smart" and "virtual" are RomM's others),
+// id RomM's, as text since virtual collections' ids are. owner is the user
+// who made it, when that's someone else ("" for the user's own).
+struct Collection
+{
+    std::string kind, id, name, description, owner;
+    int rom_count = 0;
+};
+
+// Which games a list holds: a platform's (0: every platform), narrowed to a
+// collection's when collection_id is set.
+struct Scope
+{
+    int platform_id = 0;
+    std::string collection_kind, collection_id;
+
+    static Scope platform(int id)
+    {
+        Scope s;
+        s.platform_id = id;
+        return s;
+    }
+    static Scope collection(const Collection &c)
+    {
+        Scope s;
+        s.collection_kind = c.kind;
+        s.collection_id = c.id;
+        return s;
+    }
+    bool in_collection() const { return !collection_id.empty(); }
+    // Tells lists apart in App's cache.
+    std::string key() const { return std::to_string(platform_id) + "|" + collection_kind + "|" + collection_id; }
+    // The payload's /api/roms parameters for it ("platform_id=1").
+    std::string query() const;
+};
+
+// A list of games from RomM, A to Z: a platform's, a collection's, a
+// search's (in one of those, or every platform). Loaded a page at a time as
+// it's looked at.
 struct GameList
 {
     static constexpr int kPage = 60;
-    int platform_id = 0;
+    Scope scope;
     std::string search;
     int total = -1;                   // games to show; unknown until the first page arrives
     std::vector<Game> games;          // RomM's whole list, by RomM's offset; id 0 isn't loaded yet
@@ -277,16 +315,31 @@ class App
     // The payload into the HEN's autostart folder, so it starts with the console.
     void install_autostart(Api::Callback done);
     const std::vector<Platform> &platforms() const { return platforms_; }
+    // The collections of every kind the payload offers: the user's own, then
+    // other users' public ones, each by name. Asked for when first looked at
+    // (want_collections) and when refresh_collections says so.
+    const std::vector<Collection> &collections() const { return collections_; }
+    // Why the last refresh got none ("" if it did).
+    const std::string &collections_error() const { return collections_error_; }
+    bool collections_loaded() const { return collections_loaded_; }
+    void want_collections()
+    {
+        if (!collections_loaded_)
+            refresh_collections();
+    }
+    // Asks for them again: they change in RomM. Nothing while asking already.
+    void refresh_collections();
     const std::vector<Download> &queue() const { return queue_; }
     const Download *download_for(int rom_id) const;
     // One disc's download (0: the whole game's), the newest.
     const Download *download_for(int rom_id, int disc) const;
 
     const Platform *platform_by_id(int id) const;
+    const Collection *collection_by_id(const std::string &kind, const std::string &id) const;
 
     // A list of games (made the first time it's asked for), and the pages
     // holding [first, last] loaded. Lists stay for a while, a few at most.
-    GameList &games(int platform_id, const std::string &search);
+    GameList &games(const Scope &scope, const std::string &search);
     void ensure(GameList &list, int first, int last);
 
     // The games on this console, most recently played first.
@@ -414,6 +467,10 @@ class App
     int covers_in_flight_ = 0, next_cover_worker_ = 0;
     Status status_;
     std::vector<Platform> platforms_;
+    std::vector<Collection> collections_;
+    std::string collections_error_;
+    bool collections_loaded_ = false;
+    bool collections_busy_ = false;
     std::vector<Download> queue_;
     std::vector<Game> installed_;
     std::unordered_set<int> on_console_; // installed_'s ids

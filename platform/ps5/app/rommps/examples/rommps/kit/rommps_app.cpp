@@ -825,6 +825,14 @@ void App::refresh_status()
             refresh_platforms();
             refresh_installed();
         }
+        // Paired again (as someone else, perhaps): the collections are asked
+        // for again when next looked at.
+        if (ready && !was_paired_)
+        {
+            collections_.clear();
+            collections_error_.clear();
+            collections_loaded_ = false;
+        }
         was_paired_ = ready;
     });
 }
@@ -863,6 +871,40 @@ void App::refresh_platforms()
     });
 }
 
+void App::refresh_collections()
+{
+    if (collections_busy_)
+        return;
+    collections_busy_ = true;
+    // Every kind the payload offers, already in order: the user's own, then
+    // other users' public ones.
+    api_.get("/api/collections", [this](const Response &r) {
+        collections_busy_ = false;
+        collections_loaded_ = true;
+        if (!r.ok())
+        {
+            collections_error_ = r.message();
+            return;
+        }
+        std::unique_ptr<cJSON, void (*)(cJSON *)> j(r.json(), cJSON_Delete);
+        collections_.clear();
+        collections_error_.clear();
+        const cJSON *c;
+        cJSON_ArrayForEach(c, j.get())
+        {
+            Collection coll;
+            coll.kind = str(c, "kind");
+            coll.id = str(c, "id");
+            coll.name = plain(str(c, "name"));
+            coll.description = plain(str(c, "description"));
+            coll.owner = plain(str(c, "owner"));
+            coll.rom_count = static_cast<int>(num(c, "rom_count"));
+            if (coll.rom_count > 0 && !coll.kind.empty() && !coll.id.empty())
+                collections_.push_back(std::move(coll));
+        }
+    });
+}
+
 const Platform *App::platform_by_id(int id) const
 {
     for (const Platform &p : platforms_)
@@ -878,14 +920,30 @@ void App::refresh_lists()
             std::fill(entry.list->pages.begin(), entry.list->pages.end(), 0);
 }
 
-GameList &App::games(int platform_id, const std::string &search)
+const Collection *App::collection_by_id(const std::string &kind, const std::string &id) const
 {
-    const std::string key = std::to_string(platform_id) + "|" + search;
+    for (const Collection &c : collections_)
+        if (c.kind == kind && c.id == id)
+            return &c;
+    return nullptr;
+}
+
+std::string Scope::query() const
+{
+    std::string q = "platform_id=" + std::to_string(platform_id);
+    if (in_collection())
+        q += "&collection_kind=" + url_escape(collection_kind) + "&collection_id=" + url_escape(collection_id);
+    return q;
+}
+
+GameList &App::games(const Scope &scope, const std::string &search)
+{
+    const std::string key = scope.key() + "|" + search;
     CachedList &entry = lists_[key];
     if (!entry.list)
     {
         entry.list = std::make_unique<GameList>();
-        entry.list->platform_id = platform_id;
+        entry.list->scope = scope;
         entry.list->search = search;
         // Keep a few lists; the oldest goes when there are more.
         if (lists_.size() > kListsKept)
@@ -916,7 +974,7 @@ void App::ensure(GameList &list, int first, int last)
             list.pages.resize(static_cast<std::size_t>(page) + 1, 0);
         if (list.pages[static_cast<std::size_t>(page)])
             continue;
-        const std::string key = std::to_string(list.platform_id) + "|" + list.search;
+        const std::string key = list.scope.key() + "|" + list.search;
         const std::pair<std::string, int> want{key, page};
         if (std::find(wanted_pages_.begin(), wanted_pages_.end(), want) == wanted_pages_.end())
             wanted_pages_.push_back(want);
@@ -934,8 +992,8 @@ void App::send_page(const std::string &key, int page)
     list.pages[static_cast<std::size_t>(page)] = 1;
     ++pages_in_flight_;
     {
-        char path[512];
-        std::snprintf(path, sizeof path, "/api/roms?platform_id=%d&offset=%d&limit=%d&search=%s", list.platform_id,
+        char path[640];
+        std::snprintf(path, sizeof path, "/api/roms?%s&offset=%d&limit=%d&search=%s", list.scope.query().c_str(),
                       page * GameList::kPage, GameList::kPage, url_escape(list.search).c_str());
         pages_api_[next_page_worker_++ % kPageWorkers].get(path, [this, key, page](const Response &r) {
             --pages_in_flight_;
@@ -976,7 +1034,7 @@ void App::send_page(const std::string &key, int page)
                     break;
                 Game &game = l.games[static_cast<std::size_t>(index++)];
                 game.id = static_cast<int>(num(g, "id"));
-                game.platform_id = static_cast<int>(num(g, "platform_id", l.platform_id));
+                game.platform_id = static_cast<int>(num(g, "platform_id", l.scope.platform_id));
                 game.name = plain(str(g, "name"));
                 game.fs_name = str(g, "fs_name");
                 game.cover = str(g, "cover");
