@@ -94,6 +94,15 @@ post /api/setup/finish '{"conflict_policy":"ask"}' >/dev/null
 wait_sync 1
 [[ "$(last reason)" == "first sync" && "$(last uploaded)" == 1 ]] || fail "expected the first sync to upload the local save"
 
+echo "1b. PS5 games say their format, and two copies of a game in different formats are two cards"
+names=$(curl -sf "$API/api/roms?platform_id=7" | python3 -c "import json,sys; print(sorted((g['name'], g.get('format', '')) for g in json.load(sys.stdin)['items'] if not g.get('not_game')))")
+[[ "$names" == "[('Astro Test [FPKG]', 'FPKG'), ('Astro Test [Game folder]', 'Game folder'), ('Image Test [exFAT]', 'exFAT'), ('Packed Test [LZ4]', 'LZ4')]" ]] \
+  || fail "PS5 formats: $names"
+v=$(curl -sf "$API/api/roms/70/details" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('version'), d.get('versions'))")
+[[ "$v" == "FPKG 2" ]] || fail "a PS5 game's version must name its format: $v"
+other=$(curl -sf "$API/api/roms?platform_id=1" | python3 -c "import json,sys; print([g['name'] for g in json.load(sys.stdin)['items'] if '[' in g['name']])")
+[[ "$other" == "[]" ]] || fail "only PS5 games get a format: $other"
+
 echo "2. game download brings its server save along"
 curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/_admin/save" -d '{"rom_id":11,"slot":"autosave","file_name":"Super Metroid (USA).srm","content":"server-save"}' >/dev/null
 post /api/download '{"rom_id":11,"name":"Super Metroid"}' >/dev/null
