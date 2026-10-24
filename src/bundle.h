@@ -8,7 +8,10 @@
  *   wiiu  usr/save/<high>/<low>/ (Cemu), as "<low>/meta/...",
  *         "<low>/user/common/..." and this console's account folder as
  *         "<low>/user/account/..."
- * Ids: the disc's "GALE01", or a 3DS or Wii U title "0004000000066C00". A
+ *   ps2   the game's save folders on the slots' PCSX2 folder cards, or a file
+ *         card holding its saves; synced as sigil's one-game card (ps2card.h),
+ *         not a zip. Its bases are the slot cards themselves.
+ * Ids: the disc's "GALE01", a PS2 serial "SLUS-21059", or a 3DS or Wii U title "0004000000066C00". A
  * zip from elsewhere is taken in other forms too (no root folder, Cemu's own
  * export, the whole path from the SD card). */
 #ifndef ROMM_BUNDLE_H

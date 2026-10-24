@@ -17,6 +17,7 @@
 #include "memcard.h"
 #include "platform.h"
 #include "profiles.h"
+#include "ps2card.h"
 #include "romm.h"
 #include "events.h"
 #include "firmware.h"
@@ -63,6 +64,7 @@ typedef struct {
      * or "card" (a whole memory card with them on it). */
     char gc_form[8];
     char gc_file[PATH_MAX_LEN];
+    char ps2_identity[33]; /* ps2: the saves' identity (ps2card_collect) */
 } local_file;
 
 typedef struct {
@@ -933,8 +935,40 @@ static const local_file *find_save(const scan_ctx *c, int rom_id, const char *sl
 
 #define Z32 "00000000000000000000000000000000" /* Azahar's SD card and console ids */
 
+/* PS2: the memory card folder (the first of bundle_dirs that exists) and the
+ * cards in the slots, from the game's settings file, else the emulator's,
+ * else PCSX2's defaults. */
+static void ps2_cards_for(const local_rom *r, ps2_cards *out) {
+    memset(out, 0, sizeof *out);
+    char stem[256], list[2048], *save = NULL;
+    path_stem(stem, sizeof stem, r->path);
+    const char *vars[] = {"root", r->map->root, "rom_stem", stem, NULL};
+    str_template(list, sizeof list, r->map->bundle_dirs[0] ? r->map->bundle_dirs : "{root}/memcards,{root}", vars);
+    for (char *t = strtok_r(list, ",", &save); t && !out->dir[0]; t = strtok_r(NULL, ",", &save))
+        if (dir_exists(t)) str_copy(out->dir, sizeof out->dir, t);
+    static const char *const keys[2] = {"MemoryCards/Slot1_Filename", "MemoryCards/Slot2_Filename"};
+    str_template(list, sizeof list, r->map->card_settings, vars);
+    save = NULL;
+    for (char *t = strtok_r(list, ",", &save); t; t = strtok_r(NULL, ",", &save)) {
+        char *txt = read_file(t, NULL);
+        for (int s = 0; txt && s < 2; s++)
+            if (!out->slot[s][0]) profile_cfg_get(txt, keys[s], out->slot[s], sizeof out->slot[s]);
+        free(txt);
+    }
+    if (!out->slot[0][0]) str_copy(out->slot[0], sizeof out->slot[0], "Mcd001.ps2");
+    if (!out->slot[1][0]) str_copy(out->slot[1], sizeof out->slot[1], "Mcd002.ps2");
+}
+
 /* Candidate folders for a game's bundled saves. */
 static int bundle_bases(const local_rom *r, char bases[][PATH_MAX_LEN], int max) {
+    if (!strcmp(r->map->save_layout, "ps2")) { /* the slot cards themselves */
+        ps2_cards pc;
+        ps2_cards_for(r, &pc);
+        int n = 0;
+        for (int s = 0; s < 2 && n < max && pc.dir[0]; s++)
+            if (pc.slot[s][0] && (s == 0 || strcmp(pc.slot[1], pc.slot[0]) != 0)) path_join(bases[n++], PATH_MAX_LEN, pc.dir, pc.slot[s]);
+        return n;
+    }
     static const char *defaults[][3] = {
         /* {save_path} follows RetroArch's sorting. {save_root} is the bare save
          * folder, because Dolphin ignores sort-by-core entirely and drops
@@ -1044,7 +1078,7 @@ static int rom_game_id(const local_rom *r, char *out, size_t n) {
         struct dirent *de;
         disc[0] = 0;
         while (d && (de = readdir(d)) && !disc[0])
-            if (ext_in_list(de->d_name, ".iso,.cso,.rvz,.wia,.gcm,.ciso,.wbfs,.cci,.3ds,.cxi,.cia")) path_join(disc, sizeof disc, r->path, de->d_name);
+            if (ext_in_list(de->d_name, ".iso,.cso,.rvz,.wia,.gcm,.ciso,.wbfs,.cci,.3ds,.cxi,.cia,.chd")) path_join(disc, sizeof disc, r->path, de->d_name);
         if (d) closedir(d);
     }
     const char *layout = r->map->save_layout;
@@ -1057,6 +1091,8 @@ static int rom_game_id(const local_rom *r, char *out, size_t n) {
         path_join(lib, sizeof lib, r->map->root, "library.json");
         ok = gameid_from_library(lib, layout, r->path, out, n) == 0 ||
              (!strcmp(layout, "3ds") && disc[0] && gameid_3ds(disc, out, n) == 0);
+    } else if (!strcmp(layout, "ps2")) {
+        ok = disc[0] && gameid_psx(disc, out, n) == 0; /* SYSTEM.CNF's BOOT2: "SLUS-21059" */
     } else {
         ok = disc[0] && (!strcmp(layout, "psp") ? gameid_psp(disc, out, n) : gameid_dolphin(disc, out, n)) == 0;
     }
@@ -1070,6 +1106,11 @@ static int rom_game_id(const local_rom *r, char *out, size_t n) {
         for (; *tid && o + 1 < n; tid++) if (isalnum((unsigned char)*tid)) out[o++] = (char)toupper((unsigned char)*tid);
         out[o] = 0;
         ok = title ? o == 16 : o >= 4;
+        /* A PS2 serial keeps its dash, as the saves on a card name it. */
+        if (!strcmp(layout, "ps2") && o == 9 && o + 1 < n) {
+            memmove(out + 5, out + 4, 6);
+            out[4] = '-';
+        }
         cJSON_Delete(rom);
     }
     if (!ok && !strcmp(r->map->save_layout, "psp")) {
@@ -1285,6 +1326,70 @@ static int gc_pick_gci(const bundle *b, const char *server_name, char *out, size
     return out[0] ? 0 : -1;
 }
 
+/* The unit sigil makes of a PS2 game's saves; 0 with *unit NULL when it has none. */
+static int ps2_unit(const local_rom *r, const char *serial, unsigned char **unit, size_t *len, char hash[33],
+                    char name[256], char identity[33]) {
+    ps2_cards pc;
+    ps2_cards_for(r, &pc);
+    return ps2card_collect(&pc, r->path, serial, unit, len, hash, name, identity);
+}
+
+/* Its hash, name and identity, kept per game while the files it's made of stay
+ * as they are: making it reads the whole card. */
+static void ps2_unit_hash(const local_rom *r, const bundle *b, char hash[33], char name[256], char identity[33]) {
+    ps2_cards pc;
+    ps2_cards_for(r, &pc);
+    char key[640];
+    snprintf(key, sizeof key, "%lld:%lld:%d:%s:%s", (long long)b->mtime, (long long)b->size, b->n, pc.slot[0], pc.slot[1]);
+    state_lock();
+    cJSON *e = state_entry("roms", r->path);
+    /* An entry from before identities were kept is made again. */
+    int fresh = e && !strcmp(jget_str(e, "ps2_key", ""), key) && jget_str(e, "ps2_identity", "")[0];
+    if (fresh) {
+        str_copy(hash, 33, jget_str(e, "ps2_hash", ""));
+        str_copy(name, 256, jget_str(e, "ps2_name", ""));
+        str_copy(identity, 33, jget_str(e, "ps2_identity", ""));
+    }
+    state_unlock();
+    if (fresh) return;
+    unsigned char *unit = NULL;
+    size_t len = 0;
+    if (ps2card_collect(&pc, r->path, b->game_id, &unit, &len, hash, name, identity) != 0) hash[0] = identity[0] = 0;
+    free(unit);
+    state_lock();
+    e = state_entry("roms", r->path);
+    if (e && hash[0]) {
+        jset_str(e, "ps2_key", key);
+        jset_str(e, "ps2_hash", hash);
+        jset_str(e, "ps2_name", name);
+        jset_str(e, "ps2_identity", identity);
+    }
+    state_unlock();
+}
+
+/* The saves RomM's copy holds, as of the last sync: their identity, and the
+ * hash RomM has for its copy. The same saves with other timestamps (another
+ * console's _pcsx2_index) make another unit, so they're told apart by
+ * identity, and RomM is given its own hash for them. */
+static void ps2_note_synced(const local_rom *r, const char *identity, const char *server_hash) {
+    if (!identity[0] || !server_hash || !server_hash[0]) return;
+    state_lock();
+    cJSON *e = state_entry("roms", r->path);
+    if (e) {
+        jset_str(e, "ps2_synced_identity", identity);
+        jset_str(e, "ps2_synced_hash", server_hash);
+    }
+    state_unlock();
+}
+
+static void ps2_hash_for_romm(const local_rom *r, const char *identity, char hash[33]) {
+    state_lock();
+    cJSON *e = state_entry("roms", r->path);
+    if (e && identity[0] && !strcmp(jget_str(e, "ps2_synced_identity", ""), identity))
+        str_copy(hash, 33, jget_str(e, "ps2_synced_hash", hash));
+    state_unlock();
+}
+
 static void fill_bundle_file(local_file *f, const scan_ctx *c, const local_rom *r, const bundle *b) {
     memset(f, 0, sizeof *f);
     snprintf(f->path, sizeof f->path, "%s#%s", b->dir, b->game_id);
@@ -1297,7 +1402,12 @@ static void fill_bundle_file(local_file *f, const scan_ctx *c, const local_rom *
     f->mtime = b->mtime;
     f->size = b->size;
     bundle_hash(b, f->hash);
-    if (!strcmp(r->map->save_layout, "psp")) {
+    if (!strcmp(r->map->save_layout, "ps2")) {
+        char identity[33];
+        ps2_unit_hash(r, b, f->hash, f->upload_name, identity); /* no hash: not sent (scan_bundles) */
+        str_copy(f->ps2_identity, sizeof f->ps2_identity, identity);
+        ps2_hash_for_romm(r, identity, f->hash);
+    } else if (!strcmp(r->map->save_layout, "psp")) {
         snprintf(f->upload_name, sizeof f->upload_name, "%s.zip", b->game_id);
     } else if (!strcmp(r->map->save_layout, "3ds") || !strcmp(r->map->save_layout, "wiiu")) {
         /* As RomM's save units name them: the title id's low half. */
@@ -1345,7 +1455,8 @@ static void scan_bundles(scan_ctx *c) {
             local_file f;
             fill_bundle_file(&f, c, r, &b);
             if (f.hash[0]) add_file(&c->saves, &c->nsaves, &c->capsaves, &f);
-            else LOGW("%s: its saves can't go on RomM's memory card yet", path_basename(r->path));
+            else if (strcmp(r->map->save_layout, "ps2") != 0) /* ps2card logged why */
+                LOGW("%s: its saves can't go on RomM's memory card yet", path_basename(r->path));
         }
         bundle_free(&b);
     }
@@ -1412,6 +1523,25 @@ static int gc_place(const local_rom *r, bundle *b, const char *file) {
     return rc;
 }
 
+/* A PS2 save from RomM (sigil's card, or a zip of save folders) onto the slot
+ * cards in place of the game's saves there. 1 when placed, -1 when not. The
+ * bundle is listed again. */
+static int ps2_place(const local_rom *r, bundle *b, const char *file) {
+    size_t len = 0;
+    char *data = read_file(file, &len);
+    ps2_cards pc;
+    ps2_cards_for(r, &pc);
+    int rc = data && pc.dir[0] && ps2card_restore(&pc, r->path, b->game_id, (const unsigned char *)data, len) == 0 ? 1 : -1;
+    free(data);
+    if (rc > 0) {
+        char id[24];
+        str_copy(id, sizeof id, b->game_id);
+        bundle_free(b);
+        if (bundle_for_rom(r, id, b) != 0) rc = -1;
+    }
+    return rc;
+}
+
 /* Downloads a save zip and unpacks it over the game's current files. With
  * record set, the result counts as synced; a manual restore leaves it to upload. */
 static int do_download_bundle(const scan_ctx *c, int save_id, const local_rom *r, const char *slot, int session_id,
@@ -1446,7 +1576,9 @@ static int do_download_bundle(const scan_ctx *c, int save_id, const local_rom *r
         if (bundle_zip(&b, cur) == 0) backup_file(c, cur, r->rom_id);
         unlink(cur);
     }
-    int placed = !strcmp(r->map->save_layout, "gci") ? gc_place(r, &b, zip) : 0;
+    int placed = !strcmp(r->map->save_layout, "gci") ? gc_place(r, &b, zip)
+               : !strcmp(r->map->save_layout, "ps2") ? ps2_place(r, &b, zip)
+                                                     : 0;
     if (placed < 0) goto out;
     if (!placed && bundle_replace(&b, zip, tmpdir) != 0) {
         LOGE("save %d is not a usable zip", save_id);
@@ -1458,6 +1590,11 @@ static int do_download_bundle(const scan_ctx *c, int save_id, const local_rom *r
         local_file f;
         fill_bundle_file(&f, c, r, &b);
         str_copy(f.slot, sizeof f.slot, slot);
+        if (!strcmp(r->map->save_layout, "ps2") && server_hash && server_hash[0]) {
+            /* These saves are RomM's copy now, whatever timestamps they carry here. */
+            ps2_note_synced(r, f.ps2_identity, server_hash);
+            str_copy(f.hash, sizeof f.hash, server_hash);
+        }
         record_save(&f, save_id, f.hash);
         cJSON *body = cJSON_CreateObject();
         cJSON_AddStringToObject(body, "device_id", c->device_id);
@@ -1488,7 +1625,7 @@ static int do_upload(const scan_ctx *c, const local_file *f, int session_id, int
     free(dev);
     long st = 0;
     cJSON *j;
-    char card_up[PATH_MAX_LEN] = "";
+    char card_up[PATH_MAX_LEN] = "", ps2_sent[33] = ""; /* ps2: the identity of the unit sent */
     if (!strcmp(f->gc_form, "gci")) {
         j = romm_upload("POST", path, "saveFile", f->gc_file, f->upload_name, &st);
     } else if (!strcmp(f->gc_form, "card")) {
@@ -1507,6 +1644,21 @@ static int do_upload(const scan_ctx *c, const local_file *f, int session_id, int
         bundle_free(&b);
         free(card);
         j = romm_upload("POST", path, "saveFile", card_up, f->upload_name, &st);
+    } else if (f->is_bundle && !strcmp(f->map->save_layout, "ps2")) {
+        /* sigil's card of the game's saves, as other clients send it. */
+        char up[PATH_MAX_LEN], hash[33], name[256];
+        unsigned char *unit = NULL;
+        size_t n = 0;
+        snprintf(up, sizeof up, "%s/tmp/upload-%d.ps2", plat_data_dir(), f->rom_id);
+        if (ps2_unit(f->rom, f->game_id, &unit, &n, hash, name, ps2_sent) != 0 || !unit || mkdir_parent(up) != 0 ||
+            write_file_atomic(up, unit, n) != 0) {
+            free(unit);
+            if (status_out) *status_out = 0;
+            return -1;
+        }
+        free(unit);
+        j = romm_upload("POST", path, "saveFile", up, f->upload_name, &st);
+        unlink(up);
     } else if (f->is_bundle) {
         char zip[PATH_MAX_LEN];
         bundle b;
@@ -1532,6 +1684,7 @@ static int do_upload(const scan_ctx *c, const local_file *f, int session_id, int
     }
     if (ok) {
         record_save(f, (int)jget_num(j, "id", 0), jget_str(j, "content_hash", f->hash));
+        if (ps2_sent[0]) ps2_note_synced(f->rom, ps2_sent, jget_str(j, "content_hash", f->hash));
         LOGI("uploaded %s (rom %d, slot %s)", f->path, f->rom_id, f->slot);
     }
     cJSON_Delete(j);

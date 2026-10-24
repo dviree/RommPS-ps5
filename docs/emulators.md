@@ -41,11 +41,11 @@ Games save into their own disk images. Save Disks sync; there are no save states
 
 ### PS5SX2
 
-Two memory cards for every game, backed up to RomM (5.3 or newer).
+Two memory cards for every game, backed up to RomM (5.3 or newer). Or each game's saves on them sync on their own, as RomM's other clients keep them.
 
 | System | Games | Saves | Save files | Saved as | States | State files | Memory cards |
 |---|---|---|---|---|---|---|---|
-| ps2 | `{root}/games` | not synced |  |  | not synced |  | shared by every game. Shared cards (synced whole, while the system uses shared cards): `{root}/Mcd001.ps2`, `{root}/Mcd002.ps2` |
+| ps2 | `{root}/games` | `{root}/memcards,{root}` | each game's saves on the slot cards (`{root}/settings/{rom_stem}.ini,{root}/gs.ini`), as one 8 MB card per game |  | `{rom_dir}` | `.state*` | shared by every game; can be one per game. Shared cards (synced whole, while the system uses shared cards): `{root}/Mcd001.ps2`, `{root}/Mcd002.ps2` |
 
 ### PS5N64
 

@@ -437,6 +437,12 @@ void SetupPage::load_emulators(App &app)
                 const cJSON *slug;
                 cJSON_ArrayForEach(slug, cJSON_GetObjectItemCaseSensitive(p, "romm")) if (cJSON_IsString(slug))
                     sy.slugs.push_back(slug->valuestring);
+                // A platform entry's key wins over its profile's, as in the payload.
+                const char *layout = cJSON_GetObjectItemCaseSensitive(p, "save_layout")
+                                         ? str(p, "save_layout")
+                                         : str(cJSON_GetObjectItemCaseSensitive(c, "profile"), "save_layout");
+                if (sy.key == "ps2" && std::string(layout) == "ps2")
+                    e.ps2_game_saves = true;
                 e.systems.push_back(std::move(sy));
             }
             // No preset: each of its systems is set up with folders the user picks.
@@ -639,7 +645,15 @@ bool SetupPage::used(const Emulator &e) const
 bool SetupPage::has_ps2() const
 {
     for (const Emulator &e : emulators_)
-        if (used(e) && std::find(e.cores.begin(), e.cores.end(), "LRPS2") != e.cores.end())
+        if (used(e) && (e.ps2_game_saves || std::find(e.cores.begin(), e.cores.end(), "LRPS2") != e.cores.end()))
+            return true;
+    return false;
+}
+
+bool SetupPage::has_ps2_game_saves() const
+{
+    for (const Emulator &e : emulators_)
+        if (used(e) && e.ps2_game_saves)
             return true;
     return false;
 }
@@ -953,18 +967,22 @@ std::vector<Row> SetupPage::emulator_rows(const App &app, std::vector<RowRef> *r
         if (saves)
             add({RowKind::choice, "   Sync", kSyncLabel[sync_index(c.key)], ""}, {RowRef::kSysSync, -1, c.key});
         // Memory cards: one method per system, never both. PS2 can be chosen
-        // when an emulator keeps either (LRPS2); otherwise it's the emulator's.
+        // when an emulator keeps either (LRPS2), or takes each game's saves
+        // off its cards (PS5SX2); otherwise it's the emulator's.
         if (saves && cards_.count(c.key))
         {
             const CardMethod &cm = cards_.at(c.key);
             const bool choice = c.key == "ps2" && has_ps2();
+            const bool game_saves = c.key == "ps2" && has_ps2_game_saves();
             const std::string method = choice && !ps2_cards_.empty() ? ps2_cards_ : cm.method;
             const bool shared_ok = at_least(app.status().server_version, 5, 3, 0);
             std::string detail = !cm.note.empty()                  ? "    " + cm.note
                                  : method == "shared" && !shared_ok ? "    Shared cards need RomM 5.3 or newer"
+                                 : game_saves && method == "shared" ? "    Default: one shared card for all games' saves"
+                                 : game_saves                       ? "    Use this if your other devices sync PS2 saves per game"
                                  : method == "shared"               ? "    The whole cards sync between your consoles"
                                                                     : "    Each game's card syncs as its save";
-            Row r{RowKind::choice, "   Memory cards", method == "shared" ? "Shared, synced" : "One per game", detail};
+            Row r{RowKind::choice, "   Memory cards", method == "shared" ? "Shared, synced" : game_saves ? "Each game's saves" : "One per game", detail};
             r.enabled = choice;
             add(r, {RowRef::kPs2});
         }

@@ -9,11 +9,12 @@
 #include <unistd.h>
 
 #include "gameid.h"
+#include "ps2card.h"
 #include "zip.h"
 
 int bundle_supported(const char *layout) {
     return layout && (!strcmp(layout, "psp") || !strcmp(layout, "gci") || !strcmp(layout, "wii") ||
-                      !strcmp(layout, "3ds") || !strcmp(layout, "wiiu"));
+                      !strcmp(layout, "3ds") || !strcmp(layout, "wiiu") || !strcmp(layout, "ps2"));
 }
 
 static void add(bundle *b, const char *path, const char *name) {
@@ -110,6 +111,33 @@ int bundle_open(bundle *b, const char *layout, const char *id, char bases[][PATH
     if (!bundle_supported(layout) || !id[0] || nbases < 1) return -1;
     str_copy(b->layout, sizeof b->layout, layout);
     str_copy(b->game_id, sizeof b->game_id, id);
+
+    if (!strcmp(layout, "ps2")) {
+        /* The slot cards: the game's save folders on a folder card, or a file
+         * card holding any of its saves. */
+        str_copy(b->dir, sizeof b->dir, bases[0]);
+        str_copy(b->base, sizeof b->base, bases[0]);
+        char *slash = strrchr(b->base, '/');
+        if (slash) *slash = 0;
+        for (int i = 0; i < nbases; i++) {
+            const char *card = path_basename(bases[i]);
+            if (!dir_exists(bases[i])) {
+                if (file_exists(bases[i]) && ps2card_file_has(bases[i], id)) add(b, bases[i], card);
+                continue;
+            }
+            DIR *d = opendir(bases[i]);
+            struct dirent *de;
+            while (d && (de = readdir(d))) {
+                char folder[PATH_MAX_LEN], name[512];
+                path_join(folder, sizeof folder, bases[i], de->d_name);
+                if (!ps2card_folder_is_game(de->d_name, id) || !dir_exists(folder)) continue;
+                snprintf(name, sizeof name, "%s/%s", card, de->d_name);
+                add_tree(b, folder, name, 0);
+            }
+            if (d) closedir(d);
+        }
+        return 0;
+    }
 
     int pick = 0;
     for (int i = 0; i < nbases; i++)

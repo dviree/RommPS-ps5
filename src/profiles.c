@@ -164,6 +164,8 @@ static int ra_cfg_get(const char *cfg, const char *key, char *out, size_t n) {
     return 0;
 }
 
+int profile_cfg_get(const char *cfg, const char *key, char *out, size_t n) { return ra_cfg_get(cfg, key, out, n); }
+
 /* "" and "default" mean unset; ":", "~" and "/app0" all mean the app folder. */
 static void ra_apply(const char *cfg, const char *key, const char *root, char *dst, size_t n) {
     char v[PATH_MAX_LEN];
@@ -442,6 +444,10 @@ static void card_methods(profile_map *maps, int cnt) {
             }
         }
         const char *chosen = config_card_mode(sys);
+        /* An emulator with no setting to read keeps whichever cards the user chose
+         * (PS5SX2: its cards whole, or each game's saves on them). */
+        if (!m->cards_option[0] && !m->cards_file[0] && chosen[0] && in_list_ci(chosen, m->cards_modes))
+            str_copy(m->cards_mode, sizeof m->cards_mode, chosen);
         const char *method = chosen[0] && in_list_ci(chosen, main->cards_modes) ? chosen : main->cards_mode;
         str_copy(m->cards_method, sizeof m->cards_method, method);
         m->cards_active = !strcmp(m->cards_mode, method);
@@ -574,6 +580,7 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
             str_copy(m->core_name, sizeof m->core_name, jstr(p, e, "core_name", ""));
             str_copy(m->save_layout, sizeof m->save_layout, jstr(p, e, "save_layout", ""));
             str_copy(m->bundle_dirs, sizeof m->bundle_dirs, jstr(p, e, "bundle_dirs", ""));
+            str_copy(m->card_settings, sizeof m->card_settings, jstr(p, e, "card_settings", ""));
 
             str_copy(m->save_exts, sizeof m->save_exts, jstr(p, e, "save_exts", ".srm,.sav"));
             str_copy(m->state_exts, sizeof m->state_exts, jstr(p, e, "state_exts", ".state*"));

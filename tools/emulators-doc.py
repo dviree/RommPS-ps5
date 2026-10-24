@@ -63,6 +63,9 @@ def section(console, path):
             layout = c.get("save_layout")
             saves = code(c["save_dir"]) if sync else "not synced"
             files = ("a zip per game (%s), from %s" % (layout, code(c.get("bundle_dirs", "")))) if layout else code(c["save_exts"])
+            if layout == "ps2":  # src/ps2card.c: the game's saves off the slot cards, not a zip
+                saves = code(c.get("bundle_dirs", "")) if sync else "not synced"
+                files = "each game's saves on the slot cards (%s), as one 8 MB card per game" % code(c.get("card_settings", ""))
             stems = [x for x in c.get("save_stems", "").split(",") if x and x + "{ext}" != c["save_name"]]
             name = "" if layout or not sync else code(c["save_name"]) + (" (also %s)" % ", ".join(code(x) for x in stems) if stems else "")
             states = code(c["state_dir"]) if sync and c.get("state_exts", ".state*") else "not synced"

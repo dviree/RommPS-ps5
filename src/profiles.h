@@ -161,8 +161,12 @@ typedef struct {
      * by_core = <dir>/<core_name>/. Both sort flags nest content then core. */
     int in_content[2], by_content[2], by_core[2];
     char core_name[64]; /* core library name, e.g. "mGBA" */
-    char save_layout[8];    /* "" for one file per game, or psp, gci, wii (see bundle.h) */
+    char save_layout[8];    /* "" for one file per game, or psp, gci, wii, ps2 (see bundle.h) */
     char bundle_dirs[512];  /* candidate folders for bundled saves, comma separated */
+    /* ps2: the settings files naming the slot cards, the game's own first
+     * ("card_settings": "{root}/settings/{rom_stem}.ini,{root}/gs.ini", keys
+     * MemoryCards/Slot1_Filename and Slot2_Filename). */
+    char card_settings[512];
     /* Why saves aren't synced for this platform, shown in the UI. */
     char sync_note[200];
 
@@ -185,6 +189,8 @@ typedef struct {
 } rom_rules;
 
 void profile_rules_for(const profile_map *m, const char *rom_path, rom_rules *out);
+/* A value from a retroarch.cfg or ini text (key = "value", key=value); 0 if absent. */
+int profile_cfg_get(const char *cfg, const char *key, char *out, size_t n);
 
 /* A folder setting from the emulator's retroarch.cfg ("playlist_directory"),
  * as a path; 0 if it has none (or isn't RetroArch). */

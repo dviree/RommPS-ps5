@@ -68,6 +68,10 @@ jobs:
         with:
           ref: ${{ steps.version.outputs.sha }}
 
+      # sigil and its tiny-AES-c; sigil's libchdr isn't built (Makefile).
+      - if: steps.version.outputs.tag
+        run: git submodule update --init third_party/sigil && git -C third_party/sigil submodule update --init third_party/tiny-AES-c
+
       # RommPS (built with tools/release-app.sh, outside this workflow) is
       # offered as an update by the homebrew catalog only if its contentVersion
       # goes up, so the tag has to match it: v1.1.0 is 01.001.000.
@@ -181,6 +185,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
+
+      - run: git submodule update --init third_party/sigil && git -C third_party/sigil submodule update --init third_party/tiny-AES-c
 
       - uses: docker/setup-buildx-action@v3
 
