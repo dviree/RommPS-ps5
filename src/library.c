@@ -179,6 +179,50 @@ static const char *rom_archive(const cJSON *rom, int nx) {
     return NULL;
 }
 
+/* PS5 games come as an FPKG (.pkg), a mountable image (exFAT, or LZ4
+ * compressed) or a plain game folder. The library names the format, so two
+ * copies of a game in different formats tell themselves apart. */
+static int is_ps5(const char *slug) { return str_ieq(slug, "ps5") || str_ieq(slug, "playstation-5"); }
+
+static const char *ps5_file_format(const char *name) {
+    if (str_ends_with_ci(name, ".lz4")) return "LZ4";
+    if (str_ends_with_ci(name, ".pkg")) return "FPKG";
+    if (str_ends_with_ci(name, ".ffpkg")) return "FFPKG";
+    if (str_ends_with_ci(name, ".exfat")) return "exFAT";
+    if (str_ends_with_ci(name, ".ffpfs")) return "FFPFS";
+    return NULL;
+}
+
+/* A game folder (one with eboot.bin, or with no game file of the formats
+ * above), else the format of the file, or of the one file a folder holds.
+ * NULL when nothing says, a single file of another kind. */
+static const char *ps5_format(const char *fs_name, int folder, const cJSON *files) {
+    const char *fmt = ps5_file_format(fs_name);
+    if (fmt) return fmt;
+    const cJSON *f;
+    cJSON_ArrayForEach(f, files)
+        if (str_ieq(path_basename(jget_str(f, "file_name", "")), "eboot.bin")) return "Game folder";
+    cJSON_ArrayForEach(f, files)
+        if ((fmt = ps5_file_format(jget_str(f, "file_name", "")))) return fmt;
+    return folder || cJSON_GetArraySize(files) > 0 || !strchr(fs_name, '.') ? "Game folder" : NULL;
+}
+
+static const char *ps5_rom_format(const cJSON *rom) {
+    if (!is_ps5(jget_str(rom, "platform_slug", ""))) return NULL;
+    return ps5_format(jget_str(rom, "fs_name", ""), cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(rom, "has_multiple_files")),
+                      cJSON_GetObjectItemCaseSensitive(rom, "files"));
+}
+
+/* "Astro Bot [FPKG]": the format goes in the name, so every screen that lists
+ * the game shows it. */
+static void add_ps5_name(cJSON *o, const char *name, const char *format) {
+    char buf[512];
+    snprintf(buf, sizeof buf, "%s [%s]", name, format);
+    cJSON_DeleteItemFromObjectCaseSensitive(o, "name");
+    cJSON_AddStringToObject(o, "name", buf);
+    cJSON_AddStringToObject(o, "format", format);
+}
+
 /* Switch games come with their updates and DLC, which RomM keeps as games of
  * their own or as files in a game's folder. Each file names its title id
  * ("Game [0100000011D90800][v393216].nsp"): a game's ends in 000, its
@@ -325,10 +369,12 @@ static void add_list(char *buf, size_t size, const cJSON *arr, int max) {
 }
 
 /* What sets one version of a game apart from the others RomM has for it
- * (its sibling_roms): "USA · Rev 1 · Disc 2". The extension when the file
- * names say nothing more. */
+ * (its sibling_roms): "USA · Rev 1 · Disc 2", a PS5 game's format first. The
+ * extension when the file names say nothing more. */
 static void version_label(const cJSON *rom, char *buf, size_t size) {
     buf[0] = 0;
+    const char *format = ps5_rom_format(rom);
+    if (format) snprintf(buf, size, "%s", format);
     add_list(buf, size, cJSON_GetObjectItemCaseSensitive(rom, "regions"), 2);
     const char *rev = jget_str(rom, "revision", "");
     if (rev[0]) {
@@ -604,6 +650,11 @@ static void run_rom_job(job *j) {
     }
     pthread_mutex_lock(&g_q_lock);
     str_copy(j->name, sizeof j->name, jget_str(rom, "name", jget_str(rom, "fs_name", "?")));
+    const char *format = ps5_rom_format(rom);
+    if (format) {
+        size_t l = strlen(j->name);
+        snprintf(j->name + l, sizeof j->name - l, " [%s]", format);
+    }
     str_copy(j->cover, sizeof j->cover, jget_str(rom, "path_cover_small", ""));
     str_copy(j->platform, sizeof j->platform, jget_str(rom, "platform_display_name", jget_str(rom, "platform_slug", "")));
     j->total = (int64_t)jget_num(rom, "fs_size_bytes", 0);
@@ -1795,6 +1846,8 @@ cJSON *library_installed(int limit) {
         o = cJSON_CreateObject();
         cJSON_AddNumberToObject(o, "id", id);
         cJSON_AddStringToObject(o, "name", jget_str(e, "name", ""));
+        if (is_ps5(jget_str(e, "platform_dir", "")))
+            add_ps5_name(o, jget_str(e, "name", ""), ps5_format(jget_str(e, "fs_name", ""), dir_exists(e->string), NULL));
         cJSON_AddStringToObject(o, "fs_name", jget_str(e, "fs_name", ""));
         cJSON_AddNumberToObject(o, "platform_id", jget_num(e, "platform_id", 0));
         cJSON_AddStringToObject(o, "cover", jget_str(e, "cover", ""));
@@ -1980,6 +2033,8 @@ static int add_library_rom(const cJSON *it, const cJSON *page, int first, void *
     } else {
         add_version(o, it); /* a Switch game's "versions" are its files: one card */
     }
+    const char *format = ps5_rom_format(it);
+    if (format) add_ps5_name(o, jget_str(it, "name", jget_str(it, "fs_name", "")), format);
     cJSON_AddItemToArray(cJSON_GetObjectItemCaseSensitive(out, "items"), o);
     return 0;
 }

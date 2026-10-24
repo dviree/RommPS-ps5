@@ -39,6 +39,8 @@ DB = {
          "rom_count": 1, "firmware_count": 0, "url_logo": ""},
         {"id": 6, "slug": "n64", "fs_slug": "n64", "name": "Nintendo 64", "display_name": "N64",
          "rom_count": 2, "firmware_count": 0, "url_logo": ""},
+        {"id": 7, "slug": "ps5", "fs_slug": "ps5", "name": "PlayStation 5", "display_name": "PS5",
+         "rom_count": 4, "firmware_count": 0, "url_logo": ""},
     ],
     "roms": {
         10: {"id": 10, "platform_id": 1, "name": "Chrono Trigger", "fs_name": "Chrono Trigger (USA).sfc"},
@@ -71,6 +73,16 @@ DB = {
         50: {"id": 50, "platform_id": 5, "name": "Test Quest", "fs_name": "Test Quest (USA).bin"},
         60: {"id": 60, "platform_id": 6, "name": "Test Racer", "fs_name": "Test Racer (U).z64"},
         61: {"id": 61, "platform_id": 6, "name": "Other Racer", "fs_name": "Other Racer (U).z64"},
+        # One PS5 game in each format: an FPKG and a game folder are two copies of it.
+        70: {"id": 70, "platform_id": 7, "name": "Astro Test", "fs_name": "Astro Test.pkg",
+             "sibling_roms": [{"id": 71, "name": "Astro Test"}]},
+        71: {"id": 71, "platform_id": 7, "name": "Astro Test", "fs_name": "Astro Test",
+             "sibling_roms": [{"id": 70, "name": "Astro Test"}],
+             "files": [{"id": 74, "file_name": "eboot.bin", "content": b"EBOOT"},
+                       {"id": 75, "file_name": "param.json", "content": b"{}"}]},
+        72: {"id": 72, "platform_id": 7, "name": "Packed Test", "fs_name": "Packed Test.exfat.lz4"},
+        73: {"id": 73, "platform_id": 7, "name": "Image Test", "fs_name": "Image Test",
+             "files": [{"id": 76, "file_name": "Image Test.exfat", "content": b"EXFAT"}]},
     },
     "firmware": [{"id": 1, "platform_id": 1, "file_name": "bsx.bin", "content": b"BSXBIOS"}],
     "saves": {},    # id -> save dict (+ "content")
