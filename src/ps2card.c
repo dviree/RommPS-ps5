@@ -69,8 +69,20 @@ static int list_cards(const ps2_cards *c, str_list *l) {
         char path[PATH_MAX_LEN], rel[PATH_MAX_LEN];
         path_join(path, sizeof path, c->dir, card);
         snprintf(rel, sizeof rel, ROOT "%s", card);
+        size_t before = l->n;
         int rc = dir_exists(path) ? list_tree(l, path, rel, 0) : file_exists(path) ? list_add(l, rel) : 0;
         if (rc) return rc;
+        /* sigil tells a folder card by the files listed in it: an empty folder
+         * (PS5SX2 makes memcards/MemoryCard empty) gets the empty superblock
+         * PCSX2 gives a new folder card (FileMcd_CreateNewCard), else the save
+         * would go on the other slot's card. */
+        if (l->n == before && dir_exists(path)) {
+            char sb[PATH_MAX_LEN];
+            path_join(sb, sizeof sb, path, "_pcsx2_superblock");
+            if (write_file_atomic(sb, "", 0) != 0) continue; /* unwritable: listed as before */
+            snprintf(sb, sizeof sb, "%s/_pcsx2_superblock", rel);
+            if (list_add(l, sb) != 0) return -1;
+        }
     }
     return 0;
 }

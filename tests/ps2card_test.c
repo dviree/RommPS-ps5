@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "ps2card.h"
@@ -154,6 +155,30 @@ int main(void) {
     CHECK(!strcmp(h4, h1) && !strcmp(id4, id1));
     CHECK(ps2card_restore(&cf, game, serial, u1, l1) == 0);
     free(u4);
+
+    /* An empty folder in slot 1 (PS5SX2 makes memcards/MemoryCard empty) is
+     * the folder card the save goes on, not the file card in slot 2. */
+    char e[PATH_MAX_LEN], mc2[PATH_MAX_LEN];
+    path_join(e, sizeof e, root, "e");
+    ps2_cards ce = {.slot = {"MemoryCard", "Mcd002.ps2"}};
+    str_copy(ce.dir, sizeof ce.dir, e);
+    path_join(p, sizeof p, e, "MemoryCard");
+    CHECK(mkdir_parent(p) == 0 && mkdir(p, 0777) == 0);
+    path_join(mc2, sizeof mc2, e, "Mcd002.ps2");
+    unsigned char *erased = malloc(l1);
+    CHECK(erased != NULL);
+    if (erased) {
+        memset(erased, 0xFF, l1);
+        CHECK(write_file_atomic(mc2, erased, l1) == 0);
+    }
+    CHECK(ps2card_restore(&ce, game, serial, u1, l1) == 0);
+    path_join(p, sizeof p, e, "MemoryCard/BASLUS-21059/BASLUS-21059");
+    CHECK(same_file(p, data));
+    size_t l5 = 0;
+    char *slot2 = read_file(mc2, &l5);
+    CHECK(slot2 && erased && l5 == l1 && !memcmp(slot2, erased, l1));
+    free(slot2);
+    free(erased);
 
     free(z);
     free(u1);
