@@ -46,10 +46,11 @@ p.pop("firmware", None)
 print(json.dumps({"web_port": int(sys.argv[3]), "sync_interval_min": 0, "exit_delay_sec": 1, "profiles_custom": True,
                   "ps2_cards": "per_game", "profiles": [p]}))  # shared cards are the default
 PY
+for _ in $(seq 1 40); do curl -sf "$MOCK/api/heartbeat" >/dev/null && break; sleep 0.25; done
 server_save "$(folders_zip BASLUS-21059/BASLUS-21059=okami-v1 BASLUS-21059/icon.sys=icon)"
 ROMM_SYNC_DATA="$T/data" ROMM_SYNC_HOMEBREW="$T/none" ROMM_SYNC_APP_DIRS="$T/none" ROMM_SYNC_FS_ROOTS="$T" \
   "$ROOT/build/host/romm-sync" >"$T/daemon.log" 2>&1 &
-for _ in $(seq 1 40); do curl -sf "$API/api/status" >/dev/null && curl -sf "$MOCK/api/heartbeat" >/dev/null && break; sleep 0.25; done
+for _ in $(seq 1 40); do curl -sf "$API/api/status" >/dev/null && break; sleep 0.25; done
 sleep 2   # let the (unpaired, skipped) startup sync pass
 
 echo "1. RomM's save comes down onto the folder card"
