@@ -15,7 +15,7 @@ shift
 # The image tag follows the SDK version in the Dockerfile, so a new SDK gets a new image.
 case "${CONSOLE}" in
     ps5) IMAGE="${PS5_IMAGE:-romm-sync-ps5sdk:v0.43}" ;;
-    ps4) IMAGE="${PS4_IMAGE:-romm-sync-ps4sdk:v0.9-oo0.5.4}" ;;
+    ps4) IMAGE="${PS4_IMAGE:-romm-sync-ps4sdk:v0.9-crt1352-oo0.5.4}" ;;
     *)   echo "unknown console '${CONSOLE}', expected ps4 or ps5" >&2; exit 2 ;;
 esac
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

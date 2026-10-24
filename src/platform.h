@@ -39,6 +39,9 @@ typedef struct {
     const char *mednafen_root;
     /* Standalone emulators this console has, as a JSON array (detect.c), or NULL. */
     const char *emulator_catalog;
+    /* plat_mounts_set works: an app can see another's folder through a mount
+     * in its sandbox (bfs on the PS5 has no hard links or symlinks). */
+    int can_mount;
     int detach;   /* main() must return to the loader: the app runs on a thread */
     int can_relaunch; /* plat_launch_elf works, so an update can restart in place */
     /* The payload updates itself from GitHub releases. Off on the PS5, where
@@ -80,11 +83,36 @@ void plat_app_version(char *out, size_t n);
  * Host: writes <data>/launched.elf. */
 int plat_launch_elf(const void *elf, size_t len);
 
+/* A folder shown inside an app's sandbox while the app runs: "from" (a real
+ * folder) mounted on "into" (relative to the sandbox: "app0/games" is what
+ * the app sees as /app0/games), or on a real folder ("/data/PSXS5/games")
+ * for an app that leaves its sandbox to read its files. */
+typedef struct {
+    char title[16];
+    char name[64]; /* the emulator, for messages */
+    char from[1024];
+    char into[256];
+} plat_mount;
+
+/* Replaces the list of mounts. Each app's go on when it starts, before it
+ * reads its folders, and come off the moment its process exits: one left on
+ * when the system takes the sandbox down crashes the console. A list changed
+ * while the app runs applies from its next launch. No-op unless can_mount. */
+void plat_mounts_set(const plat_mount *mounts, int n);
+
+/* Whether a folder has something mounted on it (one of plat_mounts_set's
+ * on the real folder: what's in it then is another folder's). */
+int plat_is_mount(const char *path);
+
 /* plat_info()->name. */
 const char *plat_name(void);
 
 /* The console's LAN address, or "". */
 void plat_local_ip(char *buf, size_t n);
+
+/* The name the console was given in its settings (Console Name), or "" when
+ * it can't be read. ROMM_SYNC_CONSOLE_NAME stands in for it on the host. */
+void plat_console_name(char *buf, size_t n);
 
 /* One line for logs and diagnostics: firmware, and the process the payload
  * runs in. */

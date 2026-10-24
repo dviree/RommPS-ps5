@@ -81,7 +81,7 @@ jobs:
         if: steps.version.outputs.tag
         with:
           context: platform/ps4/docker
-          tags: romm-sync-ps4sdk:v0.9-oo0.5.4
+          tags: romm-sync-ps4sdk:v0.9-crt1352-oo0.5.4
           load: true
           cache-from: type=gha,scope=ps4
           cache-to: type=gha,mode=max,scope=ps4,ignore-error=true

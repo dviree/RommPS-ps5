@@ -26,6 +26,8 @@
 #include "pair.h"
 #include "platform.h"
 #include "profiles.h"
+#include "ra2.h"
+#include "romm.h"
 #include "state.h"
 #include "sync.h"
 #include "ui_index.h" /* generated from ui/index.html */
@@ -163,15 +165,6 @@ static int qint(const request *r, const char *key, int def) {
     return qparam(r, key, b, sizeof b) && b[0] ? atoi(b) : def;
 }
 
-static void autostart_chosen(void) {
-    config_lock();
-    if (!g_cfg.autostart_chosen) {
-        g_cfg.autostart_chosen = 1;
-        config_save();
-    }
-    config_unlock();
-}
-
 /* A header's value, from just after "Name:" to the end of its line. */
 static void header_value(const char *v, char *out, size_t n) {
     while (*v == ' ' || *v == '\t') v++;
@@ -274,12 +267,22 @@ static cJSON *status_json(void) {
     cJSON_AddStringToObject(j, "device_id", g_cfg.device_id);
     cJSON_AddNumberToObject(j, "web_port", g_cfg.web_port);
     config_unlock();
+    /* RomM not answering: the clients say so (it's checked again meanwhile). */
+    char trouble[160];
+    if (romm_no_answer(trouble, sizeof trouble)) {
+        cJSON_AddStringToObject(j, "server_trouble", trouble);
+        romm_check_back();
+    }
     pthread_mutex_lock(&g_fg_lock);
     cJSON_AddStringToObject(j, "foreground", g_foreground);
     pthread_mutex_unlock(&g_fg_lock);
     cJSON_AddItemToObject(j, "sync", sync_status_json());
     cJSON_AddItemToObject(j, "pairing", pair_status());
     cJSON_AddItemToObject(j, "covers", covers_status());
+    cJSON_AddNumberToObject(j, "installed_sig", library_installed_sig());
+    ra2_check(0);
+    cJSON *move = ra2_pending();
+    if (move) cJSON_AddItemToObject(j, "retroarch_move", move);
     return j;
 }
 
@@ -453,7 +456,7 @@ static size_t redactions(redaction *r, size_t max) {
         {g_cfg.device_name, "<device>"}, {g_cfg.device_id, "<device-id>"},
         {g_cfg.client_device_identifier, "<device-id>"}};
     for (size_t i = 0; i < sizeof src / sizeof src[0] && n < max; i++)
-        if (strlen(src[i].v) >= 3 && strcmp(src[i].v, "PlayStation 5")) {
+        if (strlen(src[i].v) >= 3 && strcmp(src[i].v, plat_info()->console)) {
             str_copy(r[n].from, sizeof r[n].from, src[i].v);
             r[n++].to = src[i].to;
         }
@@ -502,6 +505,35 @@ static size_t mac_at(const char *s) {
     return is_hex(s[17]) ? 0 : 17;
 }
 
+/* Hosts every install talks to, which name nobody. */
+static int public_host(const char *h, size_t l) {
+    static const char *const known[] = {"github.com", "githubusercontent.com", "youtube.com", "localhost"};
+    for (size_t i = 0; i < sizeof known / sizeof known[0]; i++) {
+        size_t k = strlen(known[i]);
+        if (l >= k && !strncasecmp(h + l - k, known[i], k) && (l == k || h[l - k - 1] == '.')) return 1;
+    }
+    return 0;
+}
+
+/* A host name at s: its length, and in *pre the text before it ("https://",
+ * or curl's "connect to <host> port" and "resolve host: <host>"); 0 when
+ * there's none. The paired server is handled by the redactions; this catches
+ * the ones paired before, still in old log lines. */
+static size_t host_at(const char *s, size_t *pre) {
+    static const struct { const char *before, *after; } forms[] = {
+        {"http://", ""}, {"https://", ""}, {"connect to ", " port "}, {"resolve host: ", ""}};
+    for (size_t i = 0; i < sizeof forms / sizeof forms[0]; i++) {
+        size_t b = strlen(forms[i].before), l = 0;
+        if (strncasecmp(s, forms[i].before, b)) continue;
+        while (is_word(s[b + l]) && s[b + l] != '+') l++;
+        while (l && s[b + l - 1] == '.') l--; /* a full stop after it */
+        if (!l || strncmp(s + b + l, forms[i].after, strlen(forms[i].after))) continue;
+        *pre = b;
+        return l;
+    }
+    return 0;
+}
+
 /* A copy of txt with everything that could name the person replaced. */
 static char *redact(const char *txt, const redaction *r, size_t nr) {
     textbuf b = {0};
@@ -513,6 +545,12 @@ static char *redact(const char *txt, const redaction *r, size_t nr) {
         for (size_t i = 0; i < nr && !m; i++) { /* whole words only */
             size_t l = strlen(r[i].from);
             if ((p == txt || !is_alnum(p[-1])) && !strncasecmp(p, r[i].from, l) && !is_alnum(p[l])) m = l, to = r[i].to;
+        }
+        size_t pre = 0, hl = !m && start ? host_at(p, &pre) : 0;
+        if (hl && !ipv4_at(p + pre) && !public_host(p + pre, hl) && p[pre + hl] != '@') {
+            tb_add(&b, p, pre); /* any other server: the prefix stays, the host goes */
+            p += pre;
+            m = hl, to = "<host>";
         }
         if (!m && start && (m = ipv4_at(p)) && (!strncmp(p, "127.", 4) || !strncmp(p, "0.0.0.0", 7))) m = 0;
         if (m && !to) to = "<ip>";
@@ -726,8 +764,12 @@ static void proxy_asset(const request *r) {
     size_t len = 0;
     const char *type = "image/jpeg";
     int rc = covers_fetch(p, &body, &len, &type);
+    /* Only a cover RomM doesn't have is a 404: RommPS takes that as final,
+     * and tries anything else again (RomM busy, a timeout). */
     if (rc == 0) send_response(r->fd, 200, type, body, len, "Cache-Control: max-age=86400\r\n");
-    else send_error(r->fd, rc == 1 ? 404 : (strncmp(p, "/assets/", 8) ? 400 : 404), rc == 1 ? "asset unavailable" : "bad asset path");
+    else if (rc == 1) send_error(r->fd, 404, "asset unavailable");
+    else if (rc == -2) send_error(r->fd, 400, "bad asset path");
+    else send_error(r->fd, 502, "RomM didn't answer for that asset");
     free(body);
 }
 
@@ -884,6 +926,7 @@ static void route(request *r) {
             send_error(fd, 400, "invalid JSON");
             return;
         }
+        const int profiles = cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(j, "profiles"));
         config_lock();
         config_apply_json(j);
         http_set_tls_verify(g_cfg.tls_verify);
@@ -891,6 +934,7 @@ static void route(request *r) {
         config_unlock();
         cJSON_Delete(j);
         library_wake();
+        if (profiles && !rc) library_link_extras(); /* the folders follow the new profiles */
         if (rc) send_error(fd, 500, "could not save config");
         else send_ok(fd);
         return;
@@ -933,41 +977,17 @@ static void route(request *r) {
     /* Autostart works before pairing too: RommPS sets it up and keeps it
      * current whether or not RomM Sync is paired yet. */
     if (is_get && !strcmp(r->path, "/api/autostart")) {
-        cJSON *a = autostart_status();
-        config_lock();
-        cJSON_AddBoolToObject(a, "chosen", g_cfg.autostart_chosen);
-        config_unlock();
-        send_json(fd, 200, a);
+        send_json(fd, 200, autostart_status());
         return;
     }
-    /* Turning it on or off is remembered, so RommPS's one-time switch-on
-     * for versions that left it off never overrides someone's choice. */
-    if (is_post && !strcmp(r->path, "/api/autostart")) {
-        cJSON *j = body_json(r);
-        int rc = autostart_set(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(j, "enable")), NULL, 0, err, sizeof err);
-        cJSON_Delete(j);
-        if (rc) send_error(fd, 400, err);
-        else {
-            autostart_chosen();
-            send_json(fd, 200, autostart_status());
-        }
-        return;
-    }
-    /* Installs the payload and turns autostart on (RommPS's setup and the
-     * web UI's upload). */
-    if (is_post && !strcmp(r->path, "/api/autostart/upload")) {
-        int rc = autostart_set(1, r->body, r->body_len, err, sizeof err);
-        if (rc) send_error(fd, 400, err);
-        else {
-            autostart_chosen();
-            send_json(fd, 200, autostart_status());
-        }
-        return;
-    }
-    /* Installs the payload, leaving autostart on or off as it is. */
-    if (is_post && !strcmp(r->path, "/api/autostart/install")) {
-        int rc = autostart_install(r->body, r->body_len, err, sizeof err);
-        if (rc) send_error(fd, 400, err);
+    /* Turns it on, installing the payload sent along if there is one (RommPS
+     * and the web UI's upload). There's no off; older apps asking for one
+     * get it turned on, which is what they need anyway. "install" is 1.2's
+     * name for it. */
+    if (is_post && (!strcmp(r->path, "/api/autostart") || !strcmp(r->path, "/api/autostart/upload") ||
+                    !strcmp(r->path, "/api/autostart/install"))) {
+        int has_elf = strcmp(r->path, "/api/autostart") != 0;
+        if (autostart_enable(has_elf ? r->body : NULL, has_elf ? r->body_len : 0, err, sizeof err)) send_error(fd, 400, err);
         else send_json(fd, 200, autostart_status());
         return;
     }
@@ -1129,6 +1149,23 @@ static void route(request *r) {
         }
         return;
     }
+    if (is_post && !strcmp(r->path, "/api/emulators/own-games")) {
+        /* An extra's games of its own, in the way of its mount: {"root",
+         * "system", "action": "move" (to the main emulator) | "delete"}. */
+        cJSON *j = body_json(r);
+        char err[200] = "";
+        int n = library_own_games(jget_str(j, "root", ""), jget_str(j, "system", ""), jget_str(j, "action", ""), err,
+                                  sizeof err);
+        cJSON_Delete(j);
+        if (n < 0) {
+            send_error(fd, 400, err);
+        } else {
+            cJSON *o = cJSON_CreateObject();
+            cJSON_AddNumberToObject(o, "games", n);
+            send_json(fd, 200, o);
+        }
+        return;
+    }
     if (is_post && !strcmp(r->path, "/api/emulators/sync")) {
         /* One emulator's save sync, for every platform it plays: {"root", "sync": "off" | "saves" | "all"}. */
         cJSON *j = body_json(r), *p;
@@ -1152,13 +1189,13 @@ static void route(request *r) {
             }
             config_unlock();
         }
-        cJSON_Delete(j);
         if (!found) send_error(fd, 400, "unknown emulator or choice");
         else if (rc) send_error(fd, 500, "could not save config");
         else {
             LOGI("save sync for %s: %s", at, mode);
             send_ok(fd);
         }
+        cJSON_Delete(j); /* at and mode are in it */
         return;
     }
     if (is_get && !strcmp(r->path, "/api/setup/preview")) {
@@ -1238,6 +1275,19 @@ static void route(request *r) {
         else send_ok(fd);
         return;
     }
+    if (is_post && !strcmp(r->path, "/api/retroarch/move")) {
+        int moved = 0;
+        int rc = ra2_move_games(&moved, err, sizeof err);
+        if (rc && !moved) {
+            send_error(fd, 400, err);
+            return;
+        }
+        cJSON *j = cJSON_CreateObject();
+        cJSON_AddNumberToObject(j, "moved", moved);
+        if (rc) cJSON_AddStringToObject(j, "error", err);
+        send_json(fd, 200, j);
+        return;
+    }
     if (is_post && !strcmp(r->path, "/api/strays/move")) {
         cJSON *j = body_json(r);
         int rc = sync_move_stray(jget_str(j, "path", ""), err, sizeof err);
@@ -1260,6 +1310,17 @@ static void route(request *r) {
         cJSON *j = library_roms(qint(r, "platform_id", 0), search, qint(r, "offset", 0), limit, err, sizeof err);
         if (j) send_json(fd, 200, j);
         else send_error(fd, 502, err);
+        return;
+    }
+    if (is_get && !strncmp(r->path, "/api/roms/", 10) && strstr(r->path, "/on_console")) {
+        int id = atoi(r->path + 10);
+        if (id <= 0) {
+            send_error(fd, 400, "no game");
+            return;
+        }
+        cJSON *j = cJSON_CreateObject();
+        cJSON_AddBoolToObject(j, "installed", library_on_console(id));
+        send_json(fd, 200, j);
         return;
     }
     if (is_get && !strncmp(r->path, "/api/roms/", 10) && strstr(r->path, "/details")) {
@@ -1291,7 +1352,7 @@ static void route(request *r) {
         cJSON *j = body_json(r);
         int rc;
         if (cJSON_GetObjectItemCaseSensitive(j, "rom_id"))
-            rc = library_queue_rom((int)jget_num(j, "rom_id", 0), jget_str(j, "name", ""), err, sizeof err);
+            rc = library_queue_rom((int)jget_num(j, "rom_id", 0), jget_str(j, "name", ""), jget_str(j, "cover", ""), err, sizeof err);
         else
             rc = library_queue_firmware((int)jget_num(j, "platform_id", 0), err, sizeof err);
         cJSON_Delete(j);
@@ -1325,6 +1386,34 @@ static void route(request *r) {
             cJSON_AddStringToObject(o, "bios_dir", maps[i].bios_dir);
             cJSON_AddStringToObject(o, "sync_note", maps[i].sync_note);
             cJSON_AddStringToObject(o, "save_layout", maps[i].save_layout);
+            /* Its memory cards: one per game or shared, and the shared ones here. */
+            if (maps[i].cards_mode[0]) {
+                cJSON *cards = cJSON_AddObjectToObject(o, "cards");
+                cJSON_AddStringToObject(cards, "mode", maps[i].cards_mode);
+                cJSON_AddStringToObject(cards, "method", maps[i].cards_method); /* the system's, one at a time */
+                cJSON_AddBoolToObject(cards, "active", maps[i].cards_active);
+                cJSON_AddStringToObject(cards, "default", maps[i].cards_default);
+                cJSON_AddStringToObject(cards, "modes", maps[i].cards_modes);
+                cJSON_AddStringToObject(cards, "change", maps[i].cards_change);
+                cJSON *found = cJSON_AddArrayToObject(cards, "shared_here");
+                char list[sizeof maps[i].memcards], *save = NULL;
+                str_copy(list, sizeof list, maps[i].memcards);
+                for (char *t = strtok_r(list, ",", &save); t; t = strtok_r(NULL, ",", &save))
+                    if (file_exists(t)) cJSON_AddItemToArray(found, cJSON_CreateString(t));
+            }
+            /* An extra playing the main emulator's games through a mount:
+             * its own folder, and where the mount goes in its sandbox. */
+            if (maps[i].mount_title[0]) {
+                cJSON_AddStringToObject(o, "own_rom_dir", maps[i].own_rom_dir);
+                cJSON_AddStringToObject(o, "mount", maps[i].mount_into);
+            }
+            cJSON_AddStringToObject(o, "mount_note", maps[i].mount_note);
+            char sys[64];
+            str_copy(sys, sizeof sys, maps[i].romm_slugs);
+            sys[strcspn(sys, ",")] = 0;
+            cJSON_AddStringToObject(o, "system", sys);
+            cJSON_AddBoolToObject(o, "extra", maps[i].extra);
+            cJSON_AddNumberToObject(o, "own_games", maps[i].mount_blocked);
             cJSON_AddItemToArray(arr, o);
         }
         free(maps);
@@ -1338,6 +1427,14 @@ static void route(request *r) {
     if (is_post && !strcmp(r->path, "/api/downloads/cancel")) {
         cJSON *j = body_json(r);
         int rc = library_cancel((int)jget_num(j, "id", 0), err, sizeof err);
+        cJSON_Delete(j);
+        if (rc) send_error(fd, 400, err);
+        else send_ok(fd);
+        return;
+    }
+    if (is_post && !strcmp(r->path, "/api/downloads/retry")) {
+        cJSON *j = body_json(r);
+        int rc = library_retry((int)jget_num(j, "id", 0), err, sizeof err);
         cJSON_Delete(j);
         if (rc) send_error(fd, 400, err);
         else send_ok(fd);

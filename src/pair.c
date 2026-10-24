@@ -70,6 +70,7 @@ static void finish_pairing(const char *base, const char *token, const char *devi
     str_copy(g_cfg.server_url, sizeof g_cfg.server_url, base);
     str_copy(g_cfg.token, sizeof g_cfg.token, token);
     str_copy(g_cfg.device_id, sizeof g_cfg.device_id, device_id);
+    g_cfg.romm_device_name[0] = 0; /* told at the first sync: RomM keeps an existing device's old name */
     config_unlock();
     long st = 0;
     cJSON *me = romm_call("GET", "/api/users/me", NULL, &st);

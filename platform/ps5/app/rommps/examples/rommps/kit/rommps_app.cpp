@@ -4,6 +4,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "rommps_app.hpp"
 
+#include "ui/fonts.hpp"
+
 #include "cJSON.h"
 #include "stb_image.h" // implemented by base/VulkanglTFModel.cpp
 
@@ -31,8 +33,8 @@ namespace
 {
 
 constexpr float kStatusEvery = 3.0f;
-constexpr float kDownloadsEvery = 1.0f;     // while one is running
-constexpr float kDownloadsIdleEvery = 5.0f; // otherwise
+constexpr float kQueueEvery = 1.0f;     // while one is running
+constexpr float kQueueIdleEvery = 5.0f; // otherwise
 constexpr int kCoverRetries = 3;            // a failed cover is tried again after 15, 30, 60 s
 constexpr int kDecodesPerFrame = 2;         // covers turned into textures each frame
 constexpr std::size_t kCoverTextures = 360; // covers kept as textures (about 130 MB); the
@@ -53,6 +55,31 @@ int version_cmp(const std::string &a, const std::string &b)
         if (x[i] != y[i])
             return x[i] < y[i] ? -1 : 1;
     return 0;
+}
+
+// RomM's platform logos are .ico files holding a PNG (256x256): bytes and len
+// are moved onto the biggest PNG inside, which stb_image reads. Anything else
+// is left as it is.
+static void ico_png(const unsigned char *&bytes, int &len)
+{
+    auto u16 = [&](int at) { return bytes[at] | bytes[at + 1] << 8; };
+    auto u32 = [&](int at) { return static_cast<unsigned>(u16(at)) | static_cast<unsigned>(u16(at + 2)) << 16; };
+    if (len < 6 || u16(0) != 0 || u16(2) != 1)
+        return;
+    const int n = u16(4);
+    unsigned best_size = 0, best_at = 0, best_area = 0;
+    for (int i = 0; i < n && 6 + 16 * (i + 1) <= len; ++i)
+    {
+        const int e = 6 + 16 * i;
+        const unsigned w = bytes[e] ? bytes[e] : 256, h = bytes[e + 1] ? bytes[e + 1] : 256;
+        const unsigned size = u32(e + 8), at = u32(e + 12);
+        if (at + size > static_cast<unsigned>(len) || size < 8 || std::memcmp(bytes + at, "\x89PNG", 4) != 0)
+            continue;
+        if (w * h > best_area)
+            best_area = w * h, best_size = size, best_at = at;
+    }
+    if (best_size)
+        bytes += best_at, len = static_cast<int>(best_size);
 }
 
 std::string url_escape(const std::string &s)
@@ -86,40 +113,266 @@ double num(const cJSON *o, const char *key, double fallback = 0)
     return cJSON_IsNumber(v) ? v->valuedouble : fallback;
 }
 
-// The kit's fonts are baked for ASCII: accented letters fold to their plain
-// ones ("Pok\xC3\xA9mon" reads "Pokemon"), typographic quotes and dashes to
-// their ASCII forms, and anything else to "?".
+// The faces the screen draws text with (set_text_fonts). plain() keeps a
+// character only when all of them have it.
+const hui::gfx::Font *g_text_fonts[4] = {};
+
+// What ps5/ui/setup-kit.sh bakes into them: the kit's "european" set and its
+// symbols. Only asked before the fonts are loaded.
+bool baked(unsigned cp)
+{
+    if ((cp >= 0xA1 && cp <= 0x17F) || (cp >= 0x410 && cp <= 0x44F))
+        return true;
+    switch (cp)
+    {
+    case 0x401: case 0x451: case 0x2013: case 0x2014: case 0x2018: case 0x2019: case 0x201C: case 0x201D:
+    case 0x201E: case 0x2022: case 0x2026: case 0x20AC: case 0x2122: case 0x2190: case 0x2191: case 0x2192:
+    case 0x2193: case 0x2713:
+        return true;
+    }
+    return false;
+}
+
+bool drawable(unsigned cp)
+{
+    if (!g_text_fonts[0])
+        return baked(cp);
+    for (const hui::gfx::Font *f : g_text_fonts)
+        if (f && !f->has_glyph(cp))
+            return false;
+    return true;
+}
+
+void put_utf8(std::string &out, unsigned cp)
+{
+    if (cp < 0x80)
+        out += static_cast<char>(cp);
+    else if (cp < 0x800)
+        out += static_cast<char>(0xC0 | cp >> 6), out += static_cast<char>(0x80 | (cp & 0x3F));
+    else if (cp < 0x10000)
+        out += static_cast<char>(0xE0 | cp >> 12), out += static_cast<char>(0x80 | (cp >> 6 & 0x3F)),
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+    else
+        out += static_cast<char>(0xF0 | cp >> 18), out += static_cast<char>(0x80 | (cp >> 12 & 0x3F)),
+            out += static_cast<char>(0x80 | (cp >> 6 & 0x3F)), out += static_cast<char>(0x80 | (cp & 0x3F));
+}
+
+constexpr unsigned kNothing = 0xFFFFFFFFu;
+
+// The next character of text, advancing p. Bytes that aren't UTF-8 are read
+// as Latin-1 (old file names are), a stray continuation byte as nothing; a
+// broken sequence never becomes a control character.
+unsigned next_char(const unsigned char *&p)
+{
+    const unsigned lead = *p++;
+    if (lead < 0x80)
+        return lead;
+    const int more = lead >= 0xC2 && lead <= 0xDF ? 1 : lead >= 0xE0 && lead <= 0xEF ? 2 : lead >= 0xF0 && lead <= 0xF4 ? 3 : 0;
+    if (!more)
+        return lead >= 0xC0 ? lead : kNothing;
+    unsigned cp = lead & (0x3F >> more);
+    for (int i = 0; i < more; ++i)
+    {
+        if ((p[i] & 0xC0) != 0x80)
+            return lead; // the bytes after it stay, as characters of their own
+        cp = cp << 6 | (p[i] & 0x3F);
+    }
+    p += more;
+    // Too long a form, a surrogate, past Unicode: nothing to show
+    static const unsigned kLeast[] = {0, 0x80, 0x800, 0x10000};
+    if (cp < kLeast[more] || (cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF)
+        return kNothing;
+    return cp;
+}
+
+// Marks that sit on the letter before them (decomposed text: "e" then U+0301).
+bool combining(unsigned cp)
+{
+    return (cp >= 0x300 && cp <= 0x36F) || (cp >= 0x1AB0 && cp <= 0x1AFF) || (cp >= 0x1DC0 && cp <= 0x1DFF) ||
+           (cp >= 0x20D0 && cp <= 0x20FF) || (cp >= 0xFE20 && cp <= 0xFE2F);
+}
+
+// What a name can carry that shows as nothing: control codes, a soft hyphen, zero widths,
+// direction marks, variation selectors, the byte order mark.
+bool invisible(unsigned cp)
+{
+    return (cp >= 0x80 && cp < 0xA0) || cp == 0xAD || (cp >= 0x200B && cp <= 0x200F) || (cp >= 0x202A && cp <= 0x202E) ||
+           (cp >= 0x2060 && cp <= 0x2064) || (cp >= 0xFE00 && cp <= 0xFE0F) || cp == 0xFEFF;
+}
+
+// A letter and the mark after it, as one character: 0 when there's none.
+unsigned compose(char base, unsigned mark)
+{
+    static const struct
+    {
+        unsigned mark;
+        const char *bases;
+        const char16_t *made;
+    } kMarks[] = {
+        {0x300, "AEIOUaeiou", u"ÀÈÌÒÙàèìòù"},
+        {0x301, "AEIOUYaeiouyCcLlNnRrSsZz",
+         u"ÁÉÍÓÚÝáéíóúý"
+         u"ĆćĹĺŃńŔŕŚśŹź"},
+        {0x302, "AEIOUaeiouCcGgHhJjSsWwYy",
+         u"ÂÊÎÔÛâêîôû"
+         u"ĈĉĜĝĤĥĴĵŜŝŴŵŶŷ"},
+        {0x303, "ANOanoIiUu", u"ÃÑÕãñõĨĩŨũ"},
+        {0x304, "AEIOUaeiou", u"ĀĒĪŌŪāēīōū"},
+        {0x306, "AEGIOUaegiou", u"ĂĔĞĬŎŬăĕğĭŏŭ"},
+        {0x307, "CEGIZcegz", u"ĊĖĠİŻċėġż"},
+        {0x308, "AEIOUYaeiouy", u"ÄËÏÖÜŸäëïöüÿ"},
+        {0x30A, "AaUu", u"ÅåŮů"},
+        {0x30B, "OoUu", u"ŐőŰű"},
+        {0x30C, "CDELNRSTZcdelnrstz",
+         u"ČĎĚĽŇŘŠŤŽčďěľňřšťž"},
+        {0x327, "CcGgKkLlNnRrSsTt",
+         u"ÇçĢģĶķĻļŅņŖŗŞşŢţ"},
+        {0x328, "AEIUaeiu", u"ĄĘĮŲąęįų"},
+    };
+    for (const auto &m : kMarks)
+        if (m.mark == mark)
+            for (int i = 0; m.bases[i]; ++i)
+                if (m.bases[i] == base)
+                    return m.made[i];
+    return 0;
+}
+
+// Appends what a character the fonts lack reads as, in ASCII; false for one
+// with no stand-in (Japanese, say).
+bool fold(unsigned cp, std::string &out)
+{
+    static const char *const kSymbols[] = {// U+00A0 to U+00BF
+        " ", "", "c", "GBP", "", "JPY", "|", "S", "", "(C)", "a", "\"", "-", "", "(R)", "",
+        "o", "+/-", "2", "3", "'", "u", "", ".", "", "1", "o", "\"", "1/4", "1/2", "3/4", ""};
+    static const char kLatin1[] = // U+00C0 to U+00FF; Æ, Þ, ß, æ and þ are below
+        "AAAAAAACEEEEIIII" "DNOOOOOxOUUUUYTs" "aaaaaaaceeeeiiii" "dnooooo/ouuuuyty";
+    static const char kExtendedA[] = // U+0100 to U+017F; Ĳ, ĳ, Œ and œ are below
+        "AaAaAaCcCcCcCcDd" "DdEeEeEeEeEeGgGg" "GgGgHhHhIiIiIiIi" "IiIiJjKkkLlLlLlL"
+        "lLlNnNnNnnNnOoOo" "OoOoRrRrRrSsSsSs" "SsTtTtTtUuUuUuUu" "UuUuWwYyYZzZzZzs";
+    static const char kPinyin[] = "AaIiOoUuUuUuUuUu"; // U+01CD to U+01DC: Ǎ ǎ Ǐ ǐ ... ǜ
+    // Greek and Cyrillic capitals in Latin letters; the small ones are these in lower case
+    static const char *const kGreek[] = {// U+0391 to U+03A9 (U+03A2, unused, as final sigma's slot)
+        "A", "B", "G", "D", "E", "Z", "I", "Th", "I", "K", "L", "M", "N", "X", "O", "P", "R", "s", "S",
+        "T", "Y", "F", "Ch", "Ps", "O"};
+    static const char *const kCyrillic[] = {// U+0410 to U+042F
+        "A", "B", "V", "G", "D", "E", "Zh", "Z", "I", "Y", "K", "L", "M", "N", "O", "P",
+        "R", "S", "T", "U", "F", "Kh", "Ts", "Ch", "Sh", "Shch", "", "Y", "", "E", "Yu", "Ya"};
+    auto lower = [&out](const char *s) {
+        for (; *s; ++s)
+            out += static_cast<char>(std::tolower(static_cast<unsigned char>(*s)));
+        return true;
+    };
+    auto put = [&out](const char *s) { return out += s, true; };
+    auto one = [&out](char c) { return out += c, true; };
+    if (cp >= 0xA0 && cp <= 0xBF)
+        return put(kSymbols[cp - 0xA0]);
+    if (cp >= 0xC0 && cp <= 0xFF)
+        return cp == 0xC6 ? put("AE") : cp == 0xDE ? put("Th") : cp == 0xDF ? put("ss") : cp == 0xE6 ? put("ae")
+               : cp == 0xFE ? put("th") : one(kLatin1[cp - 0xC0]);
+    if (cp >= 0x100 && cp <= 0x17F)
+        return cp == 0x132 ? put("IJ") : cp == 0x133 ? put("ij") : cp == 0x152 ? put("OE") : cp == 0x153 ? put("oe")
+               : one(kExtendedA[cp - 0x100]);
+    if (cp >= 0x1CD && cp <= 0x1DC)
+        return one(kPinyin[cp - 0x1CD]);
+    if (cp >= 0x391 && cp <= 0x3A9)
+        return put(kGreek[cp - 0x391]);
+    if (cp >= 0x3B1 && cp <= 0x3C9)
+        return lower(kGreek[cp - 0x3B1]);
+    if (cp >= 0x410 && cp <= 0x42F)
+        return put(kCyrillic[cp - 0x410]);
+    if (cp >= 0x430 && cp <= 0x44F)
+        return lower(kCyrillic[cp - 0x430]);
+    if (cp >= 0xFF01 && cp <= 0xFF5E) // full-width ASCII
+        return one(static_cast<char>(cp - 0xFEE0));
+    if ((cp >= 0x2000 && cp <= 0x200A) || cp == 0x2028 || cp == 0x2029 || cp == 0x202F || cp == 0x205F || cp == 0x3000)
+        return one(' ');
+    switch (cp)
+    {
+    case 0x192: return put("f");
+    case 0x1A0: return put("O");
+    case 0x1A1: return put("o");
+    case 0x1AF: return put("U");
+    case 0x1B0: return put("u");
+    case 0x218: return put("S");
+    case 0x219: return put("s");
+    case 0x21A: return put("T");
+    case 0x21B: return put("t");
+    case 0x2BC: return put("'");
+    case 0x2C6: return put("^");
+    case 0x2DC: return put("~");
+    case 0x386: return put("A");
+    case 0x388: return put("E");
+    case 0x389: case 0x38A: return put("I");
+    case 0x38C: case 0x38F: return put("O");
+    case 0x38E: return put("Y");
+    case 0x390: case 0x3AE: case 0x3AF: case 0x3CA: return put("i");
+    case 0x3AC: return put("a");
+    case 0x3AD: return put("e");
+    case 0x3CB: case 0x3CD: return put("y");
+    case 0x3CC: case 0x3CE: return put("o");
+    case 0x401: return put("Yo");
+    case 0x451: return put("yo");
+    case 0x2010: case 0x2011: case 0x2012: case 0x2013: case 0x2014: case 0x2015: case 0x2212: return put("-");
+    case 0x2018: case 0x2019: case 0x201A: case 0x201B: case 0x2032: return put("'");
+    case 0x201C: case 0x201D: case 0x201E: case 0x201F: case 0x2033: return put("\"");
+    case 0x2039: return put("<");
+    case 0x203A: return put(">");
+    case 0x2020: return put("+");
+    case 0x2022: case 0x2605: case 0x2606: return put("*");
+    case 0x2024: return put(".");
+    case 0x2025: return put("..");
+    case 0x2026: return put("...");
+    case 0x2030: return put("%");
+    case 0x2044: case 0x2215: return put("/");
+    case 0x20AC: return put("EUR");
+    case 0x2116: return put("No");
+    case 0x2122: return put("TM");
+    case 0x2190: return put("<-");
+    case 0x2192: return put("->");
+    }
+    return false;
+}
+
+// Text the screen's fonts can draw: what they have stays ("Pokémon",
+// "Luigi’s Mansion"), anything else folds to its nearest ASCII ("Ō" reads "O",
+// "ß" "ss", "™" "TM" in a font without them); a decomposed accent joins its
+// letter, or goes. Only a character with no stand-in at all is "?".
 std::string plain(const char *text)
 {
-    static const char *const kLatin1 = // U+00C0 to U+00FF
-        "AAAAAAACEEEEIIII" "DNOOOOOxOUUUUYTs" "aaaaaaaceeeeiiii" "dnooooo/ouuuuyty";
     std::string out;
     const auto *p = reinterpret_cast<const unsigned char *>(text);
+    std::size_t base_at = 0; // where the last plain letter is in out, for a mark after it
+    char base = 0;
     while (*p)
     {
-        unsigned cp = *p++;
-        int more = cp >= 0xF0 ? 3 : cp >= 0xE0 ? 2 : cp >= 0xC0 ? 1 : 0;
-        if (more)
-            cp &= 0x3F >> more;
-        while (more-- > 0 && (*p & 0xC0) == 0x80)
-            cp = (cp << 6) | (*p++ & 0x3F);
+        const unsigned cp = next_char(p);
+        if (cp == kNothing || invisible(cp))
+            continue;
         if (cp < 0x80)
+        {
+            base = std::isalpha(static_cast<int>(cp)) ? static_cast<char>(cp) : 0;
+            base_at = out.size();
             out += static_cast<char>(cp);
-        else if (cp >= 0xC0 && cp <= 0xFF)
-            out += kLatin1[cp - 0xC0];
-        else if (cp == 0x2018 || cp == 0x2019)
-            out += '\'';
-        else if (cp == 0x201C || cp == 0x201D)
-            out += '"';
-        else if (cp == 0x2013 || cp == 0x2014)
-            out += '-';
-        else if (cp == 0x2026)
-            out += "...";
-        else if (cp == 0xA0)
-            out += ' ';
-        else if (cp == 0xB7)
-            out += "\xC2\xB7"; // the middle dot is in the fonts: the app uses it too
-        else
+            continue;
+        }
+        if (combining(cp))
+        {
+            const unsigned made = base ? compose(base, cp) : 0;
+            if (made && drawable(made))
+            {
+                out.resize(base_at);
+                put_utf8(out, made);
+            }
+            base = 0; // a second mark on the same letter goes
+            continue;
+        }
+        base = 0;
+        if (cp != 0xA0 && drawable(cp))
+        {
+            put_utf8(out, cp);
+            continue;
+        }
+        if (!fold(cp, out))
             out += '?';
     }
     return out;
@@ -176,6 +429,13 @@ std::string plain_text(const char *text)
     return plain(text ? text : "");
 }
 
+void set_text_fonts(const hui::ui::Fonts &fonts)
+{
+    const hui::ui::FontRef *faces[] = {&fonts.regular, &fonts.semibold, &fonts.display, &fonts.mono};
+    for (int i = 0; i < 4; ++i)
+        g_text_fonts[i] = faces[i]->font;
+}
+
 App &app()
 {
     static App instance;
@@ -189,7 +449,7 @@ App::App() : api_("127.0.0.1", payload_port())
 
 void App::say(const std::string &message)
 {
-    toast_ = message;
+    toast_ = plain(message.c_str()); // the service's errors carry names and paths
     toast_age_ = 0;
 }
 
@@ -248,10 +508,10 @@ void App::tick(float dt, hui::gfx::Renderer *renderer)
     update_timer_ += dt;
     if (update_.busy() && !update_busy_ && update_timer_ >= 1.0f)
         refresh_update();
-    downloads_timer_ += dt;
-    if (status_.paired && !downloads_busy_ &&
-        downloads_timer_ >= (active_downloads_ ? kDownloadsEvery : kDownloadsIdleEvery))
-        refresh_downloads();
+    queue_timer_ += dt;
+    if (status_.paired && !queue_busy_ &&
+        queue_timer_ >= (active_queue_ ? kQueueEvery : kQueueIdleEvery))
+        refresh_queue();
 
     if (renderer)
         evict_covers(renderer);
@@ -275,14 +535,19 @@ void App::tick(float dt, hui::gfx::Renderer *renderer)
         to_decode_.pop_front();
         Cover &cover = covers_[job.path];
         int w = 0, h = 0, channels = 0;
-        unsigned char *rgba = stbi_load_from_memory(reinterpret_cast<const unsigned char *>(job.bytes.data()),
-                                                    static_cast<int>(job.bytes.size()), &w, &h, &channels, 4);
+        const auto *bytes = reinterpret_cast<const unsigned char *>(job.bytes.data());
+        int len = static_cast<int>(job.bytes.size());
+        ico_png(bytes, len);
+        unsigned char *rgba = stbi_load_from_memory(bytes, len, &w, &h, &channels, 4);
         if (!rgba)
         {
             cover.failed = true;
             continue;
         }
         cover.palette = palette_of(rgba, w, h);
+        cover.aspect = h > 0 ? static_cast<float>(w) / static_cast<float>(h) : 0.0f;
+        if (shapes_[job.path].aspect != cover.aspect)
+            shapes_[job.path] = {cover.aspect, clock_};
         if (renderer)
             cover.texture = renderer->create_texture(w, h, rgba);
         stbi_image_free(rgba);
@@ -368,28 +633,14 @@ void App::repair_autostart()
         std::unique_ptr<cJSON, void (*)(cJSON *)> j(r.json(), cJSON_Delete);
         if (!r.ok() || !j || !flag(j.get(), "supported"))
             return;
-        // Setup used to leave autostart off unless it was turned on, so most
-        // people never did. It's switched on once for anyone who never chose
-        // either way; after that their choice stands.
-        if (!flag(j.get(), "enabled") && cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(j.get(), "chosen")) &&
-            status_.setup_complete)
-        {
-            install_autostart([this](const Response &a) {
-                if (a.ok())
-                    say("RommPS now starts with the console. You can turn this off in Set up again.");
-            });
-            return;
-        }
-        bool old = false;
+        // RommPS needs RomM Sync running, so it starts with the console, from
+        // a copy no older than the one RommPS carries.
+        bool old = !flag(j.get(), "enabled");
         const cJSON *c;
         cJSON_ArrayForEach(c, cJSON_GetObjectItemCaseSensitive(j.get(), "copies"))
             old |= version_cmp(str(c, "version"), kMinPayload) < 0;
-        if (!old)
-            return;
-        api_.post("/api/autostart/install", bundled_payload(), [this](const Response &a) {
-            if (!a.ok())
-                say("Couldn't update RommPS's autostart: " + a.message());
-        });
+        if (old)
+            install_autostart(nullptr);
     });
 }
 
@@ -460,7 +711,7 @@ void App::refresh_status()
         }
         if (!r.ok())
         {
-            status_.error = r.message();
+            status_.error = plain(r.message().c_str());
             return;
         }
         std::unique_ptr<cJSON, void (*)(cJSON *)> j(r.json(), cJSON_Delete);
@@ -472,7 +723,7 @@ void App::refresh_status()
         // idle: the new one takes over from it and then, being this
         // RommPS's own, updates the copies on disk (below). A newer one is
         // left alone.
-        const bool idle = !flag(cJSON_GetObjectItemCaseSensitive(j.get(), "sync"), "running") && active_downloads_ == 0;
+        const bool idle = !flag(cJSON_GetObjectItemCaseSensitive(j.get(), "sync"), "running") && active_queue_ == 0;
         if (payload_too_old() && !updated_payload_ && idle)
         {
             updated_payload_ = true;
@@ -489,11 +740,12 @@ void App::refresh_status()
         status_.paired = flag(j.get(), "paired");
         status_.setup_complete = flag(j.get(), "setup_complete");
         status_.server = str(j.get(), "server_url");
-        status_.user = str(j.get(), "username");
+        status_.user = plain(str(j.get(), "username"));
+        status_.server_trouble = plain(str(j.get(), "server_trouble"));
         status_.uptime = num(j.get(), "uptime");
         const cJSON *sync = cJSON_GetObjectItemCaseSensitive(j.get(), "sync");
         status_.syncing = flag(sync, "running");
-        status_.phase = str(sync, "phase");
+        status_.phase = plain(str(sync, "phase"));
         status_.last_run = num(sync, "last_run");
         status_.sync_count = static_cast<int>(num(sync, "sync_count"));
         status_.tracked_saves = static_cast<int>(num(sync, "tracked_saves"));
@@ -501,14 +753,30 @@ void App::refresh_status()
         // The payload adds each sync at the end of its history: the last one is the newest.
         const cJSON *history = cJSON_GetObjectItemCaseSensitive(sync, "history");
         const cJSON *last = cJSON_GetArrayItem(history, cJSON_GetArraySize(history) - 1);
-        status_.last_result = last ? (str(last, "error")[0] ? str(last, "error") : "OK") : "";
+        status_.last_result = last ? (str(last, "error")[0] ? plain(str(last, "error")) : "OK") : "";
         status_.last_up = static_cast<int>(num(last, "uploaded"));
         status_.last_down = static_cast<int>(num(last, "downloaded"));
         status_.server_version = str(j.get(), "server_version");
+        const cJSON *move = cJSON_GetObjectItemCaseSensitive(j.get(), "retroarch_move"), *folder;
+        status_.retroarch_move = static_cast<int>(num(move, "games"));
+        status_.retroarch_folders.clear();
+        cJSON_ArrayForEach(folder, cJSON_GetObjectItemCaseSensitive(move, "folders"))
+        {
+            const std::string from = str(folder, "from");
+            status_.retroarch_folders += (status_.retroarch_folders.empty() ? "" : ", ") + plain(from.substr(from.find_last_of('/') + 1).c_str());
+        }
         const cJSON *covers = cJSON_GetObjectItemCaseSensitive(j.get(), "covers");
         status_.covers_state = str(covers, "state");
         status_.covers_done = static_cast<int>(num(covers, "done"));
         status_.covers_total = static_cast<int>(num(covers, "total"));
+        // A game came or went (deleted by hand included): the lists load again.
+        const double sig = num(j.get(), "installed_sig", -1);
+        if (sig != installed_sig_ && installed_sig_ >= 0 && sig >= 0)
+        {
+            lists_.clear();
+            refresh_installed();
+        }
+        installed_sig_ = sig;
         const cJSON *pairing = cJSON_GetObjectItemCaseSensitive(j.get(), "pairing");
         if (status_.pairing == "starting")
             pairing = nullptr; // the answer to /api/pair/start says how it went
@@ -516,7 +784,7 @@ void App::refresh_status()
             status_.pairing = str(pairing, "status");
         if (pairing)
         {
-            status_.pairing_message = str(pairing, "message");
+            status_.pairing_message = plain(str(pairing, "message"));
             status_.user_code = str(pairing, "user_code");
             status_.verification_url = str(pairing, "verification_url");
         }
@@ -551,7 +819,7 @@ void App::refresh_platforms()
             plat.id = static_cast<int>(num(p, "id"));
             plat.name = plain(str(p, "name"));
             plat.slug = str(p, "slug");
-            plat.profile = str(p, "profile");
+            plat.profile = plain(str(p, "profile"));
             plat.rom_count = static_cast<int>(num(p, "rom_count"));
             if (plat.rom_count > 0)
                 list.push_back(std::move(plat));
@@ -641,7 +909,7 @@ void App::send_page(const std::string &key, int page)
             GameList &l = *it->second.list;
             if (!r.ok())
             {
-                l.error = r.message();
+                l.error = plain(r.message().c_str());
                 if (static_cast<int>(l.pages.size()) > page)
                     l.pages[static_cast<std::size_t>(page)] = 0; // asked again when looked at
                 return;
@@ -680,6 +948,7 @@ void App::send_page(const std::string &key, int page)
                 game.installed = flag(g, "installed");
                 game.multi = flag(g, "multi");
                 game.not_game = flag(g, "not_game");
+                game.archived = flag(g, "archived");
                 game.version = plain(str(g, "version"));
                 game.versions = static_cast<int>(num(g, "versions"));
             }
@@ -721,17 +990,37 @@ const Details &App::details(int rom_id)
         out.sessions = static_cast<int>(num(j.get(), "sessions"));
         out.completion = static_cast<int>(num(j.get(), "completion"));
         out.my_rating = static_cast<int>(num(j.get(), "my_rating"));
+        out.archived = plain(str(j.get(), "archived"));
+        out.updates = static_cast<int>(num(j.get(), "updates"));
+        out.dlc = static_cast<int>(num(j.get(), "dlc"));
+        out.title_id = str(j.get(), "title_id");
+        const auto addon = [](const cJSON *a) {
+            const char *k = str(a, "kind");
+            return Details::Addon{!std::strcmp(k, "update") ? Details::Addon::update
+                                  : !std::strcmp(k, "dlc")  ? Details::Addon::dlc
+                                                            : Details::Addon::game,
+                                  plain(str(a, "name")), str(a, "title_id"), num(a, "size")};
+        };
+        const cJSON *a;
+        cJSON_ArrayForEach(a, cJSON_GetObjectItemCaseSensitive(j.get(), "addons"))
+            out.addons.push_back(addon(a));
+        cJSON_ArrayForEach(a, cJSON_GetObjectItemCaseSensitive(j.get(), "bundle"))
+        {
+            out.addons.push_back(addon(a));
+            out.bundle++;
+        }
     });
     return d;
 }
 
 void App::refresh_installed()
 {
-    api_.get("/api/installed?limit=1000", [this](const Response &r) { // every one: the shelf's count is theirs
+    api_.get("/api/installed?limit=5000", [this](const Response &r) { // every one: the Downloads tab counts them
         if (!r.ok())
             return;
         std::unique_ptr<cJSON, void (*)(cJSON *)> j(r.json(), cJSON_Delete);
         std::vector<Game> list;
+        std::unordered_set<int> ids;
         const cJSON *g;
         cJSON_ArrayForEach(g, j.get())
         {
@@ -743,10 +1032,45 @@ void App::refresh_installed()
             game.cover = str(g, "cover");
             game.size = num(g, "size");
             game.installed = true;
+            ids.insert(game.id);
             list.push_back(std::move(game));
         }
         installed_ = std::move(list);
+        on_console_ = std::move(ids);
+        installed_known_ = true;
     });
+}
+
+void App::check_on_console(int rom_id)
+{
+    char path[64];
+    std::snprintf(path, sizeof path, "/api/roms/%d/on_console", rom_id);
+    api_.get(path, [this, rom_id](const Response &r) {
+        std::unique_ptr<cJSON, void (*)(cJSON *)> j(r.json(), cJSON_Delete);
+        if (!r.ok() || !j || !installed_known_) // an older payload doesn't know it
+            return;
+        const bool here = flag(j.get(), "installed");
+        if (here == (on_console_.count(rom_id) > 0))
+            return;
+        if (here)
+        {
+            refresh_installed(); // its size and cover for the shelf
+            on_console_.insert(rom_id);
+            return;
+        }
+        on_console_.erase(rom_id);
+        installed_.erase(std::remove_if(installed_.begin(), installed_.end(),
+                                        [rom_id](const Game &g) { return g.id == rom_id; }),
+                         installed_.end());
+    });
+}
+
+const Cover &App::platform_logo(const std::string &slug)
+{
+    std::string lower = slug;
+    for (char &c : lower)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return cover(slug.empty() ? std::string() : "/assets/platforms/" + lower + ".ico");
 }
 
 const Cover &App::cover(const std::string &path)
@@ -762,12 +1086,22 @@ const Cover &App::cover(const std::string &path)
     return c;
 }
 
-void App::refresh_downloads()
+float App::cover_aspect(const std::string &path, double *since) const
 {
-    downloads_timer_ = 0;
-    downloads_busy_ = true;
+    auto found = shapes_.find(path);
+    if (found == shapes_.end())
+        return 0.0f;
+    if (since)
+        *since = found->second.since;
+    return found->second.aspect;
+}
+
+void App::refresh_queue()
+{
+    queue_timer_ = 0;
+    queue_busy_ = true;
     api_.get("/api/downloads", [this](const Response &r) {
-        downloads_busy_ = false;
+        queue_busy_ = false;
         if (!r.ok())
             return;
         std::unique_ptr<cJSON, void (*)(cJSON *)> j(r.json(), cJSON_Delete);
@@ -783,7 +1117,7 @@ void App::refresh_downloads()
             dl.name = plain(str(d, "name"));
             dl.platform = plain(str(d, "platform"));
             dl.status = str(d, "status");
-            dl.error = str(d, "error");
+            dl.error = plain(str(d, "error"));
             dl.done = num(d, "done");
             dl.total = num(d, "total");
             dl.speed = num(d, "speed");
@@ -793,13 +1127,13 @@ void App::refresh_downloads()
             dl.saves_failed = flag(d, "saves_failed");
             active += dl.active();
             // A game that just finished shows as downloaded on its shelf.
-            for (const Download &old : downloads_)
+            for (const Download &old : queue_)
                 if (old.id == dl.id && old.active() && dl.status == "done")
                     finished_one = true;
             list.push_back(std::move(dl));
         }
-        downloads_ = std::move(list);
-        active_downloads_ = active;
+        queue_ = std::move(list);
+        active_queue_ = active;
         // A game that finished shows as downloaded: the lists load again.
         if (finished_one)
         {
@@ -827,7 +1161,7 @@ std::string Download::saves_note() const
 const Download *App::download_for(int rom_id) const
 {
     const Download *found = nullptr;
-    for (const Download &d : downloads_)
+    for (const Download &d : queue_)
         if (d.rom_id == rom_id)
             found = &d; // the newest one wins
     return found;
@@ -845,16 +1179,16 @@ void App::download(int rom_id, const std::string &name)
     api_.post("/api/download", body, [this](const Response &r) {
         if (!r.ok())
             say("Couldn't start the download: " + r.message());
-        refresh_downloads();
+        refresh_queue();
     });
 }
 
-void App::clear_finished_downloads()
+void App::clear_finished_queue()
 {
     api_.post("/api/downloads/clear", "{}", [this](const Response &r) {
         if (!r.ok())
             say("Couldn't clear the list: " + r.message());
-        refresh_downloads();
+        refresh_queue();
     });
 }
 
@@ -865,7 +1199,18 @@ void App::cancel_download(int job_id)
     api_.post("/api/downloads/cancel", body, [this](const Response &r) {
         if (!r.ok())
             say("Couldn't cancel: " + r.message());
-        refresh_downloads();
+        refresh_queue();
+    });
+}
+
+void App::retry_download(int job_id)
+{
+    char body[64];
+    std::snprintf(body, sizeof body, "{\"id\":%d}", job_id);
+    api_.post("/api/downloads/retry", body, [this](const Response &r) {
+        if (!r.ok())
+            say("Couldn't retry: " + r.message());
+        refresh_queue();
     });
 }
 
@@ -882,7 +1227,7 @@ void App::remove_game(int rom_id)
         say("Game removed. Its saves are kept.");
         lists_.clear();
         refresh_installed();
-        refresh_downloads();
+        refresh_queue();
     });
 }
 
@@ -950,8 +1295,8 @@ void App::refresh_update()
         Update u;
         u.known = true;
         u.state = str(j.get(), "state");
-        u.message = str(j.get(), "message");
-        u.error = str(j.get(), "error");
+        u.message = plain(str(j.get(), "message"));
+        u.error = plain(str(j.get(), "error"));
         u.current = str(j.get(), "current");
         u.latest = str(j.get(), "latest");
         u.available = flag(j.get(), "available");
@@ -1012,12 +1357,12 @@ void App::pair_start(const std::string &server_url, bool tls_verify)
         if (!r.ok())
         {
             status_.pairing = "error";
-            status_.pairing_message = r.message();
+            status_.pairing_message = plain(r.message().c_str());
             return;
         }
         std::unique_ptr<cJSON, void (*)(cJSON *)> j(r.json(), cJSON_Delete);
         status_.pairing = str(j.get(), "status");
-        status_.pairing_message = str(j.get(), "message");
+        status_.pairing_message = plain(str(j.get(), "message"));
         status_.user_code = str(j.get(), "user_code");
         status_.verification_url = str(j.get(), "verification_url");
         config_.known = false; // the server's address changed

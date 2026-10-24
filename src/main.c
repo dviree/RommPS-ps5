@@ -17,6 +17,7 @@
 #include "http.h"
 #include "library.h"
 #include "platform.h"
+#include "ra2.h"
 #include "romm.h"
 #include "state.h"
 #include "sync.h"
@@ -53,22 +54,6 @@ static void *tile_thread(void *arg) {
     return NULL;
 }
 
-/* The largest block malloc hands out, in MB up to 1024, for the log: on the PS4
- * the payload shares GoldHEN's process, which has little memory to spare. */
-static int largest_block_mb(void) {
-    int lo = 0, hi = 1024;
-    while (lo < hi) {
-        int mid = (lo + hi + 1) / 2;
-        void *p = malloc((size_t)mid << 20);
-        if (p) {
-            free(p);
-            lo = mid;
-        } else {
-            hi = mid - 1;
-        }
-    }
-    return lo;
-}
 
 /* Lets the PS4 app read which version an installed payload is, so it never
  * replaces a newer one with the copy it carries (platform/ps4/app). */
@@ -91,6 +76,41 @@ static void on_crash(int sig) {
     }
     signal(sig, SIG_DFL);
     raise(sig);
+}
+
+/* Emulators found on the console that setup never saw (installed later, or
+ * new to this version): said once, so they don't go unnoticed. Ones the user
+ * turned off still have a profile, and aren't news. */
+static void announce_new_emulators(void) {
+    if (!g_cfg.profiles_custom) return; /* setup offers them all anyway */
+    cJSON *found = detect_emulators();
+    char names[160] = "";
+    int fresh = 0;
+    const cJSON *c, *p;
+    state_lock();
+    cJSON *seen = state_section("emulators_seen");
+    cJSON_ArrayForEach(c, found) {
+        const char *id = jget_str(c, "id", jget_str(c, "kind", "")), *root = jget_str(c, "root", "");
+        int known = cJSON_GetObjectItemCaseSensitive(seen, root) != NULL;
+        config_lock();
+        cJSON_ArrayForEach(p, g_cfg.profiles)
+            known |= !strcmp(jget_str(p, "id", ""), id) || (root[0] && !strcmp(jget_str(p, "root", ""), root));
+        config_unlock();
+        if (known) continue;
+        cJSON_AddTrueToObject(seen, root);
+        const char *name = jget_str(c, "name", id);
+        if (++fresh <= 3) snprintf(names + strlen(names), sizeof names - strlen(names), "%s%s", fresh > 1 ? ", " : "", name);
+        events_add("emulator", "found", 0, root, name, "Turn it on in Emulator Settings");
+    }
+    if (fresh) state_save();
+    state_unlock();
+    cJSON_Delete(found);
+    if (!fresh) return;
+    events_save();
+    LOGI("new emulators found: %s%s", names, fresh > 3 ? " and more" : "");
+    if (fresh > 3) plat_notify("RommPS found new emulators: %s and %d more. Turn them on in Emulator Settings.", names, fresh - 3);
+    else plat_notify("RommPS found %s: %s. Turn %s on in Emulator Settings.", fresh == 1 ? "a new emulator" : "new emulators",
+                     names, fresh == 1 ? "it" : "them");
 }
 
 static void *app_main(void *arg) {
@@ -116,7 +136,7 @@ static void *app_main(void *arg) {
     plat_describe(about, sizeof about);
     iso8601_utc(time(NULL), now_iso, sizeof now_iso);
     LOGI("%s %s (build %s) starting (%s), data dir %s", APP_NAME, APP_VERSION, APP_BUILD, plat_name(), plat_data_dir());
-    LOGI("%s; clock %s; largest free block %d MB", about, now_iso, largest_block_mb());
+    LOGI("%s; clock %s; largest free block %d MB", about, now_iso, mem_largest_mb());
     /* Jailbroken consoles kept offline often run with the clock at 1970, which
      * breaks HTTPS certificate checks and save timestamps. */
     if (time(NULL) < 1577836800) { /* 2020-01-01 */
@@ -127,7 +147,10 @@ static void *app_main(void *arg) {
     config_load();
     if (g_cfg.profiles_custom && detect_refresh_profiles(g_cfg.profiles) > 0) config_save();
     state_load();
+    /* RetroArch 2.0 keeps games in new folders. */
+    ra2_check(1);
     events_load();
+    announce_new_emulators();
     /* Copies of older versions left on the console are brought up to date. */
     autostart_repair();
     http_global_init(plat_ca_bundle(), g_cfg.tls_verify);
@@ -164,6 +187,11 @@ static void *app_main(void *arg) {
     } else {
         plat_notify("RommPS: open http://%s:%d to pair with RomM", ip[0] ? ip : "127.0.0.1", port);
     }
+
+    /* The extras' mounts are watched for from the start: an emulator opened
+     * right after boot gets them too, and ones an earlier copy left on come
+     * off when it closes. */
+    library_link_extras();
 
     sleep(5); /* wait for the network after boot */
     if (config_is_paired()) {
@@ -254,6 +282,7 @@ static void *app_main(void *arg) {
             now - sync_last_run() >= (time_t)interval * 60) {
             sync_request("periodic");
         }
+        if (!sync_is_running() && sync_retry_due()) sync_request("retry");
         update_tick();
     }
     return NULL;

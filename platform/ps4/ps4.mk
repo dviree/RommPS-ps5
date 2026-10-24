@@ -33,7 +33,7 @@ build/ps4/gen/emulators_json.h: platform/ps4/emulators.json tools/embed.py
 	python3 -c "import json,sys; json.load(open(sys.argv[1]))" $<
 	python3 tools/embed.py $< $@ EMULATORS_JSON
 
-$(PS4_ELF): $(SRCS) $(PS4_PLAT) platform/console/console.h $(HDRS) $(UI_HEADER) build/ps4/gen/cacert_pem.h build/ps4/gen/emulators_json.h
+$(PS4_ELF): $(SRCS) $(PS4_PLAT) platform/console/console.h $(HDRS) $(GEN_HEADERS) build/ps4/gen/cacert_pem.h build/ps4/gen/emulators_json.h
 	@mkdir -p $(dir $@)
 	$(PS4_CC) $(COMMON_CFLAGS) -Ibuild/ps4/gen -Iplatform/console -DROMM_EMBED_CA $$($(PS4_PKGCONF) --cflags libcurl) -DCURL_STATICLIB \
 		-o $@ $(SRCS) $(PS4_PLAT) \
@@ -46,7 +46,12 @@ install-ps4: $(PS4_ELF)
 OO          ?= $(OO_PS4_TOOLCHAIN)
 PS4_TITLE_ID   := ROMM00002
 PS4_CONTENT_ID := IV0000-$(PS4_TITLE_ID)_00-ROMMSYNCPS400000
-PS4_PKG_VER    := 1.00
+# The package's version follows the release, so a newer one installs as an
+# update: 1.2.2 is 01.22 (one digit each for minor and patch), dev builds 01.00.
+PS4_PKG_VER    := $(shell echo '$(or $(VERSION),1.0.0)' | awk -F'[.-]' '{ if ($$2 > 9 || $$3 > 9) exit 1; printf "%02d.%d%d", $$1, $$2, $$3 }')
+ifeq ($(PS4_PKG_VER),)
+$(error VERSION $(VERSION) doesn't fit the package's NN.NN version)
+endif
 PS4_PKG_DIR    := build/ps4/pkg
 PS4_PKG        := build/ps4/romm-sync-ps4.pkg
 PS4_APP_LIBS   := -lc -lkernel -lSceSysmodule -lSceCommonDialog -lSceMsgDialog -lSceWebBrowserDialog \
@@ -59,7 +64,7 @@ ps4-pkg: $(PS4_PKG)
 build/ps4/launcher.elf: platform/ps4/app/launcher.c
 	@mkdir -p $(dir $@)
 	clang --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -O2 -Wall -Wextra -Wno-unused-parameter \
-		-isysroot $(OO) -isystem $(OO)/include -DAPP_VERSION='"$(or $(VERSION),dev)"' -c -o build/ps4/launcher.o $<
+		-isysroot $(OO) -isystem $(OO)/include -DAPP_VERSION='"$(or $(VERSION),dev)"' $(if $(NETLOG),-DROMM_NETLOG) -c -o build/ps4/launcher.o $<
 	ld.lld -m elf_x86_64 -pie --script $(OO)/link.x --eh-frame-hdr -L$(OO)/lib $(PS4_APP_LIBS) $(OO)/lib/crt1.o \
 		-o $@ build/ps4/launcher.o
 
@@ -80,7 +85,7 @@ $(PS4_PKG): build/ps4/launcher.elf $(PS4_ELF) assets/icon0.png
 		&& $(PKGTOOL) sfo_setentry $$f CONTENT_ID --type Utf8 --maxsize 48 --value '$(PS4_CONTENT_ID)' \
 		&& $(PKGTOOL) sfo_setentry $$f DOWNLOAD_DATA_SIZE --type Integer --maxsize 4 --value 0 \
 		&& $(PKGTOOL) sfo_setentry $$f SYSTEM_VER --type Integer --maxsize 4 --value 0 \
-		&& $(PKGTOOL) sfo_setentry $$f TITLE --type Utf8 --maxsize 128 --value 'RomM Sync' \
+		&& $(PKGTOOL) sfo_setentry $$f TITLE --type Utf8 --maxsize 128 --value 'RommPS' \
 		&& $(PKGTOOL) sfo_setentry $$f TITLE_ID --type Utf8 --maxsize 12 --value '$(PS4_TITLE_ID)' \
 		&& $(PKGTOOL) sfo_setentry $$f VERSION --type Utf8 --maxsize 8 --value '$(PS4_PKG_VER)'
 	cd $(PS4_PKG_DIR) && $(OO)/bin/linux/create-gp4 -out pkg.gp4 --content-id=$(PS4_CONTENT_ID) \

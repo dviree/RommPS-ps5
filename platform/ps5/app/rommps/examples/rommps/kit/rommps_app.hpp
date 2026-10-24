@@ -20,7 +20,13 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
+
+namespace hui::ui
+{
+struct Fonts;
+}
 
 namespace rommps
 {
@@ -38,6 +44,7 @@ struct Palette
 struct Cover
 {
     std::uint32_t texture = 0; // 0 until it's loaded (or if there is none)
+    float aspect = 0;          // its width over its height, 0 until it's loaded
     Palette palette;
     bool requested = false;
     bool failed = false;
@@ -54,7 +61,8 @@ struct Game
     double size = 0;
     bool installed = false;
     bool multi = false;
-    bool not_game = false; // a file RomM scanned beside the games (metadata.txt...): hidden
+    bool not_game = false; // a file RomM scanned beside the games (metadata.txt...), or a Switch update or DLC: hidden
+    bool archived = false; // a .rar (or any archive, for Switch) nothing here plays: not downloaded
     std::string version;   // what sets this version apart, when RomM has others of the game
     int versions = 0;      // how many versions RomM has, this one included; 0 if just one
 };
@@ -70,6 +78,19 @@ struct Details
     double main_story_s = 0; // How Long to Beat, the main story
     double play_ms = 0;      // every device's sessions RomM has
     int sessions = 0, completion = 0, my_rating = 0;
+    std::string archived;    // why it can't be downloaded: it's an archive
+    int updates = 0, dlc = 0; // a Switch game's, downloaded with it
+    std::string title_id;     // a Switch game's ("0100ABF008968000"), "" otherwise
+    struct Addon
+    {
+        enum Kind { update, dlc, game } kind = update; // game: another one in its folder (a collection)
+        std::string name, title_id;
+        double size = 0;
+    };
+    // The update first, then the DLC; then the other games of a collection's
+    // folder and theirs, which come with the download but aren't this game's.
+    std::vector<Addon> addons;
+    int bundle = 0; // how many of addons are those
 };
 
 struct Platform
@@ -94,6 +115,10 @@ struct GameList
     std::vector<std::pair<std::string, int>> raw_letters; // the same, by RomM's offset
     std::vector<int> hidden;          // RomM offsets of the files that aren't games, sorted
     std::string error;
+    // The shape of the grid's cards (width over height), from the covers at
+    // the top; 0 until the library has seen some. Settled: it stays.
+    float shape = 0;
+    bool shape_settled = false;
     bool ready() const { return total >= 0; }
     // Positions in the list as shown, which skips what isn't a game, and
     // RomM's offsets. What isn't a game is known once its page is here.
@@ -149,6 +174,7 @@ struct Download
     bool active() const { return status == "queued" || running() || status == "cancelling" || syncing(); }
     bool cancellable() const { return active() && !syncing(); }
     bool finished() const { return !active(); }
+    bool retryable() const { return status == "error" || status == "cancelled"; }
     std::string saves_note() const;
 };
 
@@ -158,6 +184,7 @@ struct Status
     bool reachable = false; // the payload answered the last time
     bool paired = false, setup_complete = false;
     std::string version, server, user, ip, error;
+    std::string server_trouble; // RomM isn't answering: what the payload says, "" while it does
     int port = 8780;
     int tracked_saves = 0, conflicts = 0, sync_count = 0;
     bool syncing = false;
@@ -173,6 +200,10 @@ struct Status
     // Pairing in progress (/api/pair/start): "pending" while RomM waits for
     // the code to be approved, "error" when it failed, "" otherwise.
     std::string pairing, pairing_message, user_code, verification_url;
+    // Games left in the folders RetroArch used before 2.0, and those
+    // folders' names (/api/retroarch/move moves them to the new ones).
+    int retroarch_move = 0;
+    std::string retroarch_folders;
 };
 
 // The payload's settings that RommPS shows (/api/config).
@@ -218,7 +249,7 @@ class App
     // (assets/rommps/romm-sync.elf, version kMinPayload): it starts it when
     // none is running, puts it in place of an older one (never of a newer
     // one), and keeps the copies the console starts it from up to date.
-    static constexpr const char *kMinPayload = "1.2.0";
+    static constexpr const char *kMinPayload = "1.3.0";
     bool payload_too_old() const;
     void start_payload(); // sends the payload to the HEN's loader
     // Sending it, or RomM Sync is running and not answering yet (starting up,
@@ -228,7 +259,7 @@ class App
     // The payload into the HEN's autostart folder, so it starts with the console.
     void install_autostart(Api::Callback done);
     const std::vector<Platform> &platforms() const { return platforms_; }
-    const std::vector<Download> &downloads() const { return downloads_; }
+    const std::vector<Download> &queue() const { return queue_; }
     const Download *download_for(int rom_id) const;
 
     const Platform *platform_by_id(int id) const;
@@ -240,6 +271,12 @@ class App
 
     // The games on this console, most recently played first.
     const std::vector<Game> &installed() const { return installed_; }
+    // Whether a game is on the console now. A list's copy can be older than
+    // a game deleted by hand, so this goes by the latest installed list.
+    bool on_console(const Game &g) const { return installed_known_ ? on_console_.count(g.id) > 0 : g.installed; }
+    // Asks the payload about one game, so a sheet's actions are right even
+    // before the next look at every game (the payload does that sparingly).
+    void check_on_console(int rom_id);
     // A game's details; asks for them the first time.
     const Details &details(int rom_id);
     void refresh_installed();
@@ -252,11 +289,18 @@ class App
     }
     // A cover's texture and palette; asks for it the first time.
     const Cover &cover(const std::string &path);
+    // A platform's logo from RomM, by its slug ("psx"), as a cover.
+    const Cover &platform_logo(const std::string &slug);
+    // A cover's width over its height, kept after its texture is let go;
+    // 0 until it has been loaded once. since: when it became known.
+    float cover_aspect(const std::string &path, double *since = nullptr) const;
+    double clock() const { return clock_; }
 
     void download(int rom_id, const std::string &name);
     void cancel_download(int job_id);
+    void retry_download(int job_id);
     void remove_game(int rom_id);
-    void clear_finished_downloads();
+    void clear_finished_queue();
     void sync_now();
 
     const Config &config() const { return config_; }
@@ -299,14 +343,13 @@ class App
     // Whether a RomM Sync is running, from the lock it holds while it runs:
     // 1 yes, 0 no, -1 can't tell.
     static int payload_lock();
-    // Brings the copies the console starts RomM Sync from up to the one
-    // RommPS carries, leaving autostart on or off as it is; turns it on once
-    // for anyone who never chose either way (1.1.0's setup left it off).
+    // Turns autostart on wherever it's off and brings the copies the console
+    // starts RomM Sync from up to the one RommPS carries.
     void repair_autostart();
     void evict_covers(hui::gfx::Renderer *renderer);
     void send_page(const std::string &key, int page);
     void refresh_platforms();
-    void refresh_downloads();
+    void refresh_queue();
 
     Api api_;
     Api slow_api_; // calls that may take minutes
@@ -325,8 +368,11 @@ class App
     int covers_in_flight_ = 0, next_cover_worker_ = 0;
     Status status_;
     std::vector<Platform> platforms_;
-    std::vector<Download> downloads_;
+    std::vector<Download> queue_;
     std::vector<Game> installed_;
+    std::unordered_set<int> on_console_; // installed_'s ids
+    bool installed_known_ = false;
+    double installed_sig_ = -1; // the payload's, from /api/status: changes when a game comes or goes
     std::unordered_map<int, Details> details_;
     struct CachedList
     {
@@ -340,13 +386,19 @@ class App
     float update_timer_ = 0;
     bool update_busy_ = false;
     std::unordered_map<std::string, Cover> covers_;
+    struct Shape
+    {
+        float aspect = 0;
+        double since = 0;
+    };
+    std::unordered_map<std::string, Shape> shapes_; // every cover loaded this launch
     struct Pending
     {
         std::string path, bytes;
     };
     std::deque<Pending> to_decode_;
-    float status_timer_ = 0, downloads_timer_ = 0;
-    bool status_busy_ = false, downloads_busy_ = false, platforms_busy_ = false;
+    float status_timer_ = 0, queue_timer_ = 0;
+    bool status_busy_ = false, queue_busy_ = false, platforms_busy_ = false;
     bool was_paired_ = false;
     const std::string &bundled_payload();
     std::string bundled_;
@@ -356,7 +408,7 @@ class App
     bool tried_start_ = false, updated_payload_ = false, repaired_ = false;
     bool payload_waiting_ = false;
     int unanswered_ = 0; // status requests in a row RomM Sync didn't answer
-    int active_downloads_ = 0;
+    int active_queue_ = 0;
     std::string toast_;
     float toast_age_ = 0;
 };
@@ -364,9 +416,23 @@ class App
 // The program's one App, created on first use.
 App &app();
 
-// Text for the kit's fonts, which are baked for ASCII: accented letters fold
-// to plain ones ("Pokémon" reads "Pokemon").
+// Text the screen's fonts can draw: the characters they have stay ("Pokémon",
+// "Luigi’s Mansion"), the others fold to their nearest ASCII ("Ō" reads "O" in
+// a font without it), and only one with no stand-in at all reads "?".
 std::string plain_text(const char *text);
+
+// The faces plain_text asks: the ones the screen draws text with. Set once the
+// kit has loaded them, before the payload's first answer is read.
+void set_text_fonts(const hui::ui::Fonts &fonts);
+
+// The first byte at or after at that starts a character of UTF-8 text: where
+// to cut it without halving one.
+inline std::size_t char_boundary(const std::string &text, std::size_t at)
+{
+    while (at < text.size() && (static_cast<unsigned char>(text[at]) & 0xC0) == 0x80)
+        ++at;
+    return at;
+}
 
 } // namespace rommps
 

@@ -11,7 +11,12 @@ void sync_request(const char *reason);   /* queued; repeats are merged */
 /* After pairing: forgets the game and save ids of any server before. */
 void sync_new_pairing(void);
 int sync_is_running(void);
+/* Waits for a sync running and holds the next back while files move. */
+void sync_pause(void);
+void sync_resume(void);
 time_t sync_last_run(void);
+/* 1, once, when a sync the server never answered is due to be tried again. */
+int sync_retry_due(void);
 cJSON *sync_status_json(void);           /* caller frees */
 
 /* Resolves a conflict. keep is "local" or "server". */
@@ -33,7 +38,9 @@ int sync_game_running(void);
 typedef struct {
     int saves, states, conflicts, failed;
 } sync_game_result;
-int sync_game(int rom_id, const char *name, sync_game_result *out);
+int sync_game(int rom_id, const char *name, const char *system, sync_game_result *out);
+/* "Metal Gear Solid was downloaded for PlayStation", for the notification. */
+void download_notice(char *out, size_t n, const char *name, const char *system);
 
 /* What a sync would do, without transferring anything. */
 cJSON *sync_preview(char *err, int en);
