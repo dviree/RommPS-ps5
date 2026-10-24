@@ -1,8 +1,10 @@
-/* Updates from GitHub releases. Nothing installs by itself: the UI checks,
- * shows the release notes and installs when the user asks.
+/* Updates from GitHub releases. The UI checks, shows the release notes and
+ * installs when the user asks. With the daily check on, a console that can
+ * update itself (plat_info()->self_update) also installs a newer release as
+ * soon as the check finds it, once no game, sync or download is running.
  *
- * On the PS5 (plat_info()->self_update off) the payload doesn't install
- * itself: RommPS carries it, so the check only says a new RommPS is out.
+ * With self_update off the payload doesn't install itself: RommPS carries
+ * it, so the check only says a new RommPS is out.
  *
  * A release carries a payload, manifest and signature for each console, named in
  * plat_info(): romm-sync.elf, manifest.json and manifest.sig for the PS5,
@@ -37,7 +39,7 @@
 #include "util.h"
 
 #ifndef RELEASES_URL /* overridable for test builds */
-#define RELEASES_URL "https://api.github.com/repos/s0liton/RommPS/releases/latest"
+#define RELEASES_URL "https://api.github.com/repos/dviree/RommPS-ps5/releases/latest"
 #endif
 #define CHECK_EVERY_SEC (24 * 60 * 60)
 /* A failed daily check (no network yet after boot, say) is retried sooner. */
@@ -109,7 +111,7 @@ static void asset_url(const cJSON *assets, const char *name, char *out, size_t n
 }
 
 static void *check_thread(void *arg) {
-    int notify = (int)(long)arg;
+    int notify = (int)(long)arg, auto_install = 0;
     http_resp r = {0};
     cJSON *j = NULL;
     char err[256] = "";
@@ -140,12 +142,20 @@ static void *check_thread(void *arg) {
         LOGI("update check: latest release %s, running %s", g_latest, APP_VERSION);
         if (notify && available && strcmp(g_notified, g_latest) != 0) {
             str_copy(g_notified, sizeof g_notified, g_latest);
-            if (plat_info()->self_update) plat_notify("RommPS %s is available. Update it from Settings.", g_latest);
+            if (plat_info()->self_update) auto_install = 1;
             else plat_notify("RommPS %s is available. Update it from ProsperoStore.", g_latest);
         }
     }
     pthread_mutex_unlock(&g_lock);
     cJSON_Delete(j);
+    if (auto_install) {
+        char ierr[256];
+        LOGI("update: installing %s by itself", g_latest);
+        if (update_install(ierr, sizeof ierr) != 0) {
+            LOGW("update: %s", ierr);
+            plat_notify("RommPS %s is available. Update it from Settings.", g_latest);
+        }
+    }
     return NULL;
 }
 
