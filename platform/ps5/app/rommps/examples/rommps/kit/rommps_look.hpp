@@ -54,6 +54,11 @@ int current_look();
 // Uses the look from now on and saves the choice (silently, a test run excepted).
 void set_look(int index);
 
+// The interface's sounds (focus, select, back...): on unless turned off in
+// Settings, kept beside the theme. Rumble isn't affected.
+bool ui_sounds();
+void set_ui_sounds(bool on);
+
 // A panel in the look: its shadow, body and edge.
 void draw_panel(hui::gfx::DrawList &list, const Look &look, const hui::gfx::Rect &r, float radius = -1.0f);
 

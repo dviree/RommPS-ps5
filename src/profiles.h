@@ -38,6 +38,18 @@
  * that platform entry from them, or in "extra": ["psx"], which keeps it as
  * an extra emulator for the system (see profile_map.extra).
  *
+ * "mount_games": true says the emulator reads its games through its app
+ * folder (/app0), "data" through the real /data out of its sandbox, where a
+ * mount can show it the main
+ * emulator's (see profile_map.mount_games).
+ *
+ * "update_dir" and "dlc_dir" are where a Switch game's update and DLC go,
+ * downloaded with the game (library.c); the game's own files go straight
+ * into rom_dir, never a folder of their own.
+ *
+ * "firmware" says how RomM's BIOS files for a platform reach the emulator
+ * (firmware.h).
+ *
  * "sync" is the user's choice for the emulator: "all" (saves and states, the
  * default), "saves" (no states) or "off" (games only). */
 #ifndef ROMM_PROFILES_H
@@ -53,9 +65,16 @@ typedef struct {
     char platform_dir[64];  /* {platform} value */
     char romm_slugs[256];   /* comma separated RomM slugs / fs_slugs */
     char rom_dir[PATH_MAX_LEN];
+    /* Where a Switch game's update and DLC go ("update_dir", "dlc_dir"; the
+     * DLC's defaults to the update's, and both to rom_dir). */
+    char update_dir[PATH_MAX_LEN];
+    char dlc_dir[PATH_MAX_LEN];
     char save_dir[PATH_MAX_LEN];
     char state_dir[PATH_MAX_LEN];
     char bios_dir[PATH_MAX_LEN];
+    /* Where RomM's firmware goes in bios_dir: "" or a folder the core reads
+     * ("firmware_subdir": "pcsx2/bios" for RetroArch's PS2 cores). */
+    char firmware_subdir[32];
     char save_exts[128];
     char state_exts[128];
     char save_name[128];
@@ -72,7 +91,11 @@ typedef struct {
      * "emulator" names, default the platform's emulator). An emulator that
      * switches cores in its own settings ("state_core_setting": {"file",
      * "key", "values": {"0": "pcsx_rearmed", ...}}) takes only the current
-     * one's. state_format is "retroarch" (RetroArch's container, compressed
+     * one's. A value that lets the emulator choose ("auto": "0") is read
+     * from the line its log names the core on ("log": file, "log_line":
+     * "host: emulator ", "log_names": {"rearmed": "pcsx_rearmed"} by a part
+     * of the name); "values" has the auto value's default for when the log
+     * says nothing. state_format is "retroarch" (RetroArch's container, compressed
      * or not) or "raw" (the core's bare state, PSXS5); state_slot0 is the
      * extension of the first slot (".state", or ".state0"). */
     char state_cores[256];
@@ -81,6 +104,10 @@ typedef struct {
     char core_file[PATH_MAX_LEN];
     char core_key[32];
     char core_values[256]; /* "0=pcsx_rearmed,2=mednafen_psx_hw" */
+    char core_auto[16];
+    char core_log[PATH_MAX_LEN];
+    char core_log_line[64];
+    char core_log_names[256]; /* "rearmed=pcsx_rearmed,beetle=mednafen_psx_hw" */
     /* Saves named differently by some of those cores ("save_name_by_core":
      * {"mednafen_psx_hw": "{rom_stem}_1{ext}"}): both names are the game's,
      * downloads take the current core's. "core=template;core=template". */
@@ -92,9 +119,40 @@ typedef struct {
     int extra;
     int own_slot;
     char save_format[32];
+    /* An extra that reads its games through its own app folder ("mount_games":
+     * true) or, out of its sandbox, through the real /data ("mount_games":
+     * "data", by its catalog title id),
+     * checked on the console for that emulator, plays the main one's through
+     * a mount in its sandbox (plat_mounts_set) instead of copies:
+     * rom_dir is then the main emulator's folder, own_rom_dir its own, and
+     * mount_title and mount_into say where the mount goes. mount_note says
+     * why one that could have a mount has copies instead. */
+    int mount_games;
+    int mount_blocked; /* games of its own in its folder, the only thing in the way (library.c moves RomM's to the main one) */
+    char own_rom_dir[PATH_MAX_LEN];
+    char mount_title[16];
+    char mount_into[256];
+    char mount_note[200];
     /* Memory cards every game shares ("memcards": "{root}/Mcd001.ps2,..."),
      * backed up to RomM's memory cards (memcard.h). */
     char memcards[512];
+    /* A front end's list of its games' ids ("game_ids": "{root}/data/game-ids.txt",
+     * "<path>\t<id>" lines; PSFlyCast's), read before the disc: {game_id}. */
+    char game_ids[PATH_MAX_LEN];
+    /* Which disc header {game_id} is read from when no list has it
+     * ("disc_id": "dreamcast": IP.BIN's product number). */
+    char disc_id[16];
+    /* Its memory cards ("cards"): the default and the modes it can keep
+     * ("per_game", "shared"), where the user switches, how to tell which is
+     * on, and which is (cards_mode, "" when the system has no cards). */
+    char cards_default[12], cards_modes[24], cards_mode[12];
+    char cards_change[200];
+    char cards_option[64], cards_file[PATH_MAX_LEN], cards_key[64];
+    char cards_per_game[96], cards_shared[64];
+    /* The system's one card method (profiles_expand), and whether this
+     * emulator keeps it: if not, none of its cards sync. */
+    char cards_method[12];
+    int cards_active;
     int sync_saves;
     int sync_states;   /* 0: the user turned states off for this emulator */
     int sync_off;      /* 1: the user turned save sync off for this emulator */
@@ -128,6 +186,10 @@ typedef struct {
 
 void profile_rules_for(const profile_map *m, const char *rom_path, rom_rules *out);
 
+/* A folder setting from the emulator's retroarch.cfg ("playlist_directory"),
+ * as a path; 0 if it has none (or isn't RetroArch). */
+int profile_ra_dir(const profile_map *m, const char *key, char *out, size_t n);
+
 /* Built-in default profiles (caller owns the returned array). */
 cJSON *profiles_default(void);
 
@@ -139,6 +201,11 @@ int profiles_excludes(const cJSON *profile, const char *key);
 /* One entry per enabled profile and platform, with paths resolved.
  * Returns the count; free *out. */
 int profiles_expand(const cJSON *profiles, profile_map **out);
+
+/* The map's "firmware" rules (see firmware.h), from its platform entry or
+ * profile, else the built-in catalog's; NULL if none. A custom profile with
+ * no BIOS folder of its own gets {"skip": true}. Free it. */
+cJSON *profile_firmware_rules(const cJSON *profiles, const profile_map *m);
 
 /* Does the map handle a RomM platform with this slug / fs_slug? */
 int profile_map_handles(const profile_map *m, const char *slug, const char *fs_slug);

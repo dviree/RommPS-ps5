@@ -10,6 +10,23 @@ int gameid_psp(const char *path, char *out, size_t n);
 /* GameCube or Wii game id ("GALE01") from .iso, .gcm, .rvz, .wia, .ciso or .wbfs. */
 int gameid_dolphin(const char *path, char *out, size_t n);
 
+/* 3DS title id ("0004000000066C00") from a .cci/.3ds (NCSD), .cxi/.app
+ * (NCCH) or .cia header: plain text even in encrypted dumps. */
+int gameid_3ds(const char *path, char *out, size_t n);
+
+/* The title id an emulator front end has for a game file: PS5CEMU-HAR's
+ * library.json ({"wiiu": [{"titleId", "path"}], "3ds": [...]}), the only way to
+ * a .wux's without its disc key. */
+int gameid_from_library(const char *library_json, const char *system, const char *path, char *out, size_t n);
+
+/* Dreamcast product number ("MK-51035") from the disc's IP.BIN: .gdi, .cue,
+ * .chd or a one-track image (not .cdi). */
+int gameid_dreamcast(const char *path, char *out, size_t n);
+
+/* The id a front end keeps for a game file in a "<path>\t<id>" per line list
+ * (PSFlyCast's data/game-ids.txt), /app0/ standing for its app_root. */
+int gameid_from_list(const char *list, const char *app_root, const char *path, char *out, size_t n);
+
 /* PlayStation serial ("SCUS-94194") from SYSTEM.CNF: .iso, .bin, .cue or .chd. */
 int gameid_psx(const char *path, char *out, size_t n);
 

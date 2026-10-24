@@ -1,7 +1,16 @@
-/* Saves made of several files, synced as one zip per game:
- *   psp  PSP/SAVEDATA/<game id>*  folders (PPSSPP)
- *   gci  GC/<region>/Card A/ .gci files with the game id (Dolphin)
- *   wii  Wii/title/00010000/<id>/  folder (Dolphin) */
+/* Saves made of several files, synced as one zip per game, in the layout of
+ * RomM's own save units (rommapp/argosy-sigil), so other clients take them:
+ *   psp   PSP/SAVEDATA/<game id>*  folders (PPSSPP); each folder by its name
+ *   gci   GC/<region>/Card A/ .gci files with the game id (Dolphin)
+ *   wii   Wii/title/00010000/<id>/  folder (Dolphin), as "<id>/..."
+ *   3ds   title/<high>/<low>/data/00000001/ (Azahar), as
+ *         "<high>/<low>/data/00000001/..." and its 00000001.metadata
+ *   wiiu  usr/save/<high>/<low>/ (Cemu), as "<low>/meta/...",
+ *         "<low>/user/common/..." and this console's account folder as
+ *         "<low>/user/account/..."
+ * Ids: the disc's "GALE01", or a 3DS or Wii U title "0004000000066C00". A
+ * zip from elsewhere is taken in other forms too (no root folder, Cemu's own
+ * export, the whole path from the SD card). */
 #ifndef ROMM_BUNDLE_H
 #define ROMM_BUNDLE_H
 
@@ -17,8 +26,10 @@ typedef struct {
 
 typedef struct {
     char layout[8];
-    char game_id[16];
-    char dir[PATH_MAX_LEN]; /* where the files live and the zip is unpacked */
+    char game_id[24];
+    char base[PATH_MAX_LEN]; /* the candidate folder picked */
+    char dir[PATH_MAX_LEN];  /* where the files live and the zip is unpacked */
+    char account[16];        /* wiiu: this console's account folder, "80000001" */
     bundle_file *files;
     int n, cap;
     time_t mtime;
@@ -28,7 +39,8 @@ typedef struct {
 int bundle_supported(const char *layout);
 
 /* Picks the game's folder from candidate base folders (.../PSP/SAVEDATA,
- * .../User/GC or .../User/Wii), preferring one that exists, and lists its files. */
+ * .../User/GC, .../User/Wii, the 3DS SD card's .../title or Cemu's
+ * mlc01/usr/save), preferring one that exists, and lists its files. */
 int bundle_open(bundle *b, const char *layout, const char *game_id, char bases[][PATH_MAX_LEN], int nbases);
 void bundle_free(bundle *b);
 

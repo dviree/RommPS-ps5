@@ -82,6 +82,7 @@ DB = {
     "play_sessions": [{"id": 1, "rom_id": 11, "duration_ms": 3600000}, {"id": 2, "rom_id": 11, "duration_ms": 1800000}],
     "cover_ts": {},   # rom id -> its cover's change stamp
     "asset_hits": 0,  # cover requests served
+    "device_name": None,  # what the client last renamed its device to
     "next_id": 100,
 }
 TOKEN = "rmm_" + "a" * 64
@@ -103,13 +104,13 @@ def rom_public(r):
                   "category": f.get("category", "content")} for f in r["files"]]
         return {**{k: v for k, v in r.items() if k != "files"}, "fs_name_no_ext": stem,
                 "fs_size_bytes": sum(f["file_size_bytes"] for f in files),
-                "platform_slug": p["slug"], "platform_fs_slug": p["fs_slug"],
+                "platform_slug": p["slug"], "platform_fs_slug": p["fs_slug"], "platform_display_name": p["name"],
                 "has_multiple_files": len(files) > 1, "files": files,
                 "md5_hash": hashlib.md5(b"".join(f["content"] for f in r["files"])).hexdigest(),
                 "path_cover_small": cover}
     content = ("ROM:" + r["fs_name"]).encode()
     return {**r, "fs_name_no_ext": stem, "fs_size_bytes": len(content), "platform_slug": p["slug"],
-            "platform_fs_slug": p["fs_slug"], "has_multiple_files": False, "files": [],
+            "platform_fs_slug": p["fs_slug"], "platform_display_name": p["name"], "has_multiple_files": False, "files": [],
             "md5_hash": hashlib.md5(content).hexdigest(),
             # Like RomM's: the cover's path carries a stamp that changes with it.
             "path_cover_small": cover}
@@ -168,6 +169,36 @@ def new_save(rom_id, slot, emulator, file_name, content, device_id=None):
     return s
 
 
+
+def firmware_public(f):
+    import hashlib
+    return {"id": f["id"], "platform_id": f["platform_id"], "file_name": f["file_name"],
+            "file_size_bytes": len(f["content"]), "md5_hash": hashlib.md5(f["content"]).hexdigest(),
+            "is_verified": f.get("is_verified", False), "missing_from_fs": f.get("missing", False)}
+
+
+def card_latest(c):
+    """The one file in a card's newest version, as text (for the tests)."""
+    import io, zipfile
+    if not c["versions"]:
+        return None
+    z = zipfile.ZipFile(io.BytesIO(c["versions"][-1]["content"]))
+    return z.read(z.namelist()[0]).decode("latin1") if z.namelist() else None
+
+
+def card_latest_md5(c):
+    import hashlib
+    t = card_latest(c)
+    return hashlib.md5(t.encode("latin1")).hexdigest() if t is not None else None
+
+
+def platform_public(x):
+    fw = [firmware_public(f) for f in DB["firmware"] if f["platform_id"] == x["id"]]
+    out = {k: v for k, v in x.items() if k != "embed_firmware"} | {"firmware_count": len(fw)}
+    if x.get("embed_firmware"):
+        out["firmware"] = fw
+    return out
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, fmt, *a):
         sys.stderr.write("[mock] " + (fmt % a) + "\n")
@@ -178,6 +209,29 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
+        self.wfile.write(body)
+
+    def send_rom(self, data, ctype):
+        """A game's file, honouring Range as RomM does; after _admin/cut, the
+        next one stops halfway with the connection dropped."""
+        rng, start = self.headers.get("Range", ""), 0
+        if rng.startswith("bytes="):
+            start = int(rng[6:].split("-")[0] or 0)
+        body = data[start:]
+        self.send_response(206 if start else 200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        if start:
+            self.send_header("Content-Range", "bytes %d-%d/%d" % (start, len(data) - 1, len(data)))
+        self.end_headers()
+        cut = DB.pop("cut_next", None)
+        if cut is not None and cut < len(body):
+            import socket
+            self.wfile.write(body[:cut])
+            self.wfile.flush()
+            self.close_connection = True
+            self.connection.shutdown(socket.SHUT_RDWR)
+            return
         self.wfile.write(body)
 
     def body(self):
@@ -211,6 +265,8 @@ class H(BaseHTTPRequestHandler):
         parts = [unquote(x) for x in p.strip("/").split("/")]
         with LOCK:
             # no auth needed
+            if p.startswith("/assets/busy/"):  # RomM too busy to answer
+                return self.reply(503, {"detail": "busy"})
             if p.startswith("/assets/"):
                 DB["asset_hits"] += 1
                 return self.reply(200, raw=b"\x89PNG-test-" + p.encode(), ctype="image/png")
@@ -254,34 +310,85 @@ class H(BaseHTTPRequestHandler):
                     f["content"] = f["content"].encode()
                 DB["roms"][b["id"]] = b
                 return self.reply(200, rom_public(b))
+            if p == "/_admin/platform" and method == "POST":
+                b = self.json_body()
+                DB["platforms"].append({"id": b["id"], "slug": b["slug"], "fs_slug": b["slug"], "name": b["name"],
+                                        "display_name": b["name"], "rom_count": 1, "firmware_count": 0, "url_logo": ""})
+                return self.reply(200, {})
             if p == "/_admin/state" and method == "POST":
                 b = self.json_body()
                 sid = next_id()
                 DB["states"][sid] = {"id": sid, "rom_id": b["rom_id"], "file_name": b["file_name"], "emulator": b.get("emulator"),
                                      "file_size_bytes": len(b["content"]), "updated_at": NOW(), "content": b["content"].encode()}
                 return self.reply(200, save_public(DB["states"][sid]))
+            if p == "/_admin/card_version" and method == "POST":  # another console uploads a card
+                b = self.json_body()
+                import io, zipfile
+                buf = io.BytesIO()
+                # "path": a card image on disk; "written": when that console last wrote it (epoch).
+                import time as _t
+                data = open(b["path"], "rb").read() if "path" in b else b["content"].encode()
+                info = zipfile.ZipInfo(b["file_name"], _t.localtime(b.get("written", _t.time()))[:6])
+                with zipfile.ZipFile(buf, "w") as z:
+                    z.writestr(info, data)
+                card = [c for c in DB["cards"].values() if c["emulator"] == b["emulator"] and c["name"] == b["name"]]
+                if not card:
+                    cid = next_id()
+                    DB["cards"][cid] = {"id": cid, "name": b["name"], "emulator": b["emulator"], "slot": 1, "versions": []}
+                    card = [DB["cards"][cid]]
+                card[0]["versions"].append({"id": next_id(), "memory_card_id": card[0]["id"], "file_name": "x.zip",
+                                            "file_size_bytes": len(buf.getvalue()), "created_at": NOW().isoformat(),
+                                            "missing_from_fs": False, "content": buf.getvalue()})
+                return self.reply(200, {"ok": True})
+            if p == "/_admin/cut" and method == "POST":
+                DB["cut_next"] = int(self.json_body()["bytes"])
+                return self.reply(200, {"ok": True})
+            if p == "/_admin/offline" and method == "POST":
+                # RomM stopped for a while: connections are refused, then it's back as it was.
+                OFFLINE["for"] = float(self.json_body().get("seconds", 5))
+                threading.Thread(target=SERVER["srv"].shutdown, daemon=True).start()
+                return self.reply(200, {"ok": True})
+            if p == "/_admin/firmware" and method == "POST":
+                # A BIOS file; "embed" makes its platform carry its firmware list, as RomM 5 does.
+                b = self.json_body()
+                import base64
+                raw = base64.b64decode(b["content_b64"]) if "content_b64" in b else b["content"].encode()
+                raw += b"\0" * max(0, b.get("pad", 0) - len(raw))  # a real BIOS's size, zeros after the content
+                DB["firmware"].append({"id": next_id(), "platform_id": b["platform_id"], "file_name": b["file_name"],
+                                       "content": raw, "is_verified": b.get("is_verified", False),
+                                       "missing": b.get("missing", False)})
+                if b.get("embed"):
+                    next(x for x in DB["platforms"] if x["id"] == b["platform_id"])["embed_firmware"] = True
+                return self.reply(200, {})
             if p == "/_admin/save_content":
                 sv = DB["saves"][int(qs("id"))]
                 return self.reply(200, raw=sv["content"], ctype="application/octet-stream")
             if p == "/_admin/dump":
-                return self.reply(200, {"saves": [save_public(s) | {"content": s["content"].decode("latin1")} for s in DB["saves"].values()],
+                return self.reply(200, {"firmware_hits": DB.get("firmware_hits", 0),"saves": [save_public(s) | {"content": s["content"].decode("latin1")} for s in DB["saves"].values()],
                                         "states": [save_public(s) for s in DB["states"].values()],
                                         "sessions": DB["sessions"],
-                                        "asset_hits": DB["asset_hits"],
-                                        "cards": [{"name": c["name"], "emulator": c["emulator"], "versions": len(c["versions"])} for c in DB["cards"].values()]})
+                                        "asset_hits": DB["asset_hits"], "device_name": DB["device_name"],
+                                        "cards": [{"name": c["name"], "emulator": c["emulator"], "versions": len(c["versions"]),
+                                                   "latest": card_latest(c), "latest_md5": card_latest_md5(c)}
+                                                  for c in DB["cards"].values()]})
             if not self.authed():
                 return
             dev = qs("device_id")
             # everything below needs the token
+            if parts[:2] == ["api", "devices"] and len(parts) == 3 and method == "PUT":
+                if parts[2] != DEVICE_ID:
+                    return self.reply(404, {"detail": "Device not found"})
+                DB["device_name"] = self.json_body().get("name")
+                return self.reply(200, {"id": DEVICE_ID, "name": DB["device_name"]})
             if p == "/api/users/me":
                 return self.reply(200, {"id": 1, "username": "tester"})
             if p == "/api/platforms":
-                return self.reply(200, DB["platforms"])
+                return self.reply(200, [platform_public(x) for x in DB["platforms"]])
             if p == "/api/play-sessions" and method == "GET":
                 rid = int(qs("rom_id", 0) or 0)
                 return self.reply(200, [x for x in DB["play_sessions"] if not rid or x["rom_id"] == rid])
             if len(parts) == 3 and parts[:2] == ["api", "platforms"]:
-                return self.reply(200, next(x for x in DB["platforms"] if x["id"] == int(parts[2])))
+                return self.reply(200, platform_public(next(x for x in DB["platforms"] if x["id"] == int(parts[2]))))
             if p == "/api/roms":
                 ids = [int(x) for x in q.get("platform_ids", [])]
                 term = (qs("search_term") or "").lower()
@@ -301,7 +408,7 @@ class H(BaseHTTPRequestHandler):
                 r = DB["roms"][int(parts[2])]
                 if r.get("files"):
                     if len(r["files"]) == 1:
-                        return self.reply(200, raw=r["files"][0]["content"], ctype="application/octet-stream")
+                        return self.send_rom(r["files"][0]["content"], "application/octet-stream")
                     import io, zipfile
                     buf = io.BytesIO()
                     with zipfile.ZipFile(buf, "w") as zf:
@@ -310,20 +417,24 @@ class H(BaseHTTPRequestHandler):
                         zf.writestr(r["fs_name"] + ".m3u",
                                     "\n".join(f["file_name"] for f in r["files"]).encode())
                     return self.reply(200, raw=buf.getvalue(), ctype="application/zip")
-                return self.reply(200, raw=("ROM:" + r["fs_name"]).encode(), ctype="application/octet-stream")
+                return self.send_rom(("ROM:" + r["fs_name"]).encode(), "application/octet-stream")
             if len(parts) == 6 and parts[:2] == ["api", "roms"] and parts[3:5] == ["files", "content"]:
                 # One file of a folder rom, by its file id.
                 for r in DB["roms"].values():
                     for f in r.get("files") or []:
                         if f["id"] == int(parts[2]):
+                            if f.get("gone"):  # listed, but no longer on RomM's disk: nginx's own 404
+                                return self.reply(404, raw=b"<html>404 Not Found</html>", ctype="text/html")
                             return self.reply(200, raw=f["content"], ctype="application/octet-stream")
                 return self.reply(404, {"detail": "file not found"})
             if p == "/api/firmware":
                 pid = int(qs("platform_id", 0))
-                return self.reply(200, [{"id": f["id"], "file_name": f["file_name"], "file_size_bytes": len(f["content"])}
-                                        for f in DB["firmware"] if f["platform_id"] == pid])
+                return self.reply(200, [firmware_public(f) for f in DB["firmware"] if f["platform_id"] == pid])
             if len(parts) == 5 and parts[:2] == ["api", "firmware"]:
                 f = next(f for f in DB["firmware"] if f["id"] == int(parts[2]))
+                DB["firmware_hits"] = DB.get("firmware_hits", 0) + 1
+                if f.get("missing"):
+                    return self.reply(404, {"detail": "file not found"})
                 return self.reply(200, raw=f["content"], ctype="application/octet-stream")
             if p == "/api/memory-cards" and method == "GET":
                 emu = qs("emulator")
@@ -334,7 +445,7 @@ class H(BaseHTTPRequestHandler):
                 cid = next_id()
                 DB["cards"][cid] = {"id": cid, "name": b["name"], "emulator": b["emulator"], "slot": 1, "versions": []}
                 return self.reply(201, {k: v for k, v in DB["cards"][cid].items() if k != "versions"})
-            if len(parts) == 4 and parts[:2] == ["api", "memory-cards"] and parts[3] == "versions":
+            if len(parts) == 4 and parts[:2] == ["api", "memory-cards"] and parts[3] == "versions" and method == "POST":
                 card = DB["cards"].get(int(parts[2]))
                 if not card:
                     return self.reply(404, {"detail": "not found"})
@@ -342,14 +453,26 @@ class H(BaseHTTPRequestHandler):
                 import io, zipfile
                 if not zipfile.is_zipfile(io.BytesIO(content)):
                     return self.reply(400, {"detail": "Memory card archive rejected, not a readable zip archive"})
-                card["versions"].append(content)
-                return self.reply(200, {"id": next_id(), "memory_card_id": card["id"], "file_name": name,
-                                        "file_size_bytes": len(content)})
+                ver = {"id": next_id(), "memory_card_id": card["id"], "file_name": name, "file_size_bytes": len(content),
+                       "created_at": NOW().isoformat(), "missing_from_fs": False, "content": content}
+                card["versions"].append(ver)
+                return self.reply(200, {k: v for k, v in ver.items() if k != "content"})
+            if len(parts) == 4 and parts[:2] == ["api", "memory-cards"] and parts[3] == "versions" and method == "GET":
+                card = DB["cards"].get(int(parts[2]))
+                if not card:
+                    return self.reply(404, {"detail": "not found"})
+                return self.reply(200, [{k: v for k, v in x.items() if k != "content"} for x in reversed(card["versions"])])
+            if len(parts) == 5 and parts[:3] == ["api", "memory-cards", "versions"] and parts[4] == "content":
+                for c in DB["cards"].values():
+                    for x in c["versions"]:
+                        if x["id"] == int(parts[3]):
+                            return self.reply(200, raw=x["content"], ctype="application/zip")
+                return self.reply(404, {"detail": "not found"})
             if len(parts) == 4 and parts[:2] == ["api", "memory-cards"] and parts[3] == "content":
                 card = DB["cards"].get(int(parts[2]))
                 if not card or not card["versions"]:
                     return self.reply(404, {"detail": "Memory card has no stored data yet"})
-                return self.reply(200, raw=card["versions"][-1], ctype="application/zip")
+                return self.reply(200, raw=card["versions"][-1]["content"], ctype="application/zip")
             if p == "/api/sync/negotiate":
                 return self.negotiate(self.json_body())
             if len(parts) == 5 and parts[:3] == ["api", "sync", "sessions"] and parts[4] == "complete":
@@ -459,12 +582,20 @@ class H(BaseHTTPRequestHandler):
         self.route("PUT")
 
 
+SERVER = {}
+OFFLINE = {"for": 0}
+
 if __name__ == "__main__":
+    import time
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8899
-    srv = ThreadingHTTPServer((os.environ.get("MOCK_HOST", "127.0.0.1"), port), H)
-    if len(sys.argv) > 2:
-        import ssl
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ctx.load_cert_chain(sys.argv[2])
-        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
-    srv.serve_forever()
+    while True:
+        srv = ThreadingHTTPServer((os.environ.get("MOCK_HOST", "127.0.0.1"), port), H)
+        if len(sys.argv) > 2:
+            import ssl
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(sys.argv[2])
+            srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+        SERVER["srv"] = srv
+        srv.serve_forever()
+        srv.server_close()
+        time.sleep(OFFLINE["for"])

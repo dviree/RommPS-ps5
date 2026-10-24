@@ -26,6 +26,7 @@ namespace
 
 const char *const kFolder = PS5_APP_ROOT "/hui";
 const char *const kPath = PS5_APP_ROOT "/hui/rommps-look.txt";
+const char *const kSoundsPath = PS5_APP_ROOT "/hui/rommps-sounds.txt";
 
 const hui::ui::Theme *theme_named(const char *id)
 {
@@ -112,6 +113,7 @@ const std::vector<Look> &all()
 }
 
 int g_current = -1; // -1: not read yet
+int g_sounds = -1;  // the same
 
 } // namespace
 
@@ -157,6 +159,27 @@ void set_look(int index)
     chmod(kFolder, 0777);
     if (hui::save::write_atomic(kPath, std::string(look(index).id) + "\n").empty())
         chmod(kPath, 0666);
+}
+
+bool ui_sounds()
+{
+    if (g_sounds < 0)
+    {
+        std::string v;
+        g_sounds = ps5TestRun || !hui::save::read_file(kSoundsPath, &v, 16) || v.rfind("off", 0) != 0;
+    }
+    return g_sounds != 0;
+}
+
+void set_ui_sounds(bool on)
+{
+    g_sounds = on;
+    if (ps5TestRun)
+        return;
+    hui::save::ensure_directory(kFolder);
+    chmod(kFolder, 0777);
+    if (hui::save::write_atomic(kSoundsPath, on ? "on\n" : "off\n").empty())
+        chmod(kSoundsPath, 0666);
 }
 
 void draw_panel(hui::gfx::DrawList &list, const Look &look, const hui::gfx::Rect &r, float radius)

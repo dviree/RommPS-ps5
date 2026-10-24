@@ -136,8 +136,7 @@ def install(folder):
         if "*" not in used and not samples.intersection(used) and not ("@ui" in used and ui_linked()):
             continue
         source = source_path(asset, manifest)
-        # An optional asset kept out of the repository (RommPS's licensed sounds)
-        # is packaged only where it is present.
+        # An optional asset is packaged only where it is present.
         if asset.get("optional") and not source.exists():
             print(f"==> assets: {asset['path']} not here, left out (optional)")
             continue

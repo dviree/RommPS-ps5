@@ -140,19 +140,21 @@ std::string platform_name(const App &app, const std::string &dir)
 Row event_row(const cJSON *e, bool with_game)
 {
     const std::string kind = str(e, "kind"), action = str(e, "action");
-    const std::string what = kind == "card" ? std::string("Memory card") : capital(kind);
+    const std::string what = kind == "card" ? std::string("Memory card") : kind == "bios" ? std::string("BIOS") : capital(kind);
+    // BIOS files and emulators belong to no game: they're named by their kind.
+    const bool no_game = kind == "card" || num(e, "rom_id") <= 0;
     std::string label = what;
-    if (with_game && kind != "card")
+    if (with_game && !no_game)
     {
         const std::string game = plain_text(str(e, "game"));
         label = game.empty() ? "Game " + std::to_string(static_cast<int>(num(e, "rom_id"))) : game;
     }
-    std::string detail = with_game && kind != "card" ? what : std::string();
+    std::string detail = with_game && !no_game ? what : std::string();
     auto more = [&detail](const std::string &part) {
         if (!part.empty())
             detail += (detail.empty() ? "" : "  \xC2\xB7  ") + part;
     };
-    more(str(e, "detail"));
+    more(plain_text(str(e, "detail"))); // file names, the service's errors
     if (action != "skipped")
         more(plain_text(str(e, "emulator")));
     more(ago(num(e, "t")));

@@ -22,13 +22,13 @@ For each one, start from the old version actually installed and set up, then upd
 
 | From | How | Also check |
 | --- | --- | --- |
-| Nothing | ProsperoStore install, open RommPS | setup turns autostart on by default |
+| Nothing | ProsperoStore install, open RommPS | autostart is on, with no switch to turn it off |
 | Nothing | zip copied to `/data/homebrew` | same as above |
 | 1.0.2 payload only, tile, etaHEN folder | in-app update from the web UI | tile stays (no RommPS), "Install RommPS" notice |
 | 1.0.2 as above | install RommPS, open it | tile goes away |
 | previous RommPS + payload | store update of RommPS, open it | payload swapped once idle, copies updated |
 | previous RommPS + payload | payload's own update first, RommPS later | "RommPS is out of date" notice |
-| any, autostart off | update | autostart stays off, nothing added to HEN folders |
+| any, autostart off or its flag renamed to `.off` | update, reboot | autostart is back on in every HEN folder, no `.off` left |
 | any, old copy in pldmgr's autoload | update | the pldmgr copy is updated, its autoload list untouched |
 
 ## Boot and rest mode

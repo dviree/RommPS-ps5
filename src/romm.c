@@ -1,8 +1,10 @@
 #include "romm.h"
 
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "config.h"
 #include "platform.h"
@@ -19,21 +21,32 @@ static void current_auth(char *base, size_t bn, char *auth, size_t an) {
     config_unlock();
 }
 
-cJSON *romm_call_raw(const char *base, const char *auth, const char *method, const char *path,
-                     const cJSON *body, long *status) {
+/* What a game list carries that nothing here reads, and that makes it heavy:
+ * RetroAchievements' lists alone are most of a page (1.1 of 1.3 MB for 16 PS1
+ * games), and the PS4 payload can't hold that. Dropped as the page arrives. */
+static const char *const LIST_DROP[] = {
+    "merged_ra_metadata", "ra_metadata",        "ss_metadata",     "igdb_metadata",
+    "hasheous_metadata",  "launchbox_metadata", "moby_metadata",   "flashpoint_metadata",
+    "gamelist_metadata",  "merged_screenshots", "url_screenshots", "url_manual",
+    NULL};
+
+static cJSON *call(const char *base, const char *auth, const char *method, const char *path, const cJSON *body,
+                   const char *const *drop, long *status) {
     char url[2048];
     snprintf(url, sizeof url, "%s%s", base, path);
     char *payload = body ? cJSON_PrintUnformatted(body) : NULL;
     http_resp r;
-    int rc = http_request(method, url, auth, payload ? "application/json" : NULL, payload,
-                          payload ? strlen(payload) : 0, &r);
+    int rc = drop ? http_get_lean(url, auth, drop, &r)
+                  : http_request(method, url, auth, payload ? "application/json" : NULL, payload,
+                                 payload ? strlen(payload) : 0, &r);
     free(payload);
     if (status) *status = rc == 0 ? r.status : 0;
     cJSON *j = (rc == 0 && r.body) ? cJSON_Parse(r.body) : NULL;
     /* A big reply can't always be parsed where memory is tight (the PS4 payload
      * shares GoldHEN's process); romm_list pages lists to stay small. */
     if (rc == 0 && r.status < 300 && r.len && !j)
-        LOGW("%s %s -> %ld, but the %zu-byte reply couldn't be read (out of memory?)", method, path, r.status, r.len);
+        LOGW("%s %s -> %ld, but the %zu-byte reply couldn't be read (out of memory? largest free block %d MB)", method,
+             path, r.status, r.len, mem_largest_mb());
     if (rc == 0 && r.status >= 400) {
         char d[256];
         romm_error_detail(j, d, sizeof d);
@@ -44,16 +57,70 @@ cJSON *romm_call_raw(const char *base, const char *auth, const char *method, con
     return j;
 }
 
+cJSON *romm_call_raw(const char *base, const char *auth, const char *method, const char *path,
+                     const cJSON *body, long *status) {
+    return call(base, auth, method, path, body, NULL, status);
+}
+
+int romm_no_answer(char *msg, int n) {
+    char base[512];
+    config_lock();
+    str_copy(base, sizeof base, g_cfg.server_url);
+    config_unlock();
+    if (!base[0] || !http_down(base)) return 0;
+    const char *host = strstr(base, "://");
+    host = host ? host + 3 : base;
+    snprintf(msg, (size_t)n, "RomM at %.*s isn't answering", (int)strcspn(host, "/"), host);
+    return 1;
+}
+
+static pthread_mutex_t g_check_lock = PTHREAD_MUTEX_INITIALIZER;
+static int g_checking;
+
+static void *check_back(void *arg) {
+    (void)arg;
+    long st = 0;
+    cJSON_Delete(romm_call("GET", "/api/heartbeat", NULL, &st));
+    pthread_mutex_lock(&g_check_lock);
+    g_checking = 0;
+    pthread_mutex_unlock(&g_check_lock);
+    return NULL;
+}
+
+void romm_check_back(void) {
+    pthread_mutex_lock(&g_check_lock);
+    const int start = !g_checking;
+    g_checking = 1;
+    pthread_mutex_unlock(&g_check_lock);
+    if (start && thread_start(check_back, NULL) != 0) {
+        pthread_mutex_lock(&g_check_lock);
+        g_checking = 0;
+        pthread_mutex_unlock(&g_check_lock);
+    }
+}
+
 int romm_list(const char *path, int offset, int limit, romm_list_cb cb, void *ctx, long *status) {
-    int seen = 0;
+    int seen = 0, page_size = strcmp(plat_info()->name, "ps4") ? 60 : 16;
+    char why[160];
     if (status) *status = 0;
     while (seen < limit) {
         char url[2048];
-        int want = limit - seen < ROMM_LIST_PAGE ? limit - seen : ROMM_LIST_PAGE;
+        int want = limit - seen < page_size ? limit - seen : page_size;
         snprintf(url, sizeof url, "%s%soffset=%d&limit=%d", path, strchr(path, '?') ? "&" : "?", offset + seen, want);
         long st = 0;
-        cJSON *page = romm_call("GET", url, NULL, &st);
+        char base[512], auth[300];
+        current_auth(base, sizeof base, auth, sizeof auth);
+        cJSON *page = base[0] ? call(base, auth, "GET", url, NULL, LIST_DROP, &st) : NULL;
         if (status) *status = st;
+        /* A page too big to take in (games with a lot of metadata, where memory
+         * is tight): the same games again, fewer at a time. Not when RomM
+         * didn't answer at all: fewer games won't change that. */
+        if ((st == 0 || (st == 200 && !page)) && want > 1 && !(st == 0 && romm_no_answer(why, sizeof why))) {
+            cJSON_Delete(page);
+            page_size = want / 2;
+            LOGI("%s: trying %d games at a time", path, page_size);
+            continue;
+        }
         if (st != 200 || !page) {
             cJSON_Delete(page);
             return -1;
@@ -182,6 +249,34 @@ int romm_pair_exchange(const char *base, const char *code, char *token, int tn) 
     return rc;
 }
 
+void romm_update_device_name(void) {
+    char name[64], id[64], path[128];
+    config_lock();
+    int same = !strcmp(g_cfg.device_name, g_cfg.romm_device_name);
+    str_copy(name, sizeof name, g_cfg.device_name);
+    str_copy(id, sizeof id, g_cfg.device_id);
+    config_unlock();
+    if (same || !name[0] || !id[0]) return;
+    char *q = http_escape(id);
+    snprintf(path, sizeof path, "/api/devices/%s", q);
+    free(q);
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddStringToObject(body, "name", name);
+    long st = 0;
+    cJSON_Delete(romm_call("PUT", path, body, &st));
+    cJSON_Delete(body);
+    /* No such device or no renaming on this RomM: nothing to retry. */
+    if (st != 200 && st != 404 && st != 405) {
+        if (st) LOGW("could not rename the device on RomM (HTTP %ld)", st);
+        return;
+    }
+    if (st == 200) LOGI("device is called \"%s\" on RomM now", name);
+    config_lock();
+    str_copy(g_cfg.romm_device_name, sizeof g_cfg.romm_device_name, name);
+    config_save();
+    config_unlock();
+}
+
 int romm_register_device(const char *base, const char *token, char *device_id, int dn) {
     char auth[300], ip[64] = "";
     snprintf(auth, sizeof auth, "Bearer %s", token);
@@ -213,12 +308,35 @@ int romm_register_device(const char *base, const char *token, char *device_id, i
     return rc;
 }
 
+/* A transfer cut off halfway (RomM restarted, paused, the Wi-Fi dropped)
+ * picks up where it stopped, for as long as each go gets further. One that
+ * gets nothing more ends it: RomM is away, and the download waits for it. */
+#define DOWNLOAD_TRIES 5
+
 int romm_download(const char *path, const char *dest, http_progress_fn cb, void *ud,
                   http_resp *resp) {
-    char base[512], auth[300], url[2048];
+    char base[512], auth[300], url[2048], part[PATH_MAX_LEN];
     current_auth(base, sizeof base, auth, sizeof auth);
     snprintf(url, sizeof url, "%s%s", base, path);
-    return http_download(url, auth, dest, 1, cb, ud, resp);
+    snprintf(part, sizeof part, "%s.part", dest);
+    int rc = -1;
+    for (int go = 1; go <= DOWNLOAD_TRIES; go++) {
+        const int64_t before = file_size(part);
+        rc = http_download(url, auth, dest, 1, cb, ud, resp);
+        if (rc != 0 && resp->status == 404)
+            /* RomM still lists it, its disk doesn't have it: renamed or moved since its last scan. */
+            snprintf(resp->error, sizeof resp->error,
+                     "RomM lists this game, but %.120s is missing from its server. If it was moved or renamed, "
+                     "rescan the platform in RomM",
+                     path_basename(dest));
+        if (rc == 0 || resp->status || resp->no_answer || resp->aborted) break;
+        const int64_t after = file_size(part);
+        if (after <= (before > 0 ? before : 0)) break;
+        LOGI("download of %s cut off at %lld bytes (%s): carrying on", path_basename(dest), (long long)after,
+             resp->error);
+        sleep(2);
+    }
+    return rc;
 }
 
 cJSON *romm_upload(const char *method, const char *path, const char *field, const char *file,
