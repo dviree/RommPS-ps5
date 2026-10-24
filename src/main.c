@@ -176,7 +176,7 @@ static void *app_main(void *arg) {
     int quiet = plat_app_installed();
     char app_version[32];
     plat_app_version(app_version, sizeof app_version);
-    if (quiet && app_version[0] && version_cmp(app_version, APP_VERSION) < 0) {
+    if (quiet && app_version[0] && version_cmp(app_version, APP_VERSION) < 0 && !plat_info()->self_update) {
         LOGI("RommPS %s is older than RomM Sync %s", app_version, APP_VERSION);
         plat_notify("RommPS %s is out of date. Update it from ProsperoStore.", app_version);
     } else if (quiet) {

@@ -89,7 +89,7 @@ static plat_info_t INFO = {
     .mednafen_root = "/data/homebrew/Mednafen",
     .can_relaunch = 1,
     .can_mount = 1,
-    .self_update = 0,
+    .self_update = 1,
 };
 
 static int is_dir(const char *path) {
