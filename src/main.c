@@ -25,6 +25,7 @@
 #include "util.h"
 #include "watch.h"
 #include "web.h"
+#include "presets.h"
 
 #define MONITOR_INTERVAL_SEC 3
 /* Failed foreground reads in a row before game detection is given up. */
@@ -144,6 +145,7 @@ static void *app_main(void *arg) {
         plat_notify("RommPS: the console's date and time aren't set. Set them in the console's Settings for syncing to work.");
     }
 
+    presets_init();
     config_load();
     if (g_cfg.profiles_custom && detect_refresh_profiles(g_cfg.profiles) > 0) config_save();
     state_load();
@@ -194,6 +196,8 @@ static void *app_main(void *arg) {
     library_link_extras();
 
     sleep(5); /* wait for the network after boot */
+    presets_check();
+
     if (config_is_paired()) {
         char base[512], version[32] = "";
         config_lock();

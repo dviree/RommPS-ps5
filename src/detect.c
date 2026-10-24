@@ -23,6 +23,7 @@
 #include "ra2.h"
 #include "state.h"
 #include "util.h"
+#include "presets.h"
 
 /* Bump this when generated profiles gain new keys, or existing installs keep
  * their old profile forever (ask me how I know). */
@@ -382,6 +383,14 @@ static int app_installed(const char *title_id) {
     return 0;
 }
 
+/* Presets typically are {"format", "version", "console" "emulators": [....]}*/
+static cJSON *catalog_from(cJSON *file) {
+    if (cJSON_IsArray(file)) return file;
+    cJSON *list = cJSON_DetachItemFromObjectCaseSensitive(file, "emulators");
+    cJSON_Delete(file);
+    return list;
+}
+
 /* The catalog: ROMM_SYNC_CATALOG names a file (for tests), else the console's. */
 static cJSON *emulator_catalog(void) {
     const char *env = getenv("ROMM_SYNC_CATALOG");
@@ -389,9 +398,9 @@ static cJSON *emulator_catalog(void) {
         char *txt = read_file(env, NULL);
         cJSON *j = txt ? cJSON_Parse(txt) : NULL;
         free(txt);
-        return j;
+        return catalog_from(j);
     }
-    return plat_info()->emulator_catalog ? cJSON_Parse(plat_info()->emulator_catalog) : NULL;
+    return cJSON_Duplicate(presets_catalog(), 1);
 }
 
 static cJSON *g_catalog;
@@ -399,9 +408,13 @@ static void load_catalog(void) { g_catalog = emulator_catalog(); }
 
 const cJSON *detect_catalog_entry(const char *id) {
     static pthread_once_t once = PTHREAD_ONCE_INIT;
-    pthread_once(&once, load_catalog);
-    const cJSON *e;
-    cJSON_ArrayForEach(e, g_catalog)
+    const char *env = getenv("ROMM_SYNC_CATALOG");
+    const cJSON *catalog = presets_catalog(), *e;
+    if (env && *env) {
+        pthread_once(&once, load_catalog);
+        catalog = g_catalog;
+    }
+    cJSON_ArrayForEach(e, catalog)
         if (!strcmp(jget_str(e, "id", ""), id)) return e;
     return NULL;
 }
@@ -524,6 +537,57 @@ cJSON *detect_emulators(void) {
  * preset, which follow it (PSXS5's cores, as its versions change them). */
 static const char *const PRESET_ONLY[] = {"state_core_setting"};
 
+/* "sync_saves" says whether an emulator's saves can sync, and only the preset
+ * gets to say it now (profiles.c). Saved profiles still carry copies from
+ * before: a "false" the preset never shipped was the user switching sync off,
+ * which "sync": "off" says now; one it did ship (and has since dropped, the
+ * saves turning out fine) is simply gone. Every "false" ever shipped, by
+ * emulator and system ("*": all of them): */
+static const struct {
+    const char *profile, *system;
+} SHIPPED_NO_SYNC[] = {
+    {"ps5cemu", "nds"}, {"prosperoeden", "*"}, {"ps4sx2", "*"}, {"ps5sx2", "*"},
+    {"resonance", "*"}, {"seedee5", "*"},      {"xpsemu", "*"},
+};
+
+static int shipped_no_sync(const char *profile, const char *system) {
+    for (size_t i = 0; i < sizeof SHIPPED_NO_SYNC / sizeof SHIPPED_NO_SYNC[0]; i++)
+        if (!strcmp(SHIPPED_NO_SYNC[i].profile, profile) &&
+            (!strcmp(SHIPPED_NO_SYNC[i].system, "*") || !strcmp(SHIPPED_NO_SYNC[i].system, system)))
+            return 1;
+    return 0;
+}
+
+/* One level's saved copy (the profile's, system "*", or a platform's) gone;
+ * the user's own "off" kept as "sync". `preset` is what the preset says for
+ * that level now: a copy of it isn't anyone's choice either. */
+static int drop_saved_sync_saves(cJSON *o, const cJSON *preset, const char *profile, const char *system, const char *name) {
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(o, "sync_saves");
+    if (!v) return 0;
+    if (cJSON_IsFalse(v) && !cJSON_IsFalse(preset) && !shipped_no_sync(profile, system)) {
+        cJSON_DeleteItemFromObjectCaseSensitive(o, "sync");
+        cJSON_AddStringToObject(o, "sync", "off");
+        LOGI("the %s profile: sync turned off for %s, as its saved profile had it", name, !strcmp(system, "*") ? "all its systems" : system);
+    }
+    cJSON_DeleteItemFromObjectCaseSensitive(o, "sync_saves");
+    return 1;
+}
+
+static int drop_saved_sync(cJSON *p, const cJSON *preset) {
+    const char *id = jget_str(p, "id", ""), *name = jget_str(p, "name", "");
+    const cJSON *top = cJSON_GetObjectItemCaseSensitive(preset, "sync_saves");
+    int n = drop_saved_sync_saves(p, top, id, "*", name);
+    cJSON *pe;
+    cJSON_ArrayForEach(pe, cJSON_GetObjectItemCaseSensitive(p, "platforms")) {
+        const cJSON *ce, *says = top;
+        cJSON_ArrayForEach(ce, cJSON_GetObjectItemCaseSensitive(preset, "platforms"))
+            if (!strcmp(profiles_system_key(ce), profiles_system_key(pe)) && cJSON_GetObjectItemCaseSensitive(ce, "sync_saves"))
+                says = cJSON_GetObjectItemCaseSensitive(ce, "sync_saves");
+        n += drop_saved_sync_saves(pe, says, id, profiles_system_key(pe), name);
+    }
+    return n;
+}
+
 static int fill_from_catalog(cJSON *p) {
     const cJSON *entry = detect_catalog_entry(jget_str(p, "id", ""));
     const cJSON *preset = entry ? cJSON_GetObjectItemCaseSensitive(entry, "profile") : NULL, *k;
@@ -541,7 +605,7 @@ static int fill_from_catalog(cJSON *p) {
         return added;
     }
     cJSON_ArrayForEach(k, preset) {
-        if (!strcmp(k->string, "platforms")) continue;
+        if (!strcmp(k->string, "platforms") || !strcmp(k->string, "sync_saves")) continue; /* (the preset's alone) */
         const cJSON *have = cJSON_GetObjectItemCaseSensitive(p, k->string);
         int preset_only = 0;
         for (size_t i = 0; i < sizeof PRESET_ONLY / sizeof PRESET_ONLY[0]; i++) preset_only |= !strcmp(k->string, PRESET_ONLY[i]);
@@ -553,6 +617,7 @@ static int fill_from_catalog(cJSON *p) {
             added++;
         }
     }
+    const int dropped = drop_saved_sync(p, preset);
     cJSON_ArrayForEach(pe, cJSON_GetObjectItemCaseSensitive(p, "platforms")) {
         const cJSON *first = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(pe, "romm"), 0), *ce;
         if (!cJSON_IsString(first)) continue;
@@ -560,14 +625,14 @@ static int fill_from_catalog(cJSON *p) {
             const cJSON *cf = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(ce, "romm"), 0);
             if (!cJSON_IsString(cf) || strcmp(cf->valuestring, first->valuestring)) continue;
             cJSON_ArrayForEach(k, ce)
-                if (!cJSON_GetObjectItemCaseSensitive(pe, k->string)) {
+                if (strcmp(k->string, "sync_saves") != 0 && !cJSON_GetObjectItemCaseSensitive(pe, k->string)) {
                     cJSON_AddItemToObject(pe, k->string, cJSON_Duplicate(k, 1));
                     added++;
                 }
         }
     }
     if (added) LOGI("the %s profile got %d setting%s from its newer preset", jget_str(p, "name", ""), added, added == 1 ? "" : "s");
-    return added;
+    return added + dropped;
 }
 
 int detect_refresh_profiles(cJSON *profiles) {

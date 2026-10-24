@@ -98,13 +98,13 @@ Games and BIOS files only: saves live inside its hard disk image.
 
 ### PS5CEMU-HAR
 
-Wii U (Cemu), 3DS (Azahar) and DS (melonDS). Wii U and 3DS saves sync; 3DS save states load only in PS5CEMU-HAR. DS: games and BIOS files only for now.
+Wii U (Cemu), 3DS (Azahar) and DS (melonDS). Saves sync for all three; 3DS and DS save states load only in PS5CEMU-HAR.
 
 | System | Games | Saves | Save files | Saved as | States | State files | Memory cards |
 |---|---|---|---|---|---|---|---|
 | wiiu | `{root}/games` | `{rom_dir}` | a zip per game (wiiu), from `{root}/mlc01/usr/save` |  | `{rom_dir}` | `.state*` |  |
 | 3ds | `{root}/azahar/games` | `{rom_dir}` | a zip per game (3ds), from `{root}/azahar/sdmc/Nintendo 3DS/00000000000000000000000000000000/00000000000000000000000000000000/title` |  | `{root}/azahar/states` | `.cst` |  |
-| nds | `{root}/melonds/games` | not synced |  |  | not synced |  |  |
+| nds | `{root}/melonds/games` | `{root}/melonds/saves` | `.sav` | `{rom_stem}{ext}` | `{root}/melonds/states` | `.ml*` |  |
 
 ### ProsperoEden
 

@@ -94,19 +94,26 @@ cJSON *profiles_default(void) {
     return defs;
 }
 
-/* A save state setting: the profile's own, else the built-in catalog's for
- * the same emulator and system (profiles saved before these settings existed). */
-static const cJSON *state_setting(const cJSON *p, const cJSON *e, const char *key) {
-    const cJSON *v = cJSON_GetObjectItemCaseSensitive(e, key);
-    if (!v) v = cJSON_GetObjectItemCaseSensitive(p, key);
-    if (v) return v;
-    const cJSON *cat = cJSON_GetObjectItemCaseSensitive(detect_catalog_entry(jstr(p, NULL, "id", "")), "profile"), *ce;
+/* The built-in catalog's setting for the same emulator and system: its
+ * platform's, else its profile's. *known says whether the catalog has the
+ * emulator at all (RetroArch and hand-made profiles aren't in it). */
+static const cJSON *catalog_setting(const cJSON *p, const cJSON *e, const char *key, int *known) {
+    const cJSON *cat = cJSON_GetObjectItemCaseSensitive(detect_catalog_entry(jstr(p, NULL, "id", "")), "profile"), *ce, *v;
+    if (known) *known = cat != NULL;
     if (!cat) return NULL;
     cJSON_ArrayForEach(ce, cJSON_GetObjectItemCaseSensitive(cat, "platforms")) {
         if (strcmp(profiles_system_key(ce), profiles_system_key(e)) != 0) continue;
         if ((v = cJSON_GetObjectItemCaseSensitive(ce, key))) return v;
     }
     return cJSON_GetObjectItemCaseSensitive(cat, key);
+}
+
+/* A save state setting: the profile's own, else the built-in catalog's for
+ * the same emulator and system (profiles saved before these settings existed). */
+static const cJSON *state_setting(const cJSON *p, const cJSON *e, const char *key) {
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(e, key);
+    if (!v) v = cJSON_GetObjectItemCaseSensitive(p, key);
+    return v ? v : catalog_setting(p, e, key, NULL);
 }
 
 static const char *state_str(const cJSON *p, const cJSON *e, const char *key, const char *def) {
@@ -624,7 +631,12 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
             m->extra = profile_lists(p, "extra", profiles_system_key(e));
             const cJSON *mg = state_setting(p, e, "mount_games");
             m->mount_games = cJSON_IsTrue(mg) ? 1 : cJSON_IsString(mg) && !strcmp(mg->valuestring, "data") ? 2 : 0;
-            m->sync_saves = m->base_sync_saves = jbool(p, e, "sync_saves", 1);
+            /* Whether its saves can sync at all is the preset's call, never a
+             * saved copy's: a preset turns them on once they're tested, or off
+             * when an emulator update breaks them. The user's say is "sync". */
+            int in_catalog = 0;
+            const cJSON *can = catalog_setting(p, e, "sync_saves", &in_catalog);
+            m->sync_saves = m->base_sync_saves = in_catalog ? !cJSON_IsFalse(can) : jbool(p, e, "sync_saves", 1);
             const char *mode = jstr(p, e, "sync", "all"); /* per platform, or the emulator's (before 1.2) */
             m->sync_off = !strcmp(mode, "off");
             m->sync_states = !m->sync_off && strcmp(mode, "saves") != 0;

@@ -735,6 +735,11 @@ void App::refresh_status()
             repaired_ = true;
             repair_autostart();
         }
+
+        if (!presets_checked_ && !payload_too_old()) {
+            presets_checked_ = true;
+            api_.post("/api/presets/check", "{}", [](const Response &) {});
+        }
         status_.ip = str(j.get(), "ip");
         status_.port = static_cast<int>(num(j.get(), "web_port", 8780));
         status_.paired = flag(j.get(), "paired");

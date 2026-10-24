@@ -405,7 +405,7 @@ class App
     bool bundled_read_ = false;
     std::atomic<int> start_state_{0}; // 0 idle, 1 sending, 2 sent, 3 failed
     std::string start_error_;         // written before start_state_ becomes 3
-    bool tried_start_ = false, updated_payload_ = false, repaired_ = false;
+    bool tried_start_ = false, updated_payload_ = false, repaired_ = false, presets_checked_ = false;
     bool payload_waiting_ = false;
     int unanswered_ = 0; // status requests in a row RomM Sync didn't answer
     int active_queue_ = 0;

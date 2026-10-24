@@ -46,7 +46,7 @@ def cards_cell(c):
 
 
 def section(console, path):
-    cat = json.load(open(os.path.join(ROOT, path)))
+    cat = json.load(open(os.path.join(ROOT, path)))["emulators"]
     lines = ["## %s" % console, ""]
     for e in cat:
         profile = e.get("profile", {})

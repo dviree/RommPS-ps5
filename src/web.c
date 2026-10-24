@@ -25,6 +25,7 @@
 #include "memcard.h"
 #include "pair.h"
 #include "platform.h"
+#include "presets.h"
 #include "profiles.h"
 #include "ra2.h"
 #include "romm.h"
@@ -972,6 +973,15 @@ static void route(request *r) {
     if (is_post && !strcmp(r->path, "/api/update/install")) {
         if (update_install(err, sizeof err) != 0) send_error(fd, 409, err);
         else send_json(fd, 200, update_status());
+        return;
+    }
+    if (is_get && !strcmp(r->path, "/api/presets")) {
+        send_json(fd, 200, presets_status());
+        return;
+    }
+    if (is_post && !strcmp(r->path, "/api/presets/check")) {
+        if (presets_check() != 0) send_error(fd, 409, "a presets check is already running");
+        else send_json(fd, 200, presets_status());
         return;
     }
     /* Autostart works before pairing too: RommPS sets it up and keeps it
