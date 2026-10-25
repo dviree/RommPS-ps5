@@ -40,7 +40,9 @@ DB = {
         {"id": 6, "slug": "n64", "fs_slug": "n64", "name": "Nintendo 64", "display_name": "N64",
          "rom_count": 2, "firmware_count": 0, "url_logo": ""},
         {"id": 7, "slug": "ps5", "fs_slug": "ps5", "name": "PlayStation 5", "display_name": "PS5",
-         "rom_count": 4, "firmware_count": 0, "url_logo": ""},
+         "rom_count": 8, "firmware_count": 0, "url_logo": ""},
+        {"id": 8, "slug": "ps4--1", "fs_slug": "ps4", "name": "PlayStation 4", "display_name": "PS4",
+         "rom_count": 1, "firmware_count": 0, "url_logo": ""},
     ],
     "roms": {
         10: {"id": 10, "platform_id": 1, "name": "Chrono Trigger", "fs_name": "Chrono Trigger (USA).sfc"},
@@ -83,6 +85,13 @@ DB = {
         72: {"id": 72, "platform_id": 7, "name": "Packed Test", "fs_name": "Packed Test.exfat.lz4"},
         73: {"id": 73, "platform_id": 7, "name": "Image Test", "fs_name": "Image Test",
              "files": [{"id": 76, "file_name": "Image Test.exfat", "content": b"EXFAT"}]},
+        # .pkg files: a PS4 game (its title id says so), DLC (by name, by title id
+        # and name, by RomM's tags), and on the PS4 platform a PS4 game.
+        77: {"id": 77, "platform_id": 7, "name": "Gran Test", "fs_name": "Gran Test CUSA12345.pkg"},
+        78: {"id": 78, "platform_id": 7, "name": "Astro Test", "fs_name": "Astro Test DLC.pkg"},
+        79: {"id": 79, "platform_id": 7, "name": "Astro Test", "fs_name": "Astro Test PPSA01234 Add-On.pkg"},
+        80: {"id": 80, "platform_id": 7, "name": "Old Test", "fs_name": "Old Test CUSA00001.pkg", "tags": ["DLC"]},
+        85: {"id": 85, "platform_id": 8, "name": "Blood Test", "fs_name": "Blood Test.pkg"},
     },
     "firmware": [{"id": 1, "platform_id": 1, "file_name": "bsx.bin", "content": b"BSXBIOS"}],
     "saves": {},    # id -> save dict (+ "content")

@@ -94,10 +94,12 @@ post /api/setup/finish '{"conflict_policy":"ask"}' >/dev/null
 wait_sync 1
 [[ "$(last reason)" == "first sync" && "$(last uploaded)" == 1 ]] || fail "expected the first sync to upload the local save"
 
-echo "1b. PS5 games say their format, and two copies of a game in different formats are two cards"
+echo "1b. PS5 (and PS4) games say their format: FPKG, PS4 PKG, DLC, LZ4, exFAT, game folder; two copies of a game in different formats are two cards"
 names=$(curl -sf "$API/api/roms?platform_id=7" | python3 -c "import json,sys; print(sorted((g['name'], g.get('format', '')) for g in json.load(sys.stdin)['items'] if not g.get('not_game')))")
-[[ "$names" == "[('Astro Test [FPKG]', 'FPKG'), ('Astro Test [Game folder]', 'Game folder'), ('Image Test [exFAT]', 'exFAT'), ('Packed Test [LZ4]', 'LZ4')]" ]] \
+[[ "$names" == "[('Astro Test [DLC]', 'DLC'), ('Astro Test [FPKG]', 'FPKG'), ('Astro Test [Game folder]', 'Game folder'), ('Astro Test [PS5 DLC]', 'PS5 DLC'), ('Gran Test [PS4 PKG]', 'PS4 PKG'), ('Image Test [exFAT]', 'exFAT'), ('Old Test [PS4 DLC]', 'PS4 DLC'), ('Packed Test [LZ4]', 'LZ4')]" ]] \
   || fail "PS5 formats: $names"
+ps4=$(curl -sf "$API/api/roms?platform_id=8" | python3 -c "import json,sys; print([g['name'] for g in json.load(sys.stdin)['items']])")
+[[ "$ps4" == "['Blood Test [PS4 PKG]']" ]] || fail "a .pkg on the PS4 platform is a PS4 PKG: $ps4"
 v=$(curl -sf "$API/api/roms/70/details" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('version'), d.get('versions'))")
 [[ "$v" == "FPKG 2" ]] || fail "a PS5 game's version must name its format: $v"
 other=$(curl -sf "$API/api/roms?platform_id=1" | python3 -c "import json,sys; print([g['name'] for g in json.load(sys.stdin)['items'] if '[' in g['name']])")
