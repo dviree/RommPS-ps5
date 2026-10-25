@@ -207,6 +207,43 @@ int main(void) {
     free(u6);
     free(u7);
 
+    /* A game's own card made blank, with a shared card in slot 2: what comes
+     * from RomM lands on its own card, and slot 2's stays as it was. */
+    char g[PATH_MAX_LEN], blank[PATH_MAX_LEN], shared2[PATH_MAX_LEN];
+    path_join(g, sizeof g, root, "g");
+    path_join(blank, sizeof blank, g, "Tekken 5 (USA).ps2");
+    path_join(shared2, sizeof shared2, g, "Mcd002.ps2");
+    CHECK(ps2card_blank(blank) == 0);
+    CHECK(file_size(blank) == 8650752 && !ps2card_file_has(blank, serial));
+    unsigned char *none2 = NULL;
+    size_t ln2 = 0;
+    char hn2[33], idn2[33];
+    ps2_cards cg = {.slot = {"Tekken 5 (USA).ps2", "Mcd002.ps2"}};
+    str_copy(cg.dir, sizeof cg.dir, g);
+    CHECK(ps2card_collect(&cg, game, serial, &none2, &ln2, hn2, art, idn2) == 0 && !none2); /* formatted, empty */
+    CHECK(ps2card_blank(shared2) == 0);
+    ps2_cards other = {.slot = {"Mcd002.ps2", ""}};
+    str_copy(other.dir, sizeof other.dir, g);
+    put(root, "o/BASLUS-20000/BASLUS-20000", "other game");
+    char of[PATH_MAX_LEN], oz[PATH_MAX_LEN];
+    path_join(of, sizeof of, root, "o/BASLUS-20000/BASLUS-20000");
+    path_join(oz, sizeof oz, root, "o.zip");
+    zip_member om[] = {{of, "BASLUS-20000/BASLUS-20000"}};
+    CHECK(zip_write(oz, om, 1) == 0);
+    size_t ozl = 0;
+    unsigned char *ozd = (unsigned char *)read_file(oz, &ozl);
+    CHECK(ozd && ps2card_restore(&other, "/games/Other.iso", "SLUS-20000", ozd, ozl) == 0);
+    free(ozd);
+    size_t l2b = 0;
+    char *s2before = read_file(shared2, &l2b);
+    CHECK(ps2card_restore(&cg, game, serial, u1, l1) == 0);
+    CHECK(ps2card_file_has(blank, serial) && !ps2card_file_has(shared2, serial));
+    size_t l2a = 0;
+    char *s2after = read_file(shared2, &l2a);
+    CHECK(s2before && s2after && l2b == l2a && !memcmp(s2before, s2after, l2b));
+    free(s2before);
+    free(s2after);
+
     /* The settings naming the cards: PS5SX2's flat lines (the last one wins)... */
     char *v = NULL;
     char got[256], ini[PATH_MAX_LEN];

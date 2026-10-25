@@ -108,12 +108,14 @@ syncnow
 has "$OWN" okami-v6 && fail "a game's save came down on its own with shared cards"
 grep -q "Slot1_Filename=Okami.ps2" "$E/settings/Okami.ini" || fail "the game's card was taken away"
 
-echo "5. PCSX2's [MemoryCards] in <serial>_<crc>.ini, by RetroArch's core rule, not while it runs"
+echo "5. PCSX2's [MemoryCards] in <serial>_<crc>.ini, by RetroArch's core rule, not while it runs;"
+echo "   RomM's save lands on the game's new card, never on the shared one in slot 2"
 kill "$DAEMON"; wait "$DAEMON" 2>/dev/null || true
 R="$T/homebrew/PPSA99169"; RC="$R/system/pcsx2/memcards"
-mkdir -p "$R/games" "$RC/Mcd001.ps2/BASLUS-21059" "$R/system/ps5sx2/gamesettings"
+mkdir -p "$R/games" "$RC/Mcd001.ps2" "$RC/Mcd002.ps2/BASLUS-20000" "$R/system/ps5sx2/gamesettings"
 cp "$E/games/Okami.iso" "$R/games/"
-: > "$RC/Mcd001.ps2/_pcsx2_superblock"; printf okami-v9 > "$RC/Mcd001.ps2/BASLUS-21059/BASLUS-21059"
+: > "$RC/Mcd001.ps2/_pcsx2_superblock"   # no save of the game here
+: > "$RC/Mcd002.ps2/_pcsx2_superblock"; printf other > "$RC/Mcd002.ps2/BASLUS-20000/BASLUS-20000"
 INI="$R/system/ps5sx2/gamesettings/SLUS-21059_$(cat "$T/crc").ini"
 python3 - "$ROOT/platform/retroarch_cores.json" "$R" "$T/data/config.json" <<'PY'
 import json, sys
@@ -132,7 +134,9 @@ syncnow
 rm "$T/data/alive"
 syncnow
 [[ "$(cat "$INI" 2>/dev/null)" == $'[MemoryCards]\nSlot1_Filename = Okami.ps2' ]] || fail "the game's settings: $(cat "$INI" 2>/dev/null)"
-has "$RC/Okami.ps2" okami-v9 || fail "the game's own card doesn't hold its save"
+has "$RC/Okami.ps2" okami-v6 || fail "RomM's save didn't come down onto the game's own card"
+[[ -e "$RC/Mcd002.ps2/BASLUS-21059" ]] && fail "RomM's save went on the shared card in slot 2"
+[[ "$(ls "$RC/Mcd002.ps2")" == $'BASLUS-20000\n_pcsx2_superblock' ]] || fail "the shared card in slot 2 changed: $(ls "$RC/Mcd002.ps2")"
 echo "6. an update keeps shared cards on a console that synced them, once; others get one card per game"
 kill "$DAEMON"; wait "$DAEMON" 2>/dev/null || true
 mode() { curl -sf "$API/api/memcards" | python3 -c "import json,sys; print(json.load(sys.stdin)['mode'])"; }

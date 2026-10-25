@@ -8,10 +8,12 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "sigil.h"
-#include "card.h" /* third_party/sigil/src: sigil_card_sony_owner */
+#include "card.h"     /* third_party/sigil/src: sigil_card_sony_owner */
+#include "card_ps2.h" /* sigil_ps2_card_format */
 
 /* sigil's save root is the folder holding memcards/; the cards here may sit in
  * the emulator's folder itself (PS5SX2 without a memcards/ folder), so every
@@ -213,6 +215,33 @@ int ps2card_restore(const ps2_cards *c, const char *content_path, const char *se
     sigil_sync_result_free(r);
     list_free(&q.listing);
     return rc == SIGIL_OK ? 0 : -1;
+}
+
+int ps2card_blank(const char *path) {
+    /* The card's timestamp: unused, second, minute, hour, day, month, year (LE16). */
+    time_t now = time(NULL);
+    struct tm tm;
+    gmtime_r(&now, &tm);
+    const int year = tm.tm_year + 1900;
+    const uint8_t tod[PS2_TOD_SIZE] = {0, (uint8_t)tm.tm_sec, (uint8_t)tm.tm_min, (uint8_t)tm.tm_hour,
+                                       (uint8_t)tm.tm_mday, (uint8_t)(tm.tm_mon + 1), (uint8_t)(year & 0xFF), (uint8_t)(year >> 8)};
+    sigil_ps2_card card;
+    memset(&card, 0, sizeof card);
+    int rc = sigil_ps2_card_format(&card, tod) == SIGIL_OK ? 0 : -1;
+    const size_t len = rc == 0 ? sigil_ps2_card_file_size(&card) : 0;
+    uint8_t *data = len ? malloc(len) : NULL;
+    if (!data || sigil_ps2_card_write(&card, data) != SIGIL_OK) rc = -1;
+    sigil_ps2_card_free(&card);
+    char parent[PATH_MAX_LEN];
+    str_copy(parent, sizeof parent, path);
+    char *slash = strrchr(parent, '/');
+    if (slash) *slash = 0;
+    const int made = slash && !dir_exists(parent);
+    if (rc == 0) rc = write_file_atomic(path, data, len);
+    if (made) share(parent, 1);
+    if (rc == 0) share(path, 0);
+    free(data);
+    return rc;
 }
 
 int ps2card_folder_is_game(const char *name, const char *serial) {

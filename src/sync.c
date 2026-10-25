@@ -1060,17 +1060,27 @@ static void ps2_own_card(const local_rom *r, const char *serial) {
     if (!own[0] || strchr(own, '/') || !strcmp(own, now.slot[1])) return;
     char card[PATH_MAX_LEN];
     path_join(card, sizeof card, now.dir, own);
-    if (!file_exists(card) && !dir_exists(card) && now.slot[0][0]) {
+    if (!file_exists(card) && !dir_exists(card)) {
+        /* Made now, formatted: the game finds it ready, and what comes from
+         * RomM lands on it, never on the shared card in slot 2. */
+        if (ps2card_blank(card) != 0) {
+            LOGW("%s: can't make its memory card, %s", path_basename(r->path), card);
+            return;
+        }
         ps2_cards from = now, to = now;
         from.slot[1][0] = to.slot[1][0] = 0;
         str_copy(to.slot[0], sizeof to.slot[0], own);
         unsigned char *unit = NULL;
         size_t len = 0;
         char hash[33], name[256], identity[33];
-        if (ps2card_collect(&from, r->path, serial, &unit, &len, hash, name, identity) != 0) return;
-        const int had = unit != NULL, rc = had ? ps2card_restore(&to, r->path, serial, unit, len) : 0;
+        int rc = from.slot[0][0] ? ps2card_collect(&from, r->path, serial, &unit, &len, hash, name, identity) : 0;
+        const int had = unit != NULL;
+        if (rc == 0 && had) rc = ps2card_restore(&to, r->path, serial, unit, len);
         free(unit);
-        if (rc != 0) return;
+        if (rc != 0) {
+            unlink(card);
+            return;
+        }
         if (had) LOGI("%s: its saves on %s copied to its own card, %s", path_basename(r->path), from.slot[0], own);
     }
     if (ps2card_set_setting(path, ini, "Slot1_Filename", own) != 0) {
@@ -1658,6 +1668,14 @@ static int ps2_place(const local_rom *r, bundle *b, const char *file) {
     char *data = read_file(file, &len);
     ps2_cards pc;
     ps2_cards_for(r, &pc);
+    /* The card in slot 1 not there yet: made blank first, as the emulator would,
+     * or sigil puts the save on the card in slot 2. */
+    char slot1[PATH_MAX_LEN];
+    if (pc.dir[0] && pc.slot[0][0] && !strchr(pc.slot[0], '/')) {
+        path_join(slot1, sizeof slot1, pc.dir, pc.slot[0]);
+        if (!file_exists(slot1) && !dir_exists(slot1) && ps2card_blank(slot1) == 0)
+            LOGI("%s: made its memory card, %s", path_basename(r->path), pc.slot[0]);
+    }
     int rc = data && pc.dir[0] && ps2card_restore(&pc, r->path, b->game_id, (const unsigned char *)data, len) == 0 ? 1 : -1;
     free(data);
     if (rc > 0) {

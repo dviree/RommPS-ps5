@@ -38,6 +38,10 @@ int ps2card_setting(const char *txt, int ini, const char *key, char *out, size_t
  * (and its folder) are made if missing, writable by the emulator. */
 int ps2card_set_setting(const char *path, int ini, const char *key, const char *value);
 
+/* A blank, formatted 8 MB card at path, as PCSX2 makes one, for the emulator to
+ * open and restores to land on; 0 when made. */
+int ps2card_blank(const char *path);
+
 /* Whether the file card at path holds a save of the game. */
 int ps2card_file_has(const char *path, const char *serial);
 
