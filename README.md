@@ -40,7 +40,7 @@ A [RomM](https://romm.app) companion client for jailbroken PS5 consoles (etaHEN 
 
 | ProsperoStore | RecompStore |
 | :---: | :---: |
-| <img src="/assets/prospero-store-rommps.png" width="300" alt="ProsperoStore QR"> | <img src="/assets/prospero-store-rommps.png" width="300" alt="ProsperoStore QR"> |
+| <img src="/assets/prospero-store-rommps.png" width="300" alt="ProsperoStore Install QR"> | <img src="/assets/recomp-store-rommps.png" width="300" alt="RecompStore Install QR"> |
 
 ### Manual Install
 Download `PPSA76677.zip` from the releases page, unzip it and copy the `PPSA76677` folder to `/data/homebrew/` on the console. Launch RommPS and it will deploy the background service, and set itself to autostart with etaHen or onionHen. 
