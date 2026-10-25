@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -180,13 +181,45 @@ static const char *rom_archive(const cJSON *rom, int nx) {
 }
 
 /* PS5 games come as an FPKG (.pkg), a mountable image (exFAT, or LZ4
- * compressed) or a plain game folder. The library names the format, so two
- * copies of a game in different formats tell themselves apart. */
+ * compressed) or a plain game folder, and a PS5's library can hold PS4 games
+ * and DLC as .pkg files too. The library names the format, so two copies of
+ * a game in different formats tell themselves apart. A .pkg is only read by
+ * its name: a PS4 title id (CUSA12345), or the PS4 platform, makes it a PS4
+ * PKG, and "DLC", "Add-On" or "Season Pass" in its name or RomM's tags a DLC. */
 static int is_ps5(const char *slug) { return str_ieq(slug, "ps5") || str_ieq(slug, "playstation-5"); }
+static int is_ps4(const char *slug) { return str_ieq(slug, "ps4") || str_ieq(slug, "ps4--1") || str_ieq(slug, "playstation-4"); }
 
-static const char *ps5_file_format(const char *name) {
+/* A title id: the prefix and five digits, not inside a longer word. */
+static int has_title_id(const char *s, const char *prefix) {
+    const size_t n = strlen(prefix);
+    for (const char *p = s; *p; p++) {
+        if (strncasecmp(p, prefix, n) != 0 || (p > s && isalnum((unsigned char)p[-1]))) continue;
+        int d = 0;
+        while (d < 5 && isdigit((unsigned char)p[n + d])) d++;
+        if (d == 5 && !isdigit((unsigned char)p[n + 5])) return 1;
+    }
+    return 0;
+}
+
+/* A word or phrase, any case, with no letter or digit right before or after. */
+static int has_word(const char *s, const char *w) {
+    const size_t n = strlen(w);
+    for (const char *p = s; *p; p++)
+        if (!strncasecmp(p, w, n) && (p == s || !isalnum((unsigned char)p[-1])) && !isalnum((unsigned char)p[n])) return 1;
+    return 0;
+}
+
+static const char *pkg_format(const char *hint, int ps4) {
+    const int is4 = has_title_id(hint, "CUSA") || (ps4 && !has_title_id(hint, "PPSA"));
+    const int is5 = has_title_id(hint, "PPSA");
+    if (has_word(hint, "dlc") || has_word(hint, "add-on") || has_word(hint, "addon") || has_word(hint, "season pass"))
+        return is4 ? "PS4 DLC" : is5 ? "PS5 DLC" : "DLC";
+    return is4 ? "PS4 PKG" : "FPKG";
+}
+
+static const char *ps5_file_format(const char *name, const char *hint, int ps4) {
     if (str_ends_with_ci(name, ".lz4")) return "LZ4";
-    if (str_ends_with_ci(name, ".pkg")) return "FPKG";
+    if (str_ends_with_ci(name, ".pkg")) return pkg_format(hint, ps4);
     if (str_ends_with_ci(name, ".ffpkg")) return "FFPKG";
     if (str_ends_with_ci(name, ".exfat")) return "exFAT";
     if (str_ends_with_ci(name, ".ffpfs")) return "FFPFS";
@@ -195,22 +228,35 @@ static const char *ps5_file_format(const char *name) {
 
 /* A game folder (one with eboot.bin, or with no game file of the formats
  * above), else the format of the file, or of the one file a folder holds.
- * NULL when nothing says, a single file of another kind. */
-static const char *ps5_format(const char *fs_name, int folder, const cJSON *files) {
-    const char *fmt = ps5_file_format(fs_name);
+ * NULL when nothing says, a single file of another kind. hint is everything
+ * the game's names say: its file name, RomM's name for it and its tags. */
+static const char *ps5_format(const char *fs_name, int folder, const cJSON *files, const char *hint, int ps4) {
+    char buf[1024];
+    const char *fmt = ps5_file_format(fs_name, hint, ps4);
     if (fmt) return fmt;
     const cJSON *f;
     cJSON_ArrayForEach(f, files)
         if (str_ieq(path_basename(jget_str(f, "file_name", "")), "eboot.bin")) return "Game folder";
-    cJSON_ArrayForEach(f, files)
-        if ((fmt = ps5_file_format(jget_str(f, "file_name", "")))) return fmt;
+    cJSON_ArrayForEach(f, files) {
+        snprintf(buf, sizeof buf, "%s %s", jget_str(f, "file_name", ""), hint);
+        if ((fmt = ps5_file_format(jget_str(f, "file_name", ""), buf, ps4))) return fmt;
+    }
     return folder || cJSON_GetArraySize(files) > 0 || !strchr(fs_name, '.') ? "Game folder" : NULL;
 }
 
 static const char *ps5_rom_format(const cJSON *rom) {
-    if (!is_ps5(jget_str(rom, "platform_slug", ""))) return NULL;
+    const char *slug = jget_str(rom, "platform_slug", ""), *fs_slug = jget_str(rom, "platform_fs_slug", "");
+    const int ps4 = is_ps4(slug) || is_ps4(fs_slug);
+    if (!ps4 && !is_ps5(slug) && !is_ps5(fs_slug)) return NULL;
+    char hint[1024];
+    snprintf(hint, sizeof hint, "%s %s", jget_str(rom, "fs_name", ""), jget_str(rom, "name", ""));
+    const cJSON *t;
+    cJSON_ArrayForEach(t, cJSON_GetObjectItemCaseSensitive(rom, "tags")) {
+        size_t l = strlen(hint);
+        if (cJSON_IsString(t)) snprintf(hint + l, sizeof hint - l, " %s", t->valuestring);
+    }
     return ps5_format(jget_str(rom, "fs_name", ""), cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(rom, "has_multiple_files")),
-                      cJSON_GetObjectItemCaseSensitive(rom, "files"));
+                      cJSON_GetObjectItemCaseSensitive(rom, "files"), hint, ps4);
 }
 
 /* "Astro Bot [FPKG]": the format goes in the name, so every screen that lists
@@ -1846,8 +1892,13 @@ cJSON *library_installed(int limit) {
         o = cJSON_CreateObject();
         cJSON_AddNumberToObject(o, "id", id);
         cJSON_AddStringToObject(o, "name", jget_str(e, "name", ""));
-        if (is_ps5(jget_str(e, "platform_dir", "")))
-            add_ps5_name(o, jget_str(e, "name", ""), ps5_format(jget_str(e, "fs_name", ""), dir_exists(e->string), NULL));
+        const char *pdir = jget_str(e, "platform_dir", "");
+        if (is_ps5(pdir) || is_ps4(pdir)) {
+            char hint[1024];
+            snprintf(hint, sizeof hint, "%s %s", jget_str(e, "fs_name", ""), jget_str(e, "name", ""));
+            const char *format = ps5_format(jget_str(e, "fs_name", ""), dir_exists(e->string), NULL, hint, is_ps4(pdir));
+            if (format) add_ps5_name(o, jget_str(e, "name", ""), format);
+        }
         cJSON_AddStringToObject(o, "fs_name", jget_str(e, "fs_name", ""));
         cJSON_AddNumberToObject(o, "platform_id", jget_num(e, "platform_id", 0));
         cJSON_AddStringToObject(o, "cover", jget_str(e, "cover", ""));
