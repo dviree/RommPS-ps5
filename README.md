@@ -129,9 +129,11 @@ RommPS exposes a separate Web UI at http://your-ps5-ip:8780 where you can access
 
 ## Emulator Profiles
 
-I've included direct support for most of the emulators that are out right now, except for the ones that won't even launch... you can sync games, states, and saves anywhere you want, but the presets should do it for most people. You can also configure the paths for all platforms manually. The web UI has a JSON editor for emulator profiles.
+I've included direct support for most of the emulators that are out right now, except for the ones that won't even launch... you can sync games, states, and saves anywhere you want, but the presets should do it for most people. You can also configure the paths for all platforms manually. The web UI has a JSON editor for your emulator profiles.
 
 ## Building
+
+Both consoles build from the same code in `src/`. What differs lives in `platform/<console>/`: `platform.c` (the `src/platform.h` interface), the make rules and the Docker SDK image. `platform/console/` has the parts the PS4 and PS5 share, and `platform/host/` is the development build.
 
 ```sh
 make host tools       # macOS or Linux build for development, plus tools/release-sign
@@ -142,7 +144,11 @@ tests/e2e.sh          # end-to-end tests against a mock RomM server
 tests/autostart.sh    # autostart, version checks and HEN folders
 ```
 
-Both consoles build from the same code in `src/`. What differs lives in `platform/<console>/`: `platform.c` (the `src/platform.h` interface), the make rules and the Docker SDK image. `platform/console/` has the parts the PS4 and PS5 share, and `platform/host/` is the development build.
+## Watch Development Progress
+
+I've started streaming the development of this app as well as other side projects on my YouTube channel. Nothing serious, but you can catch me live streaming. ;)
+
+[My Channel](https://www.youtube.com/@soliton_radar)
 
 ## P.S to the industry
 
