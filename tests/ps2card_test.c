@@ -180,6 +180,74 @@ int main(void) {
     free(slot2);
     free(erased);
 
+    /* One card per game: the game's saves on the card it played on come onto
+     * its own card, a file that isn't there yet; the old card stays as it was. */
+    ps2_cards from = {.slot = {"Mcd001.ps2", ""}}, to = {.slot = {"Tekken 5 (USA).ps2", ""}};
+    str_copy(from.dir, sizeof from.dir, f);
+    str_copy(to.dir, sizeof to.dir, f);
+    char old_card[PATH_MAX_LEN], own_card[PATH_MAX_LEN];
+    path_join(old_card, sizeof old_card, f, "Mcd001.ps2");
+    path_join(own_card, sizeof own_card, f, "Tekken 5 (USA).ps2");
+    size_t lo = 0;
+    char *before = read_file(old_card, &lo);
+    unsigned char *u6 = NULL;
+    size_t l6 = 0;
+    char h6[33], id6[33], h7[33], id7[33];
+    CHECK(ps2card_collect(&from, game, serial, &u6, &l6, h6, art, id6) == 0 && u6);
+    CHECK(u6 && ps2card_restore(&to, game, serial, u6, l6) == 0);
+    CHECK(file_exists(own_card) && ps2card_file_has(own_card, serial));
+    unsigned char *u7 = NULL;
+    size_t l7 = 0;
+    CHECK(ps2card_collect(&to, game, serial, &u7, &l7, h7, art, id7) == 0 && !strcmp(id7, id1));
+    size_t la = 0;
+    char *after = read_file(old_card, &la);
+    CHECK(before && after && lo == la && !memcmp(before, after, lo));
+    free(before);
+    free(after);
+    free(u6);
+    free(u7);
+
+    /* The settings naming the cards: PS5SX2's flat lines (the last one wins)... */
+    char *v = NULL;
+    char got[256], ini[PATH_MAX_LEN];
+    const char *flat = "# Tekken 5\nMemoryCards/Slot1_Filename=Mcd001.ps2\nupscale_multiplier=2\n"
+                       "MemoryCards/Slot1_Filename = Other.ps2\nMemoryCards/Slot2_Enable=false\n";
+    CHECK(ps2card_setting(flat, 0, "Slot1_Filename", got, sizeof got) == 0 && !strcmp(got, "Other.ps2"));
+    CHECK(ps2card_setting(flat, 0, "Slot2_Enable", got, sizeof got) == 0 && !strcmp(got, "false"));
+    CHECK(ps2card_setting(flat, 0, "Slot2_Filename", got, sizeof got) != 0);
+    CHECK(ps2card_setting(flat, 1, "Slot1_Filename", got, sizeof got) != 0); /* not an ini section */
+    path_join(ini, sizeof ini, root, "settings/Tekken 5 (USA).ini");
+    put(root, "settings/Tekken 5 (USA).ini", flat);
+    CHECK(ps2card_set_setting(ini, 0, "Slot1_Filename", "Tekken 5 (USA).ps2") == 0);
+    v = read_file(ini, NULL);
+    CHECK(v && !strcmp(v, "# Tekken 5\nupscale_multiplier=2\nMemoryCards/Slot2_Enable=false\n"
+                          "MemoryCards/Slot1_Filename=Tekken 5 (USA).ps2\n"));
+    free(v);
+    /* ... a file that isn't there yet, in a folder that isn't either ... */
+    path_join(ini, sizeof ini, root, "new/settings/Game.ini");
+    CHECK(ps2card_set_setting(ini, 0, "Slot1_Filename", "Game.ps2") == 0);
+    CHECK(same_file(ini, "MemoryCards/Slot1_Filename=Game.ps2\n"));
+    /* ... and PCSX2's ini, under [MemoryCards]. */
+    const char *pini = "[EmuCore]\nEnableCheats = true\n\n[MemoryCards]\nSlot1_Filename = Mcd001.ps2\nSlot2_Filename = B.ps2\n";
+    CHECK(ps2card_setting(pini, 1, "Slot1_Filename", got, sizeof got) == 0 && !strcmp(got, "Mcd001.ps2"));
+    CHECK(ps2card_setting(pini, 1, "EnableCheats", got, sizeof got) != 0); /* not a card setting */
+    path_join(ini, sizeof ini, root, "gamesettings/SLUS-21059_12345678.ini");
+    put(root, "gamesettings/SLUS-21059_12345678.ini", pini);
+    CHECK(ps2card_set_setting(ini, 1, "Slot1_Filename", "Tekken 5 (USA).ps2") == 0);
+    CHECK(same_file(ini, "[EmuCore]\nEnableCheats = true\n\n[MemoryCards]\nSlot1_Filename = Tekken 5 (USA).ps2\n"
+                         "Slot2_Filename = B.ps2\n"));
+    put(root, "gamesettings/a.ini", "[EmuCore]\nEnableCheats = true");
+    path_join(ini, sizeof ini, root, "gamesettings/a.ini");
+    CHECK(ps2card_set_setting(ini, 1, "Slot1_Filename", "A.ps2") == 0);
+    CHECK(same_file(ini, "[EmuCore]\nEnableCheats = true\n\n[MemoryCards]\nSlot1_Filename = A.ps2\n"));
+    put(root, "gamesettings/b.ini", "[MemoryCards]");
+    path_join(ini, sizeof ini, root, "gamesettings/b.ini");
+    CHECK(ps2card_set_setting(ini, 1, "Slot1_Filename", "B.ps2") == 0);
+    CHECK(same_file(ini, "[MemoryCards]\nSlot1_Filename = B.ps2\n"));
+    path_join(ini, sizeof ini, root, "gamesettings/c.ini");
+    CHECK(ps2card_set_setting(ini, 1, "Slot1_Filename", "C.ps2") == 0);
+    CHECK(same_file(ini, "[MemoryCards]\nSlot1_Filename = C.ps2\n"));
+
     free(z);
     free(u1);
     free(u2);

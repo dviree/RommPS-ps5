@@ -28,6 +28,17 @@
  *
  * "save_layout" (psp, gci or wii) syncs a game's save folder or files as one zip;
  * "bundle_dirs" lists where to look, with {save_path}, {save_root} and {bios}.
+ * "ps2" syncs each game's saves off PCSX2's memory cards, as one card per game
+ * (ps2card.h), where "pcsx2_cards" says the emulator keeps them:
+ *   {"dir": "{root}/memcards,{root}"           the card folder: the first that exists
+ *    "game_ini": "{root}/settings/{rom_stem}.ini"  the game's own settings ({serial},
+ *                                               {crc}: PCSX2's "SLUS-20552_248E6126.ini")
+ *    "global_ini": "{root}/gs.ini"              the settings for every game, if any
+ *    "format": "flat" | "ini"                   "MemoryCards/Slot1_Filename=X" lines, or
+ *                                               an [MemoryCards] section
+ *    "own_card": "{rom_stem}.ps2"}              each game's own card, the one the game's
+ *                                               settings get with one card per game
+ * "memcards" can name the card folder as {card_dir}.
  * A platform entry can override any profile key. "sync_requires_option"
  * ({"key", "value", "default", "hint"}) turns save sync on only while a core
  * option has that value. Paths can use {root}, {platform}, {rom_dir} and {data}.
@@ -163,10 +174,13 @@ typedef struct {
     char core_name[64]; /* core library name, e.g. "mGBA" */
     char save_layout[8];    /* "" for one file per game, or psp, gci, wii, ps2 (see bundle.h) */
     char bundle_dirs[512];  /* candidate folders for bundled saves, comma separated */
-    /* ps2: the settings files naming the slot cards, the game's own first
-     * ("card_settings": "{root}/settings/{rom_stem}.ini,{root}/gs.ini", keys
-     * MemoryCards/Slot1_Filename and Slot2_Filename). */
-    char card_settings[512];
+    /* ps2: "pcsx2_cards" (above). Folders are filled in, the game's names
+     * ({rom_stem}, {serial}, {crc}) are left for each game. */
+    char pc_dirs[512], pc_game_ini[PATH_MAX_LEN], pc_global_ini[PATH_MAX_LEN];
+    char pc_format[8], pc_own_card[128];
+    /* The app's title id ("PPSA99203"), "" if unknown: nothing on its cards
+     * changes while one of its processes runs (plat_app_alive). */
+    char app_title[16];
     /* Why saves aren't synced for this platform, shown in the UI. */
     char sync_note[200];
 
@@ -189,8 +203,8 @@ typedef struct {
 } rom_rules;
 
 void profile_rules_for(const profile_map *m, const char *rom_path, rom_rules *out);
-/* A value from a retroarch.cfg or ini text (key = "value", key=value); 0 if absent. */
-int profile_cfg_get(const char *cfg, const char *key, char *out, size_t n);
+/* ps2: the card folder, the first of pc_dirs that exists (else its last). */
+void profile_card_dir(const profile_map *m, char *out, size_t n);
 
 /* A folder setting from the emulator's retroarch.cfg ("playlist_directory"),
  * as a path; 0 if it has none (or isn't RetroArch). */

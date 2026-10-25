@@ -40,7 +40,7 @@ A [RomM](https://romm.app) companion client for jailbroken PS5 consoles (etaHEN 
 | [PSXS5](https://github.com/SynoPiia/PSXS5) | PS1 | Full Support | One memory card per game, and states | States work with RomM's web player (PCSX-ReARMed or Beetle, whichever PSXS5 is set to) |
 | [SwanStationPS5](https://github.com/darkxex/SwanStationPS5) | PS1 | Full Support | One memory card per game, and states | Plays PSXS5's games, keeps its own saves in `/data/SwanStationPS5`. Its states only load in SwanStationPS5 |
 | PSSwanStation | PS1 | Full Support | One memory card per game, and states | Its states only load in PSSwanStation |
-| [PS5SX2](https://github.com/Swordpdf/PS5SX2) | PS2 | Full Support | Its two shared memory cards, backed up to RomM (5.3 or newer) | - |
+| [PS5SX2](https://github.com/Swordpdf/PS5SX2) | PS2 | Full Support | One memory card per game (the default), or its two shared cards backed up to RomM (5.3 or newer) | No save states yet |
 | [PS5N64](https://github.com/Globaleliteee/PS5N64) | N64 | Full Support | Full Support | - |
 | [PS5NES](https://github.com/Globaleliteee/PS5NES) | NES | Untested | Untested | Preset uses `/data/PS5NES/games` and `/data/PS5NES/saves`. GH page gone |
 | PSFlyCast | Dreamcast | Full Support | Each game's own VMU; the shared VMUs are backed up as RomM memory cards | Save states don't sync yet |
@@ -158,6 +158,8 @@ The setup walks you through five steps:
 
 ## Other "Memory Card" Consoles
 PSP, GameCube and Wii saves are synced as one zip per game, the same format other RomM clients use. Depending on the client, they may or may not support unzipping the saves (I don't truly know), but this client does!
+
+PS2 saves go up as one 8 MB card per game holding only that game's saves, which is what RomM's own [argosy-sigil](https://github.com/rommapp/argosy-sigil) makes, so Argosy and friends can load them. By default, RomM Sync gives each game its own card in PS5SX2 and RetroArch's PS5SX2 core (it writes the game's settings for you, no menu diving required), copies the game's saves over from the shared card, and leaves the shared card alone. Slot 2 stays shared, for the games that go looking for another game's save. Nothing on a card changes while the emulator is open.
 
 My opinion? One card per game is better since 8MB memory cards fill up quick.
 

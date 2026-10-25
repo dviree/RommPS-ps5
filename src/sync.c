@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -935,28 +936,148 @@ static const local_file *find_save(const scan_ctx *c, int rom_id, const char *sl
 
 #define Z32 "00000000000000000000000000000000" /* Azahar's SD card and console ids */
 
-/* PS2: the memory card folder (the first of bundle_dirs that exists) and the
- * cards in the slots, from the game's settings file, else the emulator's,
- * else PCSX2's defaults. */
+/* ---- PS2 memory cards (pcsx2_cards in profiles.h) ---- */
+
+/* The disc a PS2 game's CRC is read from: the file, or a folder game's first image. */
+static void ps2_disc(const local_rom *r, char *out, size_t n) {
+    str_copy(out, n, r->path);
+    if (!dir_exists(r->path)) return;
+    DIR *d = opendir(r->path);
+    struct dirent *de;
+    out[0] = 0;
+    while (d && (de = readdir(d)) && !out[0])
+        if (ext_in_list(de->d_name, ".iso,.chd,.cue,.bin")) path_join(out, n, r->path, de->d_name);
+    if (d) closedir(d);
+}
+
+/* The name the emulator knows the game by ({rom_stem}): its file's, or for a
+ * folder game the first image's, which is the one it starts. */
+static void ps2_stem(const local_rom *r, char *out, size_t n) {
+    char disc[PATH_MAX_LEN];
+    ps2_disc(r, disc, sizeof disc);
+    path_stem(out, n, disc[0] ? disc : r->path);
+}
+
+/* PCSX2's CRC of the game ("248E6126"), kept with the game while its file
+ * stays the same. 0 when known. */
+static int ps2_crc(const local_rom *r, char out[9]) {
+    char disc[PATH_MAX_LEN], key[64];
+    ps2_disc(r, disc, sizeof disc);
+    struct stat st;
+    if (!disc[0] || stat(disc, &st) != 0) return -1;
+    snprintf(key, sizeof key, "%lld:%lld", (long long)st.st_mtime, (long long)st.st_size);
+    state_lock();
+    cJSON *e = state_entry("roms", r->path);
+    int have = e && !strcmp(jget_str(e, "ps2_crc_key", ""), key) && strlen(jget_str(e, "ps2_crc", "")) == 8;
+    if (have) str_copy(out, 9, jget_str(e, "ps2_crc", ""));
+    state_unlock();
+    if (have) return 0;
+    uint32_t crc;
+    if (gameid_ps2_crc(disc, &crc) != 0) return -1;
+    snprintf(out, 9, "%08X", crc);
+    state_lock();
+    if ((e = state_entry("roms", r->path))) {
+        jset_str(e, "ps2_crc", out);
+        jset_str(e, "ps2_crc_key", key);
+    }
+    state_unlock();
+    return 0;
+}
+
+/* The game's own settings file, its names filled in; 0 when it has one. */
+static int ps2_game_ini(const local_rom *r, char *out, size_t n) {
+    const char *tpl = r->map->pc_game_ini;
+    char stem[256], serial[24] = "", crc[9] = "";
+    if (!tpl[0]) return -1;
+    ps2_stem(r, stem, sizeof stem);
+    if (strstr(tpl, "{serial}") && rom_game_id(r, serial, sizeof serial) != 0) return -1;
+    if (strstr(tpl, "{crc}") && ps2_crc(r, crc) != 0) return -1;
+    const char *vars[] = {"rom_stem", stem, "serial", serial, "crc", crc, NULL};
+    str_template(out, n, tpl, vars);
+    return 0;
+}
+
+/* The memory card settings in one file: later files win, as the emulator
+ * applies them (PS5SX2: gs.ini, then the game's own). */
+static void ps2_slot_settings(const char *path, int ini, ps2_cards *out, int on[2]) {
+    char *txt = path[0] ? read_file(path, NULL) : NULL;
+    for (int s = 0; txt && s < 2; s++) {
+        char key[32], v[256];
+        snprintf(key, sizeof key, "Slot%d_Filename", s + 1);
+        if (ps2card_setting(txt, ini, key, v, sizeof v) == 0 && v[0]) str_copy(out->slot[s], sizeof out->slot[s], v);
+        snprintf(key, sizeof key, "Slot%d_Enable", s + 1);
+        if (ps2card_setting(txt, ini, key, v, sizeof v) == 0) on[s] = strcasecmp(v, "false") != 0 && strcmp(v, "0") != 0;
+    }
+    free(txt);
+}
+
+/* The card folder and the cards in the slots: PCSX2's Mcd001.ps2 and
+ * Mcd002.ps2, unless the emulator's settings or the game's own name others
+ * ("" for a slot with no card in it). */
 static void ps2_cards_for(const local_rom *r, ps2_cards *out) {
     memset(out, 0, sizeof *out);
-    char stem[256], list[2048], *save = NULL;
-    path_stem(stem, sizeof stem, r->path);
-    const char *vars[] = {"root", r->map->root, "rom_stem", stem, NULL};
-    str_template(list, sizeof list, r->map->bundle_dirs[0] ? r->map->bundle_dirs : "{root}/memcards,{root}", vars);
-    for (char *t = strtok_r(list, ",", &save); t && !out->dir[0]; t = strtok_r(NULL, ",", &save))
-        if (dir_exists(t)) str_copy(out->dir, sizeof out->dir, t);
-    static const char *const keys[2] = {"MemoryCards/Slot1_Filename", "MemoryCards/Slot2_Filename"};
-    str_template(list, sizeof list, r->map->card_settings, vars);
-    save = NULL;
-    for (char *t = strtok_r(list, ",", &save); t; t = strtok_r(NULL, ",", &save)) {
-        char *txt = read_file(t, NULL);
-        for (int s = 0; txt && s < 2; s++)
-            if (!out->slot[s][0]) profile_cfg_get(txt, keys[s], out->slot[s], sizeof out->slot[s]);
-        free(txt);
+    profile_card_dir(r->map, out->dir, sizeof out->dir);
+    if (!dir_exists(out->dir)) out->dir[0] = 0;
+    str_copy(out->slot[0], sizeof out->slot[0], "Mcd001.ps2");
+    str_copy(out->slot[1], sizeof out->slot[1], "Mcd002.ps2");
+    const int ini = !strcmp(r->map->pc_format, "ini");
+    int on[2] = {1, 1};
+    char game[PATH_MAX_LEN];
+    ps2_slot_settings(r->map->pc_global_ini, ini, out, on);
+    if (ps2_game_ini(r, game, sizeof game) == 0) ps2_slot_settings(game, ini, out, on);
+    for (int s = 0; s < 2; s++)
+        if (!on[s]) out->slot[s][0] = 0;
+}
+
+/* Whether the emulator is closed, so its cards and settings can change: none
+ * of its processes runs (a console resting with it open still has them). */
+static int ps2_emulator_closed(const profile_map *m) {
+    const int alive = m->app_title[0] ? plat_app_alive(m->app_title) : -1;
+    return alive == 0 || (alive < 0 && !g_game_running);
+}
+
+/* One card per game: a game whose settings name no card for slot 1 gets its
+ * own ("Tekken 5 (USA).ps2"), with its saves from the card it played on so
+ * far copied onto it; that card stays as it was. Slot 2 is left alone, so
+ * games that look for another game's saves still find those. */
+static void ps2_own_card(const local_rom *r, const char *serial) {
+    const profile_map *m = r->map;
+    if (strcmp(m->save_layout, "ps2") != 0 || !m->pc_own_card[0] || !m->cards_active || strcmp(m->cards_mode, "per_game") != 0)
+        return;
+    const int ini = !strcmp(m->pc_format, "ini");
+    char path[PATH_MAX_LEN], v[256], stem[256], own[256];
+    if (ps2_game_ini(r, path, sizeof path) != 0) return;
+    char *txt = read_file(path, NULL);
+    const int named = txt && ps2card_setting(txt, ini, "Slot1_Filename", v, sizeof v) == 0 && v[0];
+    free(txt);
+    if (named || !ps2_emulator_closed(m)) return;
+    ps2_cards now;
+    ps2_cards_for(r, &now);
+    if (!now.dir[0]) return;
+    ps2_stem(r, stem, sizeof stem);
+    const char *vars[] = {"rom_stem", stem, NULL};
+    str_template(own, sizeof own, m->pc_own_card, vars);
+    if (!own[0] || strchr(own, '/') || !strcmp(own, now.slot[1])) return;
+    char card[PATH_MAX_LEN];
+    path_join(card, sizeof card, now.dir, own);
+    if (!file_exists(card) && !dir_exists(card) && now.slot[0][0]) {
+        ps2_cards from = now, to = now;
+        from.slot[1][0] = to.slot[1][0] = 0;
+        str_copy(to.slot[0], sizeof to.slot[0], own);
+        unsigned char *unit = NULL;
+        size_t len = 0;
+        char hash[33], name[256], identity[33];
+        if (ps2card_collect(&from, r->path, serial, &unit, &len, hash, name, identity) != 0) return;
+        const int had = unit != NULL, rc = had ? ps2card_restore(&to, r->path, serial, unit, len) : 0;
+        free(unit);
+        if (rc != 0) return;
+        if (had) LOGI("%s: its saves on %s copied to its own card, %s", path_basename(r->path), from.slot[0], own);
     }
-    if (!out->slot[0][0]) str_copy(out->slot[0], sizeof out->slot[0], "Mcd001.ps2");
-    if (!out->slot[1][0]) str_copy(out->slot[1], sizeof out->slot[1], "Mcd002.ps2");
+    if (ps2card_set_setting(path, ini, "Slot1_Filename", own) != 0) {
+        LOGW("%s: can't write %s", path_basename(r->path), path);
+        return;
+    }
+    LOGI("%s: plays on its own memory card, %s (%s)", path_basename(r->path), own, path);
 }
 
 /* Candidate folders for a game's bundled saves. */
@@ -1446,7 +1567,9 @@ static void scan_bundles(scan_ctx *c) {
         if (!r->rules.sync_saves || !bundle_supported(r->map->save_layout)) continue;
         char id[24];
         bundle b;
-        if (rom_game_id(r, id, sizeof id) != 0 || bundle_for_rom(r, id, &b) != 0) continue;
+        if (rom_game_id(r, id, sizeof id) != 0) continue;
+        ps2_own_card(r, id);
+        if (bundle_for_rom(r, id, &b) != 0) continue;
         state_lock();
         cJSON_AddItemToArray(g_bundle_roots, cJSON_CreateString(b.dir));
         state_unlock();
@@ -1527,6 +1650,10 @@ static int gc_place(const local_rom *r, bundle *b, const char *file) {
  * cards in place of the game's saves there. 1 when placed, -1 when not. The
  * bundle is listed again. */
 static int ps2_place(const local_rom *r, bundle *b, const char *file) {
+    if (!ps2_emulator_closed(r->map)) {
+        LOGI("%s: its save comes down once %s is closed", path_basename(r->path), r->map->profile_name);
+        return -1;
+    }
     size_t len = 0;
     char *data = read_file(file, &len);
     ps2_cards pc;

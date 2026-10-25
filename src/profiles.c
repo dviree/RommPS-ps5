@@ -108,6 +108,51 @@ static const cJSON *catalog_setting(const cJSON *p, const cJSON *e, const char *
     return cJSON_GetObjectItemCaseSensitive(cat, key);
 }
 
+/* A memory card setting: the catalog's for an emulator it has (cards follow
+ * the emulator's versions, as sync_saves does), else the profile's own. */
+static const cJSON *card_setting(const cJSON *p, const cJSON *e, const char *key) {
+    int known = 0;
+    const cJSON *v = catalog_setting(p, e, key, &known);
+    if (known && v) return v;
+    v = cJSON_GetObjectItemCaseSensitive(e, key);
+    return v ? v : cJSON_GetObjectItemCaseSensitive(p, key);
+}
+
+static const char *card_str(const cJSON *p, const cJSON *e, const char *key, const char *def) {
+    const cJSON *v = card_setting(p, e, key);
+    return cJSON_IsString(v) ? v->valuestring : def;
+}
+
+void profile_card_dir(const profile_map *m, char *out, size_t n) {
+    char list[sizeof m->pc_dirs], *save = NULL;
+    str_copy(list, sizeof list, m->pc_dirs);
+    out[0] = 0;
+    for (char *t = strtok_r(list, ",", &save); t; t = strtok_r(NULL, ",", &save)) {
+        str_copy(out, n, t); /* the last one when none exists */
+        if (dir_exists(t)) return;
+    }
+}
+
+/* The title id an app folder (<homebrew>/PPSA99169) is for, or 0. The
+ * folders apps are found in are detect.c's (ROMM_SYNC_HOMEBREW in tests). */
+static int app_title_of(const char *dir, char *title, size_t tn) {
+    const char *const *hb = plat_info()->homebrew_dirs, *env = getenv("ROMM_SYNC_HOMEBREW");
+    for (int i = -1; i < 0 || (hb && hb[i]); i++) {
+        const char *base = i < 0 ? env : hb[i];
+        if (!base || !*base) continue;
+        size_t l = strlen(base);
+        if (strncmp(dir, base, l) != 0 || dir[l] != '/' || strlen(dir + l + 1) < 9 || tn < 10) continue;
+        const char *t = dir + l + 1;
+        if (t[9] && t[9] != '/') continue;
+        for (int k = 0; k < 9; k++)
+            if (k < 4 ? !(t[k] >= 'A' && t[k] <= 'Z') : !(t[k] >= '0' && t[k] <= '9')) return 0;
+        memcpy(title, t, 9);
+        title[9] = 0;
+        return 1;
+    }
+    return 0;
+}
+
 /* A save state setting: the profile's own, else the built-in catalog's for
  * the same emulator and system (profiles saved before these settings existed). */
 static const cJSON *state_setting(const cJSON *p, const cJSON *e, const char *key) {
@@ -163,8 +208,6 @@ static int ra_cfg_get(const char *cfg, const char *key, char *out, size_t n) {
     }
     return 0;
 }
-
-int profile_cfg_get(const char *cfg, const char *key, char *out, size_t n) { return ra_cfg_get(cfg, key, out, n); }
 
 /* "" and "default" mean unset; ":", "~" and "/app0" all mean the app folder. */
 static void ra_apply(const char *cfg, const char *key, const char *root, char *dst, size_t n) {
@@ -578,9 +621,8 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
                 m->by_core[k] = ra_by_core[k];
             }
             str_copy(m->core_name, sizeof m->core_name, jstr(p, e, "core_name", ""));
-            str_copy(m->save_layout, sizeof m->save_layout, jstr(p, e, "save_layout", ""));
+            str_copy(m->save_layout, sizeof m->save_layout, card_str(p, e, "save_layout", ""));
             str_copy(m->bundle_dirs, sizeof m->bundle_dirs, jstr(p, e, "bundle_dirs", ""));
-            str_copy(m->card_settings, sizeof m->card_settings, jstr(p, e, "card_settings", ""));
 
             str_copy(m->save_exts, sizeof m->save_exts, jstr(p, e, "save_exts", ".srm,.sav"));
             str_copy(m->state_exts, sizeof m->state_exts, jstr(p, e, "state_exts", ".state*"));
@@ -631,8 +673,19 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
             }
             /* Shared cards can sit in the BIOS folder RetroArch's config names
              * (Flycast's <system>/dc): {bios}. */
-            const char *cvars[] = {"root", root, "bios", m->bios_dir, "data", plat_data_dir(), NULL};
-            str_template(m->memcards, sizeof m->memcards, jstr(p, e, "memcards", ""), cvars);
+            const char *cvars[] = {"root", root, "bios", m->bios_dir, "data", plat_data_dir(), "card_dir", NULL, NULL};
+            const cJSON *pc = card_setting(p, e, "pcsx2_cards");
+            if (cJSON_IsObject(pc)) {
+                str_template(m->pc_dirs, sizeof m->pc_dirs, jstr(pc, NULL, "dir", ""), cvars);
+                str_template(m->pc_game_ini, sizeof m->pc_game_ini, jstr(pc, NULL, "game_ini", ""), cvars);
+                str_template(m->pc_global_ini, sizeof m->pc_global_ini, jstr(pc, NULL, "global_ini", ""), cvars);
+                str_copy(m->pc_format, sizeof m->pc_format, jstr(pc, NULL, "format", "flat"));
+                str_copy(m->pc_own_card, sizeof m->pc_own_card, jstr(pc, NULL, "own_card", ""));
+            }
+            char card_dir[PATH_MAX_LEN];
+            profile_card_dir(m, card_dir, sizeof card_dir);
+            cvars[7] = card_dir;
+            str_template(m->memcards, sizeof m->memcards, card_str(p, e, "memcards", ""), cvars);
             str_template(m->game_ids, sizeof m->game_ids, jstr(p, e, "game_ids", ""), vars);
             str_copy(m->disc_id, sizeof m->disc_id, jstr(p, e, "disc_id", ""));
             m->extra = profile_lists(p, "extra", profiles_system_key(e));
@@ -650,14 +703,18 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
             if (m->sync_off) m->sync_saves = m->base_sync_saves = 0;
             str_copy(m->root, sizeof m->root, root);
             str_copy(m->ra_cfg_dir, sizeof m->ra_cfg_dir, ra_cfg_dir);
+            const cJSON *tids = cJSON_GetObjectItemCaseSensitive(detect_catalog_entry(m->profile_id), "title_ids");
+            if (cJSON_IsString(cJSON_GetArrayItem(tids, 0)))
+                str_copy(m->app_title, sizeof m->app_title, cJSON_GetArrayItem(tids, 0)->valuestring);
+            else if (!app_title_of(root, m->app_title, sizeof m->app_title))
+                m->app_title[0] = 0;
             /* "cards": which memory cards the emulator keeps for the system:
              * {"default": "per_game" | "shared", "modes": "per_game,shared",
              *  "change": how the user gets one card per game, "setting": how to tell which
              *  is on: {"core_option": key} or {"file", "key"}, with the
              *  "per_game" and "shared" values (comma separated) and the
              *  core option's "default"}. */
-            const cJSON *cards = cJSON_GetObjectItemCaseSensitive(e, "cards");
-            if (!cards) cards = cJSON_GetObjectItemCaseSensitive(p, "cards");
+            const cJSON *cards = card_setting(p, e, "cards");
             if (cJSON_IsObject(cards)) {
                 const cJSON *set = cJSON_GetObjectItemCaseSensitive(cards, "setting");
                 str_copy(m->cards_default, sizeof m->cards_default, jstr(cards, NULL, "default", "per_game"));

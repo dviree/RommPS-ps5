@@ -1,9 +1,13 @@
 #include "ps2card.h"
 
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "sigil.h"
@@ -99,11 +103,22 @@ static sigil_io *open_member(void *ctx, const char *rel) {
     return real_path(ctx, rel, path, sizeof path) == 0 ? sigil_io_open_file(path) : NULL;
 }
 
+/* A file or folder of ours the emulator writes to as well: open to it, as the
+ * ones it makes are (it may not run as the payload's user). */
+static void share(const char *path, int dir) { chmod(path, dir ? 0777 : 0666); }
+
 static int write_member(void *ctx, const char *rel, const uint8_t *data, size_t len) {
-    char path[PATH_MAX_LEN];
+    char path[PATH_MAX_LEN], parent[PATH_MAX_LEN];
     if (real_path(ctx, rel, path, sizeof path) != 0) return -1;
+    str_copy(parent, sizeof parent, path);
+    char *slash = strrchr(parent, '/');
+    if (slash) *slash = 0;
+    const int made = !dir_exists(parent);
     mkdir_parent(path);
-    return write_file_atomic(path, data, len);
+    if (made) share(parent, 1);
+    if (write_file_atomic(path, data, len) != 0) return -1;
+    share(path, 0);
+    return 0;
 }
 
 /* A path ending in '/' is a save folder sigil emptied. */
@@ -145,7 +160,9 @@ static int request_init(request *q, const ps2_cards *c, const char *content_path
     r->save.result = &q->result;
     r->save.options = q->options;
     r->save.option_count = c->slot[1][0] ? 2 : 1;
-    r->save.listing = (const char *const *)q->listing.items;
+    /* No card there yet is an empty listing, not none: sigil refuses a NULL one. */
+    static const char *const no_files[1] = {NULL};
+    r->save.listing = q->listing.items ? (const char *const *)q->listing.items : no_files;
     r->save.listing_count = q->listing.n;
     r->save.open = open_member;
     r->save.open_ctx = (void *)c;
@@ -213,4 +230,160 @@ int ps2card_file_has(const char *path, const char *serial) {
     sigil_card_listing_free(l);
     if (io) sigil_io_close(io);
     return has;
+}
+
+/* ---- PCSX2's settings files ---- */
+
+static void trim(char **b, char **e) {
+    while (*b < *e && isspace((unsigned char)**b)) (*b)++;
+    while (*e > *b && isspace((unsigned char)(*e)[-1])) (*e)--;
+}
+
+/* Calls fn for each "key = value" line, with the [section] it's in (ini) or
+ * the part of the key before its last '/' (flat), until fn returns nonzero. */
+typedef int (*setting_fn)(const char *sec, size_t sl, const char *key, size_t kl, const char *val, size_t vl,
+                          const char *line, const char *next, void *ctx);
+
+static void each_setting(const char *txt, int ini, setting_fn fn, void *ctx) {
+    const char *sec = "", *line = txt;
+    size_t sl = 0;
+    while (line && *line) {
+        const char *eol = line + strcspn(line, "\n"), *next = *eol ? eol + 1 : eol;
+        char *b = (char *)line, *e = (char *)eol;
+        trim(&b, &e);
+        if (b < e && *b == '[' && e[-1] == ']' && ini) {
+            sec = b + 1;
+            sl = (size_t)(e - b - 2);
+        } else if (b < e && *b != '#' && *b != ';') {
+            const char *eq = memchr(b, '=', (size_t)(e - b));
+            if (eq) {
+                char *kb = b, *ke = (char *)eq, *vb = (char *)eq + 1, *ve = e;
+                trim(&kb, &ke);
+                trim(&vb, &ve);
+                const char *s = sec, *k = kb;
+                size_t ls = sl;
+                if (!ini) { /* "MemoryCards/Slot1_Filename" */
+                    const char *slash = NULL;
+                    for (const char *q = kb; q < ke; q++)
+                        if (*q == '/') slash = q;
+                    s = slash ? kb : "EmuCore/GS";
+                    ls = slash ? (size_t)(slash - kb) : strlen(s);
+                    k = slash ? slash + 1 : kb;
+                }
+                if (fn(s, ls, k, (size_t)(ke - k), vb, (size_t)(ve - vb), line, next, ctx)) return;
+            }
+        }
+        line = next;
+    }
+}
+
+static int is_card_key(const char *sec, size_t sl, const char *key, size_t kl, const char *want) {
+    return sl == 11 && !strncasecmp(sec, "MemoryCards", 11) && kl == strlen(want) && !strncasecmp(key, want, kl);
+}
+
+typedef struct {
+    const char *key;
+    char *out;
+    size_t n;
+    int found;
+} get_ctx;
+
+static int get_cb(const char *sec, size_t sl, const char *key, size_t kl, const char *val, size_t vl, const char *line,
+                  const char *next, void *vctx) {
+    get_ctx *c = vctx;
+    (void)line, (void)next;
+    if (!is_card_key(sec, sl, key, kl, c->key)) return 0;
+    if (vl >= c->n) vl = c->n - 1;
+    memcpy(c->out, val, vl);
+    c->out[vl] = 0;
+    c->found = 1;
+    return 0; /* the last one wins */
+}
+
+int ps2card_setting(const char *txt, int ini, const char *key, char *out, size_t n) {
+    get_ctx c = {key, out, n, 0};
+    if (!txt || !n) return -1;
+    out[0] = 0;
+    each_setting(txt, ini, get_cb, &c);
+    return c.found ? 0 : -1;
+}
+
+typedef struct {
+    const char *key;
+    const char *sec_line; /* ini: where [MemoryCards] starts */
+    const char *spans[16][2]; /* lines of the key, to drop */
+    int ns;
+} set_ctx;
+
+static int set_cb(const char *sec, size_t sl, const char *key, size_t kl, const char *val, size_t vl, const char *line,
+                  const char *next, void *vctx) {
+    set_ctx *c = vctx;
+    (void)val, (void)vl;
+    if (is_card_key(sec, sl, key, kl, c->key) && c->ns < 16) {
+        c->spans[c->ns][0] = line;
+        c->spans[c->ns++][1] = next;
+    }
+    return 0;
+}
+
+int ps2card_set_setting(const char *path, int ini, const char *key, const char *value) {
+    char *old = read_file(path, NULL);
+    const char *txt = old ? old : "";
+    set_ctx c = {key, NULL, {{0}}, 0};
+    int header_last = 0; /* [MemoryCards] is the last line, with no newline */
+    each_setting(txt, ini, set_cb, &c);
+    if (ini) { /* the section's header line, to add the key under */
+        for (const char *line = txt; *line;) {
+            const char *eol = line + strcspn(line, "\n");
+            char *b = (char *)line, *e = (char *)eol;
+            trim(&b, &e);
+            if (e - b == 13 && !strncasecmp(b, "[MemoryCards]", 13)) {
+                c.sec_line = *eol ? eol + 1 : eol;
+                header_last = !*eol;
+                break;
+            }
+            line = *eol ? eol + 1 : eol;
+        }
+    }
+    size_t tl = strlen(txt), cap = tl + strlen(key) + strlen(value) + 64;
+    char *out = malloc(cap), setting[512];
+    if (!out) {
+        free(old);
+        return -1;
+    }
+    if (ini) snprintf(setting, sizeof setting, "%s = %s\n", key, value);
+    else snprintf(setting, sizeof setting, "MemoryCards/%s=%s\n", key, value);
+    size_t o = 0;
+    for (const char *p = txt; p <= txt + tl; p++) {
+        if (ini && c.sec_line && p == c.sec_line) { /* first under [MemoryCards] */
+            if (header_last) out[o++] = '\n';
+            memcpy(out + o, setting, strlen(setting));
+            o += strlen(setting);
+        }
+        int skip = 0;
+        for (int i = 0; i < c.ns && !skip; i++)
+            if (p == c.spans[i][0]) {
+                p = c.spans[i][1] - 1;
+                skip = 1;
+            }
+        if (skip || p == txt + tl) continue;
+        out[o++] = *p;
+    }
+    if (!ini || !c.sec_line) {
+        if (o && out[o - 1] != '\n') out[o++] = '\n';
+        if (ini) o += (size_t)sprintf(out + o, "%s[MemoryCards]\n", o ? "\n" : "");
+        memcpy(out + o, setting, strlen(setting));
+        o += strlen(setting);
+    }
+    char parent[PATH_MAX_LEN];
+    str_copy(parent, sizeof parent, path);
+    char *slash = strrchr(parent, '/');
+    if (slash) *slash = 0;
+    const int made = slash && !dir_exists(parent);
+    int rc = write_file_atomic(path, out, o);
+    if (made) share(parent, 1);
+    if (rc == 0) share(path, 0);
+    free(out);
+    free(old);
+    return rc;
 }

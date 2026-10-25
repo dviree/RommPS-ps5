@@ -44,8 +44,8 @@ int ra2_layout(const char *root) {
 
 int ra2_is_v2(const char *root) { return ra2_layout(root) >= 2; }
 
-/* 2.0 plays PS2 with PS5SX2, not LRPS2: two shared memory cards (memcard.c
- * backs them up), none per game. */
+/* 2.0 plays PS2 with PS5SX2, not LRPS2: its memory cards are as the core's
+ * rule says (platform/retroarch_cores.json), not LRPS2's. */
 static int to_ps5sx2(cJSON *p, const char *root) {
     char core[PATH_MAX_LEN];
     path_join(core, sizeof core, root, "cores/ps5sx2_libretro.info");
@@ -57,6 +57,7 @@ static int to_ps5sx2(cJSON *p, const char *root) {
         jset_str(e, "core_name", "PS5SX2");
         cJSON_DeleteItemFromObjectCaseSensitive(e, "save_exts");
         cJSON_DeleteItemFromObjectCaseSensitive(e, "sync_requires_option");
+        detect_apply_core_rules(e, "ps2", "PS5SX2", 1);
         LOGI("RetroArch 2.0 at %s: PS2 plays with PS5SX2", root);
         return 1;
     }

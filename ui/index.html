@@ -764,8 +764,7 @@ function loadEmus() {
     $("ps2Intro").textContent = t.intro;
     $("ps2PerGameText").textContent = t.text;
     each(".ps2PerGameName", function (x) { x.textContent = t.name; });
-    // PS5SX2 keeps its shared cards unless asked, as before it could sync game by game.
-    ps2Check(gameSaves ? "shared" : "per_game");
+    ps2Check("per_game");
     var v = state.status && state.status.server_version, ok = serverAtLeast(v, "5.3.0");
     var backup = document.querySelector('input[name=ps2][value=shared]');
     backup.disabled = !ok;
@@ -776,14 +775,15 @@ function loadEmus() {
     if (hasPs2 && ok) api("GET", "/api/memcards").then(function (mc) { if (mc.chosen) ps2Check(mc.chosen); }).catch(function () {});
   }).catch(function (e) { $("emus").innerHTML = '<p class="err">' + esc(e.message) + "</p>"; });
 }
-// PS2 emulators that take each game's saves off their cards (PS5SX2: save_layout "ps2"),
-// rather than keep a card per game (RetroArch's LRPS2).
+// PS2 emulators RomM Sync gives each game its own card in (PS5SX2: save_layout "ps2"),
+// rather than ones that keep a card per game themselves (RetroArch's LRPS2).
 function ps2GameSaves(p) {
   return (p.platforms || []).some(function (e) { return (e.romm || []).indexOf("ps2") >= 0 && (e.save_layout || p.save_layout) === "ps2"; });
 }
 var PS2_TEXT = {
-  layout: { intro: "RomM Sync syncs one of the two, never both.", name: "Each game's saves on their own", text: "Works with any RomM version.",
-            hint: { shared: "Default: one shared card for all games' saves.", per_game: "Use this if your other devices sync PS2 saves per game." } },
+  layout: { intro: "RomM Sync syncs one of the two, never both.", name: "One memory card per game",
+            text: "Works with any RomM version. Each game gets its own card, with its saves copied from the shared card, which stays as it is.",
+            hint: { shared: "The whole cards sync between your consoles.", per_game: "The default. Each game's card syncs as its save, so other RomM apps can load it." } },
   card: { intro: "LRPS2 can keep one memory card per game or shared cards for every game. RomM Sync syncs one of the two, never both.",
           name: "One memory card per game",
           text: "Works with any RomM version. In RetroArch, open the LRPS2 core options and turn off Shared Memory Cards. Saves already on the shared card stay there." }
@@ -1292,7 +1292,7 @@ function loadPs2(map) {
     ps2ShowHint($("ps2ModeHint"), gameSaves, $("ps2Mode").value);
     var h = "";
     if (mc.mode === "per_game" && gameSaves) {
-      h = map.save_dir ? "<p class=\"ok\">Each game's saves sync on their own.</p>" : "";
+      h = map.save_dir ? "<p class=\"ok\">Each game has its own card, which syncs as its save.</p>" : "";
     } else if (mc.mode === "per_game") {
       h = map && map.save_dir ? '<p class="ok">One card per game is on. PS2 saves sync like any other save.</p>'
         : '<p class="warn">LRPS2 still uses a shared card. Turn off Shared Memory Cards in the LRPS2 core options.</p>';

@@ -300,7 +300,8 @@ static void psx_close(psx_disc *d) {
     free(d->hunk);
 }
 
-/* One 2048-byte user-data sector. */
+/* One 2048-byte user-data sector. A DVD's CHD (PS2) keeps 2048-byte frames
+ * with no header; a CD's keeps whole 2352-byte frames (and subcode). */
 static int psx_sector(psx_disc *d, uint32_t lba, unsigned char *out) {
     unsigned char frame[2352];
     if (d->chd) {
@@ -309,14 +310,78 @@ static int psx_sector(psx_disc *d, uint32_t lba, unsigned char *out) {
             if (chd_read(d->chd, (uint32_t)hunk, d->hunk) != CHDERR_NONE) return -1;
             d->cached_hunk = hunk;
         }
-        memcpy(frame, d->hunk + (size_t)(lba % d->frames_per_hunk) * d->frame_bytes, sizeof frame);
+        const unsigned char *at = d->hunk + (size_t)(lba % d->frames_per_hunk) * d->frame_bytes;
+        if (d->frame_bytes < sizeof frame) {
+            if (d->frame_bytes < SECTOR) return -1;
+            memcpy(out, at, SECTOR);
+            return 0;
+        }
+        memcpy(frame, at, sizeof frame);
     } else if (d->raw) {
-        if (fseek(d->f, (long)lba * 2352, SEEK_SET) != 0 || fread(frame, 1, sizeof frame, d->f) != sizeof frame) return -1;
+        if (fseeko(d->f, (off_t)lba * 2352, SEEK_SET) != 0 || fread(frame, 1, sizeof frame, d->f) != sizeof frame) return -1;
     } else {
-        return fseek(d->f, (long)lba * SECTOR, SEEK_SET) == 0 && fread(out, 1, SECTOR, d->f) == SECTOR ? 0 : -1;
+        return fseeko(d->f, (off_t)lba * SECTOR, SEEK_SET) == 0 && fread(out, 1, SECTOR, d->f) == SECTOR ? 0 : -1;
     }
     /* Mode 2 (PS1 discs) has an 8-byte subheader after the 16-byte header. */
     memcpy(out, frame + (frame[15] == 2 ? 24 : 16), SECTOR);
+    return 0;
+}
+
+/* A file on the disc by its path ("SYSTEM.CNF", "\\DATA\\SLUS_123.45;1"):
+ * where it starts and how long it is. Names match without their ";1". */
+static int psx_find(psx_disc *d, const char *path, uint32_t *lba, uint32_t *size) {
+    unsigned char pvd[SECTOR];
+    if (psx_sector(d, 16, pvd) != 0 || pvd[0] != 1 || memcmp(pvd + 1, "CD001", 5) != 0) return -1;
+    uint32_t at = le32(pvd + 156 + 2), len = le32(pvd + 156 + 10);
+    int is_dir = 1;
+    while (*path == '\\' || *path == '/') path++;
+    while (*path) {
+        size_t nl = strcspn(path, "\\/;");
+        if (!is_dir || !nl) return -1;
+        if (len > 64 * SECTOR) len = 64 * SECTOR;
+        unsigned char *dir = malloc(len + SECTOR);
+        uint32_t got = 0;
+        while (dir && got < len && psx_sector(d, at + got / SECTOR, dir + got) == 0) got += SECTOR;
+        int found = 0;
+        for (uint32_t p = 0; dir && p + 33 < got && !found;) {
+            unsigned rl = dir[p];
+            if (!rl) {
+                p = (p / SECTOR + 1) * SECTOR;
+                continue;
+            }
+            unsigned fl = dir[p + 32];
+            const char *name = (const char *)dir + p + 33;
+            size_t base = 0;
+            while (base < fl && name[base] != ';') base++;
+            if (p + 33 + fl <= got && base == nl && !strncasecmp(name, path, nl)) {
+                at = le32(dir + p + 2);
+                len = le32(dir + p + 10);
+                is_dir = (dir[p + 25] & 2) != 0;
+                found = 1;
+            }
+            p += rl;
+        }
+        free(dir);
+        if (!found) return -1;
+        path += nl;
+        if (*path == ';') path += strcspn(path, "\\/");
+        while (*path == '\\' || *path == '/') path++;
+    }
+    if (is_dir) return -1;
+    *lba = at;
+    *size = len;
+    return 0;
+}
+
+/* SYSTEM.CNF's text, 0-terminated. */
+static int read_cnf(psx_disc *d, char *out, size_t n) {
+    uint32_t lba, len;
+    unsigned char cnf[SECTOR];
+    if (n < 2 || psx_find(d, "SYSTEM.CNF", &lba, &len) != 0 || psx_sector(d, lba, cnf) != 0) return -1;
+    size_t l = len < SECTOR ? len : SECTOR;
+    if (l > n - 1) l = n - 1;
+    memcpy(out, cnf, l);
+    out[l] = 0;
     return 0;
 }
 
@@ -344,38 +409,37 @@ static int serial_from_cnf(const char *cnf, char *out, size_t n) {
 
 int gameid_psx(const char *path, char *out, size_t n) {
     psx_disc d;
-    if (psx_open(&d, path) != 0) {
-        psx_close(&d);
-        return -1;
-    }
+    char cnf[SECTOR + 1];
+    int rc = psx_open(&d, path) == 0 && read_cnf(&d, cnf, sizeof cnf) == 0 ? serial_from_cnf(cnf, out, n) : -1;
+    psx_close(&d);
+    return rc;
+}
+
+int gameid_ps2_crc(const char *path, uint32_t *crc) {
+    psx_disc d;
+    char cnf[SECTOR + 1], boot[256];
+    uint32_t lba, len;
     int rc = -1;
-    unsigned char pvd[SECTOR], *dir = NULL;
-    if (psx_sector(&d, 16, pvd) == 0 && pvd[0] == 1 && !memcmp(pvd + 1, "CD001", 5)) {
-        uint32_t lba = le32(pvd + 156 + 2), size = le32(pvd + 156 + 10);
-        if (size > 64 * SECTOR) size = 64 * SECTOR;
-        dir = malloc(size + SECTOR);
-        uint32_t got = 0;
-        while (dir && got < size && psx_sector(&d, lba + got / SECTOR, dir + got) == 0) got += SECTOR;
-        for (uint32_t p = 0; dir && p + 33 < got;) {
-            unsigned rl = dir[p];
-            if (!rl) {
-                p = (p / SECTOR + 1) * SECTOR;
-                continue;
-            }
-            unsigned fl = dir[p + 32];
-            if (fl >= 10 && !strncasecmp((const char *)dir + p + 33, "SYSTEM.CNF", 10)) {
-                unsigned char cnf[SECTOR + 1];
-                if (psx_sector(&d, le32(dir + p + 2), cnf) == 0) {
-                    uint32_t len = le32(dir + p + 10);
-                    cnf[len < SECTOR ? len : SECTOR] = 0;
-                    rc = serial_from_cnf((const char *)cnf, out, n);
-                }
-                break;
-            }
-            p += rl;
-        }
+    if (psx_open(&d, path) != 0 || read_cnf(&d, cnf, sizeof cnf) != 0) goto out;
+    /* "BOOT2 = cdrom0:\SLUS_205.52;1": the file after the device. */
+    const char *b = strstr(cnf, "BOOT2"), *colon;
+    if (!b || !(colon = strchr(b, ':'))) goto out;
+    size_t bl = strcspn(colon + 1, "\r\n");
+    if (bl >= sizeof boot) goto out;
+    memcpy(boot, colon + 1, bl);
+    boot[bl] = 0;
+    if (psx_find(&d, boot, &lba, &len) != 0 || len < 4 || len > 64u << 20) goto out;
+    uint32_t x = 0, left = len & ~3u;
+    unsigned char sec[SECTOR];
+    for (uint32_t s = 0; left; s++) {
+        if (psx_sector(&d, lba + s, sec) != 0) goto out;
+        uint32_t take = left < SECTOR ? left : SECTOR;
+        for (uint32_t i = 0; i < take; i += 4) x ^= le32(sec + i);
+        left -= take;
     }
-    free(dir);
+    *crc = x;
+    rc = 0;
+out:
     psx_close(&d);
     return rc;
 }

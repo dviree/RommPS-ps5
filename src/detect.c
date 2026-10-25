@@ -159,9 +159,14 @@ static int name_in(const cJSON *list, const char *name, int contains) {
     return 0;
 }
 
+/* Keys a core's rule decides even in a saved profile: how its memory cards
+ * sync follows the core, as an emulator's follows its preset (profiles.c). */
+static const char *const RULE_ONLY[] = {"memcards", "cards", "save_layout", "pcsx2_cards"};
+
 /* Adds the matching rule's keys to e: all of them, or (missing_only) those e
- * doesn't have, for a profile saved before the rule had them. How many. */
-static int apply_core_rules(cJSON *e, const char *system, const char *corename, int missing_only) {
+ * doesn't have, for a profile saved before the rule had them, and RULE_ONLY's
+ * where they differ. How many. */
+int detect_apply_core_rules(cJSON *e, const char *system, const char *corename, int missing_only) {
     int added = 0;
     static cJSON *rules;
     static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -175,7 +180,10 @@ static int apply_core_rules(cJSON *e, const char *system, const char *corename, 
         if (systems && !name_in(systems, system, 0)) continue;
         const cJSON *k;
         cJSON_ArrayForEach(k, cJSON_GetObjectItemCaseSensitive(r, "entry")) {
-            if (missing_only && cJSON_GetObjectItemCaseSensitive(e, k->string)) continue;
+            const cJSON *have = cJSON_GetObjectItemCaseSensitive(e, k->string);
+            int rule_only = 0;
+            for (size_t i = 0; i < sizeof RULE_ONLY / sizeof RULE_ONLY[0]; i++) rule_only |= !strcmp(k->string, RULE_ONLY[i]);
+            if (missing_only && have && (!rule_only || cJSON_Compare(have, k, 1))) continue;
             cJSON_DeleteItemFromObjectCaseSensitive(e, k->string);
             cJSON_AddItemToObject(e, k->string, cJSON_Duplicate(k, 1));
             added++;
@@ -216,7 +224,7 @@ static void add_core_platforms(cJSON *plats, cJSON *cores, const char *core_id, 
         cJSON_AddStringToObject(e, "core_name", corename);
         /* Saves other emulators keep in the same format (save_format) share
          * one save on RomM; save files, cards and layouts per core. */
-        apply_core_rules(e, first, corename, 0);
+        detect_apply_core_rules(e, first, corename, 0);
         cJSON_AddItemToArray(plats, e);
     }
 }
@@ -598,7 +606,7 @@ static int fill_from_catalog(cJSON *p) {
     cJSON_ArrayForEach(pe, cJSON_GetObjectItemCaseSensitive(p, "platforms")) {
         const cJSON *first = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(pe, "romm"), 0);
         const char *core = jget_str(pe, "core_name", "");
-        if (cJSON_IsString(first) && core[0]) added += apply_core_rules(pe, first->valuestring, core, 1);
+        if (cJSON_IsString(first) && core[0]) added += detect_apply_core_rules(pe, first->valuestring, core, 1);
     }
     if (!preset) {
         if (added) LOGI("the %s profile got %d setting%s from RetroArch's core rules", jget_str(p, "name", ""), added, added == 1 ? "" : "s");

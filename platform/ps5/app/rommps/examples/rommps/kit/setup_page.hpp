@@ -82,7 +82,7 @@ class SetupPage
         std::map<std::string, std::array<std::string, 3>> dirs;
         std::map<std::string, int> games; // games already in its folder, by system
         std::set<std::string> fixed; // "rom_dir", "save_dir", "state_dir"
-        bool ps2_game_saves = false; // takes each game's PS2 saves off its cards (PS5SX2: save_layout "ps2")
+        bool ps2_game_saves = false; // RomM Sync gives each PS2 game its own card (PS5SX2: save_layout "ps2")
     };
     // What a row of the emulator step does.
     struct RowRef

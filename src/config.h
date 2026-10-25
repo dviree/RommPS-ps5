@@ -37,6 +37,7 @@ typedef struct {
     int profiles_custom;      /* 0: built-in profiles, not written to config.json */
     int setup_complete;       /* background syncs wait for the setup wizard */
     char ps2_cards[16];       /* PS2's memory card method: "per_game", "shared" or "" (as its emulator keeps them) */
+    int ps2_cards_checked;    /* memcard_keep_shared ran: from 1.3.1, one card per game is the default */
     char ui_theme[24];        /* web UI theme id (ui/themes/<id>.css) */
     int cover_cache;          /* keep every game's cover on the console (covers.h) */
     char server_version[32];

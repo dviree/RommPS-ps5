@@ -146,6 +146,23 @@ static int appid_cb(pid_t pid, const char *tdname, void *vctx) {
     return 1;
 }
 
+struct alive_ctx { const char *title; int found; };
+
+static int alive_cb(pid_t pid, const char *tdname, void *vctx) {
+    struct alive_ctx *c = vctx;
+    char title[16];
+    (void)tdname;
+    if (!ps5_proc_app(pid, title, NULL) && !strncmp(title, c->title, 9)) c->found = 1;
+    return c->found;
+}
+
+int plat_app_alive(const char *title_id) {
+    struct alive_ctx c = {title_id, 0};
+    if (!title_id || strlen(title_id) != 9) return -1;
+    if (console_for_each_proc(alive_cb, &c) < 0) return -1;
+    return c.found;
+}
+
 int plat_running_title(char *title_id, size_t n) {
     char tid[256]; /* nobody documents how big this needs to be, so 256 it is */
     int app_id;

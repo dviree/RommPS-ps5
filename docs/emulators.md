@@ -41,11 +41,11 @@ Games save into their own disk images. Save Disks sync; there are no save states
 
 ### PS5SX2
 
-Two memory cards for every game, backed up to RomM (5.3 or newer). Or each game's saves on them sync on their own, as RomM's other clients keep them.
+One memory card per game, set in each game's settings, or its two shared cards, backed up to RomM (5.3 or newer). No save states yet.
 
 | System | Games | Saves | Save files | Saved as | States | State files | Memory cards |
 |---|---|---|---|---|---|---|---|
-| ps2 | `{root}/games` | `{root}/memcards,{root}` | each game's saves on the slot cards (`{root}/settings/{rom_stem}.ini,{root}/gs.ini`), as one 8 MB card per game |  | `{rom_dir}` | `.state*` | shared by every game; can be one per game. Shared cards (synced whole, while the system uses shared cards): `{root}/Mcd001.ps2`, `{root}/Mcd002.ps2` |
+| ps2 | `{root}/games` | `{root}/memcards,{root}` | its own card, `{rom_stem}.ps2`, named in `{root}/settings/{rom_stem}.ini`, synced as one 8 MB card of the game's saves |  | not synced |  | one per game; can be shared by every game. One per game: RomM Sync gives each game its own. Shared cards (synced whole, while the system uses shared cards): `{card_dir}/Mcd001.ps2`, `{card_dir}/Mcd002.ps2` |
 
 ### PS5N64
 
@@ -227,7 +227,7 @@ From `platform/retroarch_cores.json`. Saves default to `<game>.srm` (`.sav`, `.r
 | Core | System | Save files | Saved as | Memory cards | Notes |
 |---|---|---|---|---|---|
 | LRPS2, PCSX2 | ps2 | `.ps2` |  | shared by every game; can be one per game. One per game: Turn off Shared Memory Cards in LRPS2's core options. Shared cards (synced whole, while the system uses shared cards): `{bios}/pcsx2/memcards/Mcd001.ps2`, `{bios}/pcsx2/memcards/Mcd002.ps2` | Per game: <save folder>/<game>.ps2 (slot 1 only). Shared (the default): <system>/pcsx2/memcards/Mcd001.ps2 and Mcd002.ps2. |
-| PS5SX2 | ps2 |  |  | shared by every game. Shared cards (synced whole, while the system uses shared cards): `{bios}/pcsx2/memcards/Mcd001.ps2`, `{bios}/pcsx2/memcards/Mcd002.ps2` | Shared only: <system>/pcsx2/memcards/Mcd001.ps2 and Mcd002.ps2. |
+| PS5SX2 | ps2 | each game's own card, synced as one 8 MB card of its saves |  | one per game; can be shared by every game. One per game: RomM Sync gives each game its own. Shared cards (synced whole, while the system uses shared cards): `{card_dir}/Mcd001.ps2`, `{card_dir}/Mcd002.ps2` | One per game (the default): <game>.ps2 in <system>/pcsx2/memcards, named in <system>/ps5sx2/gamesettings/<serial>_<crc>.ini, which RomM Sync writes. Shared: Mcd001.ps2 and Mcd002.ps2 there. |
 | SwanStation | psx | `.srm,.mcd` |  | one per game; can be shared by every game. One per game: Set Memory Card 1 Type to Libretro in SwanStation's core options | Card 1: <game>.srm (Libretro, the default), <serial>_1.mcd (per game by code) or <game>_1.mcd (by title). Shared: duckstation_shared_card_1.mcd. |
 | *Beetle PSX* | psx |  |  | one per game; can be shared by every game. One per game: Turn off Shared Memory Cards in the core options | Card 1: <game>.srm. Shared cards (mednafen_psx_libretro_shared.N.mcr) need the Mednafen card method. |
 | PCSX-ReARMed | psx |  |  | one per game | Card 1: <game>.srm. |

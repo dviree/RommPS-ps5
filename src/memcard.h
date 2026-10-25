@@ -13,6 +13,11 @@ int memcard_dirs(char dirs[][1024], int max);
 int memcard_sync(int upload_only, int *down);
 /* Replaces a card with its latest version on RomM. */
 int memcard_restore(int slot, char *err, int en);
+
+/* Once, after an update to 1.3.1 or newer (one card per game the default
+ * there): a console whose shared PS2 cards have synced with RomM keeps
+ * syncing them whole, unless the user picks otherwise. Needs the state loaded. */
+void memcard_keep_shared(void);
 cJSON *memcard_status(void);
 
 #endif

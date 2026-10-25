@@ -89,9 +89,10 @@ $(HOST_BIN): $(SRCS) platform/host/platform.c $(HDRS) $(GEN_HEADERS)
 	$(HOST_CC) $(COMMON_CFLAGS) -DROMM_UPDATE_TEST_KEY -o $@ $(SRCS) platform/host/platform.c -lcurl -lz -lpthread
 
 # Unit tests for the parts with file formats of their own.
-unit: build/host/gcmem_test build/host/jsonlean_cli build/host/ps2card_test
+unit: build/host/gcmem_test build/host/jsonlean_cli build/host/ps2card_test build/host/gameid_cli
 	build/host/gcmem_test
 	build/host/ps2card_test
+	tests/gameid_test.sh build/host/gameid_cli
 	python3 tests/jsonlean_test.py build/host/jsonlean_cli
 
 build/host/jsonlean_cli: tests/jsonlean_cli.c src/jsonlean.c src/jsonlean.h
@@ -101,6 +102,11 @@ build/host/jsonlean_cli: tests/jsonlean_cli.c src/jsonlean.c src/jsonlean.h
 build/host/gcmem_test: tests/gcmem_test.c src/gcmem.c src/gcmem.h
 	@mkdir -p $(dir $@)
 	$(HOST_CC) -std=gnu11 -g -Wall -Wextra -fsanitize=address,undefined -Isrc -o $@ tests/gcmem_test.c src/gcmem.c
+
+build/host/gameid_cli: tests/gameid_cli.c src/gameid.c src/gameid.h src/util.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(filter-out -O2,$(COMMON_CFLAGS)) -g -fsanitize=address,undefined -o $@ tests/gameid_cli.c src/gameid.c src/util.c third_party/cJSON.c \
+		third_party/md5.c $(CHDR_SRCS) -lz -lpthread
 
 build/host/ps2card_test: tests/ps2card_test.c src/ps2card.c src/ps2card.h src/util.c src/zip.c $(SIGIL_SRCS)
 	@mkdir -p $(dir $@)

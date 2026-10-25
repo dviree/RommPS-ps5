@@ -40,6 +40,8 @@ def cards_cell(c):
     setting = cards.get("setting") or {}
     if setting.get("file"):
         text += " (read from %s, `%s`)" % (code(setting["file"]), setting.get("key", ""))
+    if c.get("pcsx2_cards", {}).get("own_card"):
+        text += ". One per game: RomM Sync gives each game its own"
     if c.get("memcards"):
         text += ". Shared cards (synced whole, while the system uses shared cards): " + ", ".join(code(p) for p in c["memcards"].split(","))
     return text
@@ -63,9 +65,11 @@ def section(console, path):
             layout = c.get("save_layout")
             saves = code(c["save_dir"]) if sync else "not synced"
             files = ("a zip per game (%s), from %s" % (layout, code(c.get("bundle_dirs", "")))) if layout else code(c["save_exts"])
-            if layout == "ps2":  # src/ps2card.c: the game's saves off the slot cards, not a zip
-                saves = code(c.get("bundle_dirs", "")) if sync else "not synced"
-                files = "each game's saves on the slot cards (%s), as one 8 MB card per game" % code(c.get("card_settings", ""))
+            if layout == "ps2":  # src/ps2card.c: each game's own card, synced as sigil's one-game card
+                pc = c.get("pcsx2_cards", {})
+                saves = code(pc.get("dir", "")) if sync else "not synced"
+                files = "its own card, %s, named in %s, synced as one 8 MB card of the game's saves" % (
+                    code(pc.get("own_card", "")), code(pc.get("game_ini", "")))
             stems = [x for x in c.get("save_stems", "").split(",") if x and x + "{ext}" != c["save_name"]]
             name = "" if layout or not sync else code(c["save_name"]) + (" (also %s)" % ", ".join(code(x) for x in stems) if stems else "")
             states = code(c["state_dir"]) if sync and c.get("state_exts", ".state*") else "not synced"
@@ -95,6 +99,8 @@ def main():
         e = r.get("entry", {})
         core = ", ".join(r.get("names", []) + ["*%s*" % n for n in r.get("contains", [])]) or "any"
         files = ("a zip per game (%s)" % e["save_layout"]) if e.get("save_layout") else code(e.get("save_exts", ""))
+        if e.get("save_layout") == "ps2":
+            files = "each game's own card, synced as one 8 MB card of its saves"
         lines.append("| %s | %s | %s | %s | %s | %s |" % (core, ", ".join(r.get("systems", [])) or "any", files,
                                                           code(e.get("save_name", "")), cards_cell(e), r.get("note", "")))
     open(os.path.join(ROOT, "docs/emulators.md"), "w").write("\n".join(lines) + "\n")

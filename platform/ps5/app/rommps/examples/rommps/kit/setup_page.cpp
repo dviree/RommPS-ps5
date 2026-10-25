@@ -967,8 +967,8 @@ std::vector<Row> SetupPage::emulator_rows(const App &app, std::vector<RowRef> *r
         if (saves)
             add({RowKind::choice, "   Sync", kSyncLabel[sync_index(c.key)], ""}, {RowRef::kSysSync, -1, c.key});
         // Memory cards: one method per system, never both. PS2 can be chosen
-        // when an emulator keeps either (LRPS2), or takes each game's saves
-        // off its cards (PS5SX2); otherwise it's the emulator's.
+        // when an emulator keeps either (LRPS2), or when RomM Sync gives each
+        // game its own card (PS5SX2); otherwise it's the emulator's.
         if (saves && cards_.count(c.key))
         {
             const CardMethod &cm = cards_.at(c.key);
@@ -978,11 +978,10 @@ std::vector<Row> SetupPage::emulator_rows(const App &app, std::vector<RowRef> *r
             const bool shared_ok = at_least(app.status().server_version, 5, 3, 0);
             std::string detail = !cm.note.empty()                  ? "    " + cm.note
                                  : method == "shared" && !shared_ok ? "    Shared cards need RomM 5.3 or newer"
-                                 : game_saves && method == "shared" ? "    Default: one shared card for all games' saves"
-                                 : game_saves                       ? "    Use this if your other devices sync PS2 saves per game"
+                                 : game_saves && method != "shared" ? "    Each game gets its own card, which syncs as its save"
                                  : method == "shared"               ? "    The whole cards sync between your consoles"
                                                                     : "    Each game's card syncs as its save";
-            Row r{RowKind::choice, "   Memory cards", method == "shared" ? "Shared, synced" : game_saves ? "Each game's saves" : "One per game", detail};
+            Row r{RowKind::choice, "   Memory cards", method == "shared" ? "Shared, synced" : "One per game", detail};
             r.enabled = choice;
             add(r, {RowRef::kPs2});
         }

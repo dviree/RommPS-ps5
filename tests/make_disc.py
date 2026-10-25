@@ -7,6 +7,8 @@
     make_disc.py gc <out.iso> <GAMEID>
     make_disc.py psx <out.iso> <BOOT EXE>     a PS1 ISO whose SYSTEM.CNF boots it ("SLUS_123.45")
     make_disc.py psxbin <out.bin> <BOOT EXE>  the same as raw 2352-byte mode 2 sectors
+    make_disc.py ps2 <out.iso> <BOOT ELF> [DIR]  a PS2 ISO whose SYSTEM.CNF BOOT2 is the ELF (in DIR when given);
+                                                 prints PCSX2's CRC of it
 """
 import struct
 import sys
@@ -84,6 +86,39 @@ def psx_iso(boot):
     return bytes(img)
 
 
+def ps2_elf():
+    """A boot program over two sectors, its length not a multiple of 4 (PCSX2 skips the tail)."""
+    return bytes((i * 7 + (i >> 8)) & 0xFF for i in range(SECTOR * 2 + 6))
+
+
+def ps2_iso(boot, folder=None):
+    elf = ps2_elf()
+    path = f"\\{folder}\\{boot};1" if folder else f"\\{boot};1"
+    cnf = f"BOOT2 = cdrom0:{path}\r\nVER = 1.00\r\nVMODE = NTSC\r\n".encode()
+    img = bytearray(SECTOR * 26)
+    pvd = bytearray(SECTOR)
+    pvd[0] = 1
+    pvd[1:6] = b"CD001"
+    pvd[6] = 1
+    pvd[156:156 + 34] = record(b"\0", 18, SECTOR, True)
+    img[16 * SECTOR:17 * SECTOR] = pvd
+    img[17 * SECTOR:17 * SECTOR + 7] = b"\xffCD001\x01"
+    root = record(b"\0", 18, SECTOR, True) + record(b"\1", 18, SECTOR, True) + record(b"SYSTEM.CNF;1", 19, len(cnf), False)
+    if folder:
+        root += record(folder.encode(), 20, SECTOR, True)
+        sub = record(b"\0", 20, SECTOR, True) + record(b"\1", 18, SECTOR, True) + record(f"{boot};1".encode(), 21, len(elf), False)
+        img[20 * SECTOR:20 * SECTOR + len(sub)] = sub
+    else:
+        root += record(f"{boot};1".encode(), 21, len(elf), False)
+    img[18 * SECTOR:18 * SECTOR + len(root)] = root
+    img[19 * SECTOR:19 * SECTOR + len(cnf)] = cnf
+    img[21 * SECTOR:21 * SECTOR + len(elf)] = elf
+    crc = 0
+    for (w,) in struct.iter_unpack("<I", elf[:len(elf) // 4 * 4]):
+        crc ^= w
+    return bytes(img), crc
+
+
 def raw_mode2(iso):
     """2048-byte sectors as 2352-byte mode 2 form 1 ones (sync, header, subheader, data, no EDC/ECC)."""
     out = bytearray()
@@ -122,6 +157,9 @@ if __name__ == "__main__":
         data = psx_iso(sys.argv[3])
     elif kind == "psxbin":
         data = raw_mode2(psx_iso(sys.argv[3]))
+    elif kind == "ps2":
+        data, crc = ps2_iso(sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else None)
+        print("%08X" % crc)
     elif kind == "gc":
         data = sys.argv[3].encode()[:6] + bytes(0x20) + b"\xc2\x33\x9f\x3d" + bytes(64)
     else:

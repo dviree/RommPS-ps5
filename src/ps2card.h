@@ -29,6 +29,15 @@ int ps2card_collect(const ps2_cards *c, const char *content_path, const char *se
 int ps2card_restore(const ps2_cards *c, const char *content_path, const char *serial, const unsigned char *unit,
                     size_t len);
 
+/* A memory card setting ("Slot1_Filename", "Slot1_Enable") from an emulator's
+ * settings text: PCSX2's [MemoryCards] section (ini), or PS5SX2's
+ * "MemoryCards/Slot1_Filename=X" lines (flat), the last one winning. 0 if set. */
+int ps2card_setting(const char *txt, int ini, const char *key, char *out, size_t n);
+
+/* Sets one in the settings file at path, keeping the rest of it; the file
+ * (and its folder) are made if missing, writable by the emulator. */
+int ps2card_set_setting(const char *path, int ini, const char *key, const char *value);
+
 /* Whether the file card at path holds a save of the game. */
 int ps2card_file_has(const char *path, const char *serial);
 

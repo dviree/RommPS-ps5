@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "version": "2026.10.23.1",
+  "version": "2026.10.25.1",
   "console": "ps5",
   "emulators": [
   {
@@ -70,13 +70,15 @@
       "id": "ps5sx2", "name": "PS5SX2",
       "title_ids": ["PPSA99203"],
       "detect": ["/data/PCSX2", "/data/homebrew/PPSA99203"],
-      "note": "Two memory cards for every game, backed up to RomM (5.3 or newer).",
+      "note": "One memory card per game, set in each game's settings, or its two shared cards, backed up to RomM (5.3 or newer). No save states yet.",
       "profile": {
         "root": "/data/PCSX2", "rom_dir": "{root}/games", "bios_dir": "{root}",
-        "sync_saves": false, "memcards": "{root}/Mcd001.ps2,{root}/Mcd002.ps2",
+        "memcards": "{card_dir}/Mcd001.ps2,{card_dir}/Mcd002.ps2", "save_layout": "ps2", "state_exts": "",
+        "pcsx2_cards": {"dir": "{root}/memcards,{root}", "game_ini": "{root}/settings/{rom_stem}.ini", "global_ini": "{root}/gs.ini",
+                        "format": "flat", "own_card": "{rom_stem}.ps2"},
         "firmware": {"pick_one": ["21038400dc633070a78ad53090c53017", "dc69f0643a3030aaa4797501b483d6c4", "80ac46fa7e77b8ab4366e86948e54f83",
                     "93ea3bcee4252627919175ff1b16a1d9", "d3e81e95db25f5a86a7b7474550a2155"]},
-        "platforms": [{"romm": ["ps2"], "dir": "ps2", "cards": {"default": "shared", "modes": "shared"}}]
+        "platforms": [{"romm": ["ps2"], "dir": "ps2", "cards": {"default": "per_game", "modes": "per_game,shared"}}]
       }
     },
     {
