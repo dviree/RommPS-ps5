@@ -1,3 +1,0 @@
-[submodule "third_party/sigil"]
-	path = third_party/sigil
-	url = https://github.com/rommapp/argosy-sigil.git

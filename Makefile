@@ -19,12 +19,11 @@
 # its CD codecs, with its LZMA and zstd decoders and the system's zlib.
 CHDR_SRCS := $(filter-out %microflac.cpp,$(wildcard third_party/libchdr/src/*.c)) \
         third_party/libchdr/deps/lzma/src/LzmaDec.c third_party/libchdr/deps/zstd/zstddeclib.c
-# argosy-sigil (MPL-2.0), the third_party/sigil submodule, for PS2 memory card
-# saves one game at a time (src/ps2card.c): its save sync only. Its disc readers
-# and sigil.c would link its own libchdr beside ours, so they're left out, and
-# ps2card.c stands in for sigil_platform_from_slug. Its tiny-AES-c submodule
-# (Unlicense) is for its PS1 cards; its libchdr submodule isn't needed:
-#   git submodule update --init third_party/sigil && git -C third_party/sigil submodule update --init third_party/tiny-AES-c
+# argosy-sigil (MPL-2.0), a copy of the files used (third_party/sigil/SOURCE.txt),
+# for PS2 memory card saves one game at a time (src/ps2card.c): its save sync
+# only. Its disc readers and sigil.c would link a second libchdr, so they're left
+# out, and ps2card.c stands in for sigil_platform_from_slug. tiny-AES-c
+# (Unlicense) is for its PS1 cards.
 SIGIL := third_party/sigil
 SIGIL_SRCS := $(addprefix $(SIGIL)/src/,sync.c sync_state.c sync_kinds.c sync_kind_sony.c sync_kind_sega.c \
         sync_kind_gamecube.c sync_units.c sync_cards.c sync_folder_cards.c sync_volumes.c sync_gci_folder.c \
@@ -32,9 +31,6 @@ SIGIL_SRCS := $(addprefix $(SIGIL)/src/,sync.c sync_state.c sync_kinds.c sync_ki
         card_ps1.c card_ps2.c card_gamecube.c card_dreamcast.c card_saturn.c card_segacd.c zip_mem.c \
         zip_entries.c md5.c sha1.c io_file.c n64_save.c clock_gb.c rzip.c sfo_parser.c psp_sfo.c) \
         $(SIGIL)/third_party/tiny-AES-c/aes.c
-ifneq ($(words $(wildcard $(SIGIL)/src/sync.c $(SIGIL)/third_party/tiny-AES-c/aes.c)),2)
-$(error third_party/sigil isn't checked out: git submodule update --init third_party/sigil && git -C third_party/sigil submodule update --init third_party/tiny-AES-c)
-endif
 SRCS := src/main.c src/util.c src/http.c src/romm.c src/config.c src/state.c \
         src/profiles.c src/sync.c src/watch.c src/detect.c src/ra2.c src/playlist.c src/autostart.c src/memcard.c src/zip.c src/bundle.c src/gcmem.c src/statefmt.c src/events.c src/gameid.c src/covers.c src/library.c src/firmware.c src/pair.c src/web.c src/update.c src/presets.c src/jsonlean.c src/ps2card.c \
         third_party/cJSON.c third_party/md5.c third_party/monocypher.c third_party/monocypher-ed25519.c \
