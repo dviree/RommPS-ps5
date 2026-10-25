@@ -65,6 +65,7 @@ struct Game
     bool archived = false; // a .rar (or any archive, for Switch) nothing here plays: not downloaded
     std::string version;   // what sets this version apart, when RomM has others of the game
     int versions = 0;      // how many versions RomM has, this one included; 0 if just one
+    std::vector<int> siblings; // the other versions' ids
 };
 
 // More about a game (/api/roms/<id>/details): RomM's metadata, the user's own
@@ -91,6 +92,21 @@ struct Details
     // folder and theirs, which come with the download but aren't this game's.
     std::vector<Addon> addons;
     int bundle = 0; // how many of addons are those
+    struct Version
+    {
+        int id = 0;
+        std::string name, label; // the file's name, and what sets it apart ("USA · Disc 2")
+        double size = 0;
+        struct Disc
+        {
+            int disc = 0;
+            double size = 0;
+        };
+        std::vector<Disc> discs; // a folder of discs: they come down together
+    };
+    // Every version of the game, and a folder's discs; empty when there's
+    // nothing to pick (one version, not a folder of discs).
+    std::vector<Version> versions;
 };
 
 struct Platform
@@ -161,6 +177,7 @@ struct GameList
 struct Download
 {
     int id = 0, rom_id = 0;
+    int disc = 0; // one disc of a game kept as a folder of discs; 0: all of it
     std::string name, platform, status, error;
     double done = 0, total = 0, speed = 0;
     // What the sync after the download brought.
@@ -249,7 +266,7 @@ class App
     // (assets/rommps/romm-sync.elf, version kMinPayload): it starts it when
     // none is running, puts it in place of an older one (never of a newer
     // one), and keeps the copies the console starts it from up to date.
-    static constexpr const char *kMinPayload = "1.3.0";
+    static constexpr const char *kMinPayload = "1.3.1";
     bool payload_too_old() const;
     void start_payload(); // sends the payload to the HEN's loader
     // Sending it, or RomM Sync is running and not answering yet (starting up,
@@ -261,6 +278,8 @@ class App
     const std::vector<Platform> &platforms() const { return platforms_; }
     const std::vector<Download> &queue() const { return queue_; }
     const Download *download_for(int rom_id) const;
+    // One disc's download (0: the whole game's), the newest.
+    const Download *download_for(int rom_id, int disc) const;
 
     const Platform *platform_by_id(int id) const;
 
@@ -273,10 +292,30 @@ class App
     const std::vector<Game> &installed() const { return installed_; }
     // Whether a game is on the console now. A list's copy can be older than
     // a game deleted by hand, so this goes by the latest installed list.
-    bool on_console(const Game &g) const { return installed_known_ ? on_console_.count(g.id) > 0 : g.installed; }
+    bool on_console(const Game &g) const
+    {
+        if (!installed_known_)
+            return g.installed;
+        if (on_console_.count(g.id))
+            return true;
+        for (int id : g.siblings)
+            if (on_console_.count(id))
+                return true;
+        return false;
+    }
+    bool on_console(int rom_id) const { return on_console_.count(rom_id) > 0; }
     // Asks the payload about one game, so a sheet's actions are right even
     // before the next look at every game (the payload does that sparingly).
     void check_on_console(int rom_id);
+    // A game kept as a folder of discs: the discs on the console, as the last
+    // check_on_console found them; nullptr before one, or for any other game.
+    const std::vector<int> *discs_here(int rom_id) const
+    {
+        const auto found = discs_here_.find(rom_id);
+        return found == discs_here_.end() ? nullptr : &found->second;
+    }
+    // Whether a disc of a game is on its way, alone or with the whole game.
+    bool disc_downloading(int rom_id, int disc) const;
     // A game's details; asks for them the first time.
     const Details &details(int rom_id);
     void refresh_installed();
@@ -296,10 +335,12 @@ class App
     float cover_aspect(const std::string &path, double *since = nullptr) const;
     double clock() const { return clock_; }
 
-    void download(int rom_id, const std::string &name);
+    // disc: one disc of a game kept as a folder of discs, 0 for all of it.
+    void download(int rom_id, const std::string &name, int disc = 0);
     void cancel_download(int job_id);
     void retry_download(int job_id);
-    void remove_game(int rom_id);
+    // quiet: no notification, one of several going together.
+    void remove_game(int rom_id, bool quiet = false);
     void clear_finished_queue();
     void sync_now();
 
@@ -374,6 +415,7 @@ class App
     std::vector<Download> queue_;
     std::vector<Game> installed_;
     std::unordered_set<int> on_console_; // installed_'s ids
+    std::unordered_map<int, std::vector<int>> discs_here_; // check_on_console's discs
     bool installed_known_ = false;
     double installed_sig_ = -1; // the payload's, from /api/status: changes when a game comes or goes
     std::unordered_map<int, Details> details_;

@@ -1082,6 +1082,37 @@ grep -q "^10 False  0$" <<<"$lib" || fail "a game with one version has no label:
 post /api/download '{"rom_id":13}' >/dev/null; sleep 1
 grep -q "systeminfo.txt isn't a game" "$T/daemon.log" || fail "a file that isn't a game was downloaded"
 [[ -z "$(find "$T" -name systeminfo.txt -not -path '*/data/*')" ]] || fail "systeminfo.txt reached an emulator's folder"
+# RommPS's picker lists the versions RomM can serve: EarthBound's other (id 99) isn't on it, which
+# leaves nothing to pick. A folder of discs lists them, each disc's .bin and .cue counted together.
+vers() { curl -sf "$API/api/roms/$1/details" | python3 -c "
+import json,sys
+print([(v['id'], v['label'], [(d['disc'], d['size']) for d in v.get('discs', [])])
+       for v in json.load(sys.stdin).get('version_list', [])])"; }
+[[ "$(vers 12)" == "[]" ]] || fail "one version left, nothing to pick: $(vers 12)"
+curl -sfk -X POST "$TM/_admin/rom" -d '{"id":71,"platform_id":1,"name":"Disc Game","fs_name":"Disc Game (USA)",
+  "files":[{"id":711,"file_name":"Disc Game (USA) (Disc 1).bin","content":"1111"},
+           {"id":712,"file_name":"Disc Game (USA) (Disc 1).cue","content":"11"},
+           {"id":713,"file_name":"Disc Game (USA) (Disc 2).bin","content":"222"},
+           {"id":714,"file_name":"Disc Game (USA).m3u","content":"m3u"}]}' >/dev/null
+[[ "$(vers 71)" == "[(71, '', [(1, 6), (2, 3)])]" ]] || fail "a folder's discs: $(vers 71)"
+# One disc of it comes down alone (with the .m3u no disc names); then the rest.
+discs_here() {
+  for _ in $(seq 1 40); do here=$(curl -sf "$API/api/roms/71/on_console"); [[ "$here" == *"\"discs\":$1"* ]] && return; sleep 0.25; done
+  fail "discs on the console: $here, wanted $1"
+}
+post /api/download '{"rom_id":71,"disc":2}' >/dev/null
+discs_here "[2]"
+[[ -n "$(find "$T" -name 'Disc Game (USA).m3u' -not -path '*/data/*')" ]] || fail "a disc comes with the folder's .m3u"
+[[ -z "$(find "$T" -name 'Disc Game (USA) (Disc 1).*' -not -path '*/data/*')" ]] || fail "only the disc asked for comes down"
+# The rest once that disc's download is over (its saves synced): the game can't come down twice at once.
+for _ in $(seq 1 40); do
+  curl -sf "$API/api/downloads" | python3 -c "
+import json,sys
+sys.exit(any(d.get('rom_id') == 71 and d['status'] not in ('done', 'error', 'cancelled') for d in json.load(sys.stdin)))" && break
+  sleep 0.25
+done
+post /api/download '{"rom_id":71}' >/dev/null
+discs_here "[1,2]"
 
 echo "21. one-file folder games: saves named after the file sync; old extensionless downloads are moved into the folder"
 curl -sfk -X POST "$TM/_admin/rom" -d '{"id":70,"platform_id":1,"name":"Folder Game","fs_name":"Folder Game",

@@ -967,6 +967,10 @@ void App::send_page(const std::string &key, int page)
                 game.archived = flag(g, "archived");
                 game.version = plain(str(g, "version"));
                 game.versions = static_cast<int>(num(g, "versions"));
+                game.siblings.clear();
+                const cJSON *s;
+                cJSON_ArrayForEach(s, cJSON_GetObjectItemCaseSensitive(g, "siblings"))
+                    game.siblings.push_back(s->valueint);
             }
             l.reindex();
             if (page < static_cast<int>(l.pages.size()))
@@ -1025,6 +1029,20 @@ const Details &App::details(int rom_id)
             out.addons.push_back(addon(a));
             out.bundle++;
         }
+        cJSON_ArrayForEach(a, cJSON_GetObjectItemCaseSensitive(j.get(), "version_list"))
+        {
+            Details::Version &v = out.versions.emplace_back();
+            v.id = static_cast<int>(num(a, "id"));
+            v.name = plain(str(a, "name"));
+            v.label = plain(str(a, "label"));
+            v.size = num(a, "size");
+            const cJSON *disc;
+            cJSON_ArrayForEach(disc, cJSON_GetObjectItemCaseSensitive(a, "discs"))
+                v.discs.push_back({static_cast<int>(num(disc, "disc")), num(disc, "size")});
+        }
+        // By name, so a game's discs come in order.
+        std::sort(out.versions.begin(), out.versions.end(),
+                  [](const Details::Version &a, const Details::Version &b) { return a.name < b.name; });
     });
     return d;
 }
@@ -1063,7 +1081,19 @@ void App::check_on_console(int rom_id)
     std::snprintf(path, sizeof path, "/api/roms/%d/on_console", rom_id);
     api_.get(path, [this, rom_id](const Response &r) {
         std::unique_ptr<cJSON, void (*)(cJSON *)> j(r.json(), cJSON_Delete);
-        if (!r.ok() || !j || !installed_known_) // an older payload doesn't know it
+        if (!r.ok() || !j) // an older payload doesn't know it
+            return;
+        const cJSON *discs = cJSON_GetObjectItemCaseSensitive(j.get(), "discs"), *disc;
+        if (cJSON_IsArray(discs))
+        {
+            std::vector<int> &here = discs_here_[rom_id];
+            here.clear();
+            cJSON_ArrayForEach(disc, discs)
+                here.push_back(disc->valueint);
+        }
+        else
+            discs_here_.erase(rom_id);
+        if (!installed_known_)
             return;
         const bool here = flag(j.get(), "installed");
         if (here == (on_console_.count(rom_id) > 0))
@@ -1130,6 +1160,7 @@ void App::refresh_queue()
             Download dl;
             dl.id = static_cast<int>(num(d, "id"));
             dl.rom_id = static_cast<int>(num(d, "rom_id"));
+            dl.disc = static_cast<int>(num(d, "disc"));
             dl.name = plain(str(d, "name"));
             dl.platform = plain(str(d, "platform"));
             dl.status = str(d, "status");
@@ -1174,6 +1205,23 @@ std::string Download::saves_note() const
     return got.empty() ? "" : got + " synced";
 }
 
+bool App::disc_downloading(int rom_id, int disc) const
+{
+    for (const Download &d : queue_)
+        if (d.rom_id == rom_id && (d.disc == 0 || d.disc == disc) && d.active())
+            return true;
+    return false;
+}
+
+const Download *App::download_for(int rom_id, int disc) const
+{
+    const Download *found = nullptr;
+    for (const Download &d : queue_)
+        if (d.rom_id == rom_id && d.disc == disc)
+            found = &d; // the newest one wins
+    return found;
+}
+
 const Download *App::download_for(int rom_id) const
 {
     const Download *found = nullptr;
@@ -1183,11 +1231,13 @@ const Download *App::download_for(int rom_id) const
     return found;
 }
 
-void App::download(int rom_id, const std::string &name)
+void App::download(int rom_id, const std::string &name, int disc)
 {
     // The name goes along, so the download shows it from the start.
     std::unique_ptr<cJSON, void (*)(cJSON *)> j(cJSON_CreateObject(), cJSON_Delete);
     cJSON_AddNumberToObject(j.get(), "rom_id", rom_id);
+    if (disc > 0)
+        cJSON_AddNumberToObject(j.get(), "disc", disc);
     cJSON_AddStringToObject(j.get(), "name", name.c_str());
     char *text = cJSON_PrintUnformatted(j.get());
     const std::string body = text ? text : "{}";
@@ -1230,17 +1280,18 @@ void App::retry_download(int job_id)
     });
 }
 
-void App::remove_game(int rom_id)
+void App::remove_game(int rom_id, bool quiet)
 {
     char body[64];
     std::snprintf(body, sizeof body, "{\"rom_id\":%d}", rom_id);
-    api_.post("/api/delete", body, [this](const Response &r) {
+    api_.post("/api/delete", body, [this, quiet](const Response &r) {
         if (!r.ok())
         {
             say("Couldn't remove the game: " + r.message());
             return;
         }
-        say("Game removed. Its saves are kept.");
+        if (!quiet)
+            say("Game removed. Its saves are kept.");
         refresh_lists();
         refresh_installed();
         refresh_queue();

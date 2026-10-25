@@ -218,6 +218,13 @@ void RowList::draw(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, const 
         if (two_lines)
             ui::text(list, fonts.regular, fonts.regular.font->fit(plain_text(row.detail.c_str()), 19, room), lx, label_y + 30, 19,
                      soft.with_alpha(dim));
+        if (row.progress >= 0.0f)
+        {
+            const Rect bar{x, y + kRowHeight - 14, right - x, 4};
+            list.rounded_rect(bar, 2, soft.with_alpha(0.25f));
+            list.rounded_rect({bar.x, bar.y, std::max(4.0f, bar.w * std::min(1.0f, row.progress)), bar.h}, 2,
+                              focused ? look.on_highlight : look.accent);
+        }
     }
     list.pop_clip();
 }

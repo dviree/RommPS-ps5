@@ -1330,6 +1330,8 @@ static void route(request *r) {
         }
         cJSON *j = cJSON_CreateObject();
         cJSON_AddBoolToObject(j, "installed", library_on_console(id));
+        cJSON *discs = library_discs_here(id);
+        if (discs) cJSON_AddItemToObject(j, "discs", discs);
         send_json(fd, 200, j);
         return;
     }
@@ -1362,7 +1364,8 @@ static void route(request *r) {
         cJSON *j = body_json(r);
         int rc;
         if (cJSON_GetObjectItemCaseSensitive(j, "rom_id"))
-            rc = library_queue_rom((int)jget_num(j, "rom_id", 0), jget_str(j, "name", ""), jget_str(j, "cover", ""), err, sizeof err);
+            rc = library_queue_rom((int)jget_num(j, "rom_id", 0), (int)jget_num(j, "disc", 0), jget_str(j, "name", ""),
+                                   jget_str(j, "cover", ""), err, sizeof err);
         else
             rc = library_queue_firmware((int)jget_num(j, "platform_id", 0), err, sizeof err);
         cJSON_Delete(j);

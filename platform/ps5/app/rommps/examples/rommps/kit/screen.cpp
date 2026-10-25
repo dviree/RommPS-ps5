@@ -300,6 +300,8 @@ class RommPS final : public app::Concept
             list.rounded_rect({0, 0, gfx::kVirtualWidth, gfx::kVirtualHeight}, 0, L.page.with_alpha(0.45f * back));
             frame.glass = true;
             draw_sheet(frame.overlay, frame.glass_texture);
+            if (versions_open_)
+                draw_versions(frame.overlay);
         }
         if (settings_.call().active())
         {
@@ -422,6 +424,7 @@ class RommPS final : public app::Concept
         app_.check_on_console(g.id);
         sheet_open_ = true;
         addons_open_ = false;
+        versions_open_ = false;
         remove_hold_ = -1; // a hold from before doesn't carry over
         action_ = 0;
         action_position_.snap(0.0f);
@@ -440,7 +443,7 @@ class RommPS final : public app::Concept
     {
         std::string label;
         bool enabled;
-        int kind; // 0 download, 1 cancel, 3 remove, 4 saves and states, 5 updates and DLC (Circle closes the sheet)
+        int kind; // 0 download, 1 cancel, 3 remove, 4 saves and states, 5 updates and DLC, 6 versions (Circle closes the sheet)
     };
 
     std::vector<SheetAction> sheet_actions() const
@@ -448,9 +451,17 @@ class RommPS final : public app::Concept
         std::vector<SheetAction> actions;
         const rommps::Game *g = &sheet_game_;
         const rommps::Platform *p = app_.platform_by_id(sheet_game_.platform_id);
-        const rommps::Download *d = g ? app_.download_for(g->id) : nullptr;
+        const rommps::Download *d = g ? version_download() : nullptr;
         const rommps::Details &info = app_.details(sheet_game_.id);
-        if (d && d->syncing())
+        if (!info.versions.empty() && !(p && p->profile.empty()))
+        {
+            // Every version of the game, in a list of its own, which shows
+            // (and cancels) what's downloading too, so another can be picked.
+            actions.push_back({"Download", true, 6});
+            if (version_on_console())
+                actions.push_back({"Saves and states", true, 4});
+        }
+        else if (d && d->syncing())
             actions.push_back({"Syncing saves", false, 0});
         else if (d && d->active())
             actions.push_back({"Hold to cancel download", true, 1});
@@ -471,6 +482,44 @@ class RommPS final : public app::Concept
                                    std::to_string(info.addons.size()) + ")",
                                true, 5});
         return actions;
+    }
+
+    // A download of the sheet's game, whichever of its versions it is.
+    const rommps::Download *version_download() const
+    {
+        if (const rommps::Download *d = app_.download_for(sheet_game_.id))
+            return d;
+        for (const rommps::Details::Version &v : app_.details(sheet_game_.id).versions)
+            if (const rommps::Download *d = app_.download_for(v.id))
+                return d;
+        return nullptr;
+    }
+
+    // How far the sheet's game's downloads are, every version's together; -1
+    // when none is going.
+    float download_progress() const
+    {
+        std::vector<int> ids{sheet_game_.id};
+        for (const rommps::Details::Version &v : app_.details(sheet_game_.id).versions)
+            ids.push_back(v.id);
+        double done = 0, total = 0;
+        bool any = false;
+        for (const rommps::Download &d : app_.queue())
+            if (d.active() && std::find(ids.begin(), ids.end(), d.rom_id) != ids.end())
+                any = true, done += d.done, total += d.total;
+        return !any ? -1.0f : total > 0 ? static_cast<float>(done / total) : 0.0f;
+    }
+
+    // The version of the sheet's game that's on the console (its saves are
+    // that one's), else 0.
+    int version_on_console() const
+    {
+        if (app_.on_console(sheet_game_.id))
+            return sheet_game_.id;
+        for (const rommps::Details::Version &v : app_.details(sheet_game_.id).versions)
+            if (app_.on_console(v.id))
+                return v.id;
+        return 0;
     }
 
     // Cancelling a download deletes what came so far, so it takes holding
@@ -513,7 +562,8 @@ class RommPS final : public app::Concept
         return job_id && job_id == cancel_job_ && cancel_hold_ > 0 ? std::min(1.0f, cancel_hold_ / kCancelHold) : 0.0f;
     }
 
-    bool hold_to_remove(const InputFrame &input, float dt, app::Feedback &feedback)
+    // rom_ids: the game, or every disc of a set; one notification for them all.
+    bool hold_to_remove(const InputFrame &input, float dt, app::Feedback &feedback, const std::vector<int> &rom_ids)
     {
         if (!input.is_held(Action::confirm))
         {
@@ -535,7 +585,8 @@ class RommPS final : public app::Concept
         if (remove_hold_ < kCancelHold)
             return false;
 
-        app_.remove_game(sheet_game_.id);
+        for (std::size_t i = 0; i < rom_ids.size(); ++i)
+            app_.remove_game(rom_ids[i], i + 1 < rom_ids.size());
         feedback.play(audio::Cue::back);
         feedback.rumble(0.8f, 0.2f);
         remove_hold_ = -1;
@@ -547,6 +598,11 @@ class RommPS final : public app::Concept
 
     void update_sheet(const InputFrame &input, float dt, app::Feedback &feedback)
     {
+        if (versions_open_)
+        {
+            update_versions(input, dt, feedback);
+            return;
+        }
         if (addons_open_)
         {
             const int n = static_cast<int>(app_.details(sheet_game_.id).addons.size());
@@ -592,12 +648,12 @@ class RommPS final : public app::Concept
             remove_hold_ = -1;
         if (actions[static_cast<std::size_t>(action_)].kind == 1)
         {
-            if (hold_to_cancel(input, dt, app_.download_for(sheet_game_.id), feedback))
+            if (hold_to_cancel(input, dt, version_download(), feedback))
                 sheet_open_ = false;
         }
         else if (actions[static_cast<std::size_t>(action_)].kind == 3)
         {
-            if (hold_to_remove(input, dt, feedback))
+            if (hold_to_remove(input, dt, feedback, {sheet_game_.id}))
                 sheet_open_ = false;
         }
         else if (input.is_pressed(Action::confirm))
@@ -617,13 +673,22 @@ class RommPS final : public app::Concept
             {
                 feedback.play(audio::Cue::select);
                 sheet_open_ = false;
-                view_.open(app_, rommps::SyncView::kGame, g->id, g->name);
+                const int id = version_on_console();
+                view_.open(app_, rommps::SyncView::kGame, id ? id : g->id, g->name);
             }
             else if (a.kind == 5)
             {
                 feedback.play(audio::Cue::modal_open);
                 addons_open_ = true;
                 addons_top_ = 0;
+            }
+            else if (a.kind == 6)
+            {
+                feedback.play(audio::Cue::modal_open);
+                versions_open_ = true;
+                versions_list_.set_focus(0);
+                check_versions();
+                remove_hold_ = -1;
             }
             else
             {
@@ -635,6 +700,232 @@ class RommPS final : public app::Concept
         {
             feedback.play(audio::Cue::back);
             sheet_open_ = false;
+        }
+    }
+
+    // ---------------------------------------------------------------- a game's versions
+
+    // Rows of a game's versions that fit the picker at once.
+    static constexpr int kVersionRows = 4;
+
+    // A picker row and what Cross does on it: hold to cancel job while it
+    // downloads; hold to remove ids (every one of them together, a set of
+    // discs) once here is set; else download fetch, alone or as one disc of a
+    // folder.
+    struct VersionRow
+    {
+        rommps::Row row;
+        std::vector<int> ids, fetch;
+        int disc = 0, job = 0;
+        bool here = false;
+    };
+
+    // The disc a version's name says ("Parasite Eve (USA) (Disc 2)" is 2),
+    // and the name without it, which the set's other discs share; 0 if none.
+    static int disc_of(const std::string &name, std::string &set)
+    {
+        const std::size_t at = name.find("(Disc ");
+        const int disc = at == std::string::npos ? 0 : std::atoi(name.c_str() + at + 6);
+        if (disc <= 0)
+            return 0;
+        const std::size_t end = name.find(')', at);
+        set = name.substr(0, at) + (end == std::string::npos ? "" : name.substr(end + 1));
+        for (std::size_t twice; (twice = set.find("  ")) != std::string::npos;)
+            set.erase(twice, 1);
+        while (!set.empty() && set.back() == ' ')
+            set.pop_back();
+        return disc;
+    }
+
+    // Whether a folder of discs has disc on the console. Before the payload
+    // says (or one that can't), the folder being here counts for all of them.
+    bool disc_here(const rommps::Details::Version &v, int disc) const
+    {
+        const std::vector<int> *here = app_.discs_here(v.id);
+        return here ? std::find(here->begin(), here->end(), disc) != here->end() : app_.on_console(v.id);
+    }
+
+    // Every version, by name. A set of discs RomM keeps as games of their own
+    // gets a row first, for all of them; a folder of discs lists its discs,
+    // each one downloadable, the folder's row fetching the rest.
+    std::vector<VersionRow> version_rows() const
+    {
+        std::vector<VersionRow> out;
+        const std::vector<rommps::Details::Version> &versions = app_.details(sheet_game_.id).versions;
+        // busy: something of it downloads; d: its own download, with a bar.
+        const auto fill = [&](VersionRow &r, bool busy, const rommps::Download *d, bool all) {
+            const bool focused = static_cast<int>(out.size()) == versions_list_.focus();
+            const bool removable = r.here && !r.disc; // a single disc doesn't come off on its own
+            if (d && d->active())
+            {
+                busy = true;
+                r.job = d->cancellable() ? d->id : 0;
+                r.row.progress = d->progress();
+            }
+            r.row.value = busy ? (focused && r.job ? "Hold to cancel" : d && d->syncing() ? "Syncing saves" : "Downloading")
+                          : removable ? (focused ? "Hold to remove" : "Downloaded")
+                          : r.here    ? "Downloaded"
+                          : all       ? "Download all"
+                                      : "Download";
+            r.row.danger = removable && focused;
+            r.row.enabled = !(r.here && r.disc);
+            if (busy || r.here)
+                r.fetch.clear();
+        };
+        for (std::size_t i = 0; i < versions.size(); ++i)
+        {
+            const rommps::Details::Version &v = versions[i];
+            std::string set, other;
+            // The first disc of a set: the set's row, when there's more than one.
+            if (disc_of(v.name, set) && (i == 0 || disc_of(versions[i - 1].name, other) == 0 || other != set))
+            {
+                VersionRow all;
+                double size = 0, done = 0, total = 0;
+                bool busy = false;
+                all.here = true;
+                for (std::size_t j = i; j < versions.size() && disc_of(versions[j].name, other) && other == set; ++j)
+                {
+                    const int id = versions[j].id;
+                    all.ids.push_back(id);
+                    if (!app_.on_console(id))
+                        all.fetch.push_back(id), all.here = false;
+                    if (const rommps::Download *d = app_.download_for(id); d && d->active())
+                        busy = true, done += d->done, total += d->total;
+                    size += versions[j].size;
+                }
+                if (all.ids.size() > 1)
+                {
+                    all.row.label = set;
+                    all.row.detail = std::to_string(all.ids.size()) + " discs  \xC2\xB7  " + rommps::human_size(size);
+                    if (busy) // every disc's download together
+                        all.row.progress = total > 0 ? static_cast<float>(done / total) : 0.0f;
+                    fill(all, busy, nullptr, true);
+                    out.push_back(std::move(all));
+                }
+            }
+            VersionRow r;
+            r.ids = r.fetch = {v.id};
+            r.here = app_.on_console(v.id);
+            for (const rommps::Details::Version::Disc &d : v.discs)
+                r.here = r.here && disc_here(v, d.disc);
+            r.row.label = v.name;
+            r.row.detail = rommps::human_size(v.size) + (v.label.empty() ? "" : "  \xC2\xB7  " + v.label) +
+                           (v.discs.empty() ? "" : "  \xC2\xB7  " + std::to_string(v.discs.size()) + " discs");
+            fill(r, false, app_.download_for(v.id, 0), !v.discs.empty());
+            out.push_back(std::move(r));
+            for (const rommps::Details::Version::Disc &d : v.discs)
+            {
+                VersionRow disc;
+                disc.ids = disc.fetch = {v.id};
+                disc.disc = d.disc;
+                disc.here = disc_here(v, d.disc);
+                disc.row.label = "    Disc " + std::to_string(d.disc);
+                disc.row.detail = rommps::human_size(d.size);
+                fill(disc, app_.disc_downloading(v.id, d.disc), app_.download_for(v.id, d.disc), false);
+                out.push_back(std::move(disc));
+            }
+        }
+        return out;
+    }
+
+    static std::vector<rommps::Row> rows_of(const std::vector<VersionRow> &picker)
+    {
+        std::vector<rommps::Row> rows;
+        for (const VersionRow &r : picker)
+            rows.push_back(r.row);
+        return rows;
+    }
+
+    // Asks which discs of each folder of discs are on the console, for the
+    // picker's rows.
+    void check_versions()
+    {
+        for (const rommps::Details::Version &v : app_.details(sheet_game_.id).versions)
+            if (!v.discs.empty())
+                app_.check_on_console(v.id);
+    }
+
+    // Cross downloads a version, a set of discs or a disc; what's on the
+    // console comes off with a hold, like the sheet's own button.
+    void update_versions(const InputFrame &input, float dt, app::Feedback &feedback)
+    {
+        const std::vector<VersionRow> picker = version_rows();
+        const std::vector<rommps::Row> rows = rows_of(picker);
+        const int before = versions_list_.focus();
+        const rommps::RowEvent pick = versions_list_.handle(rows, input, feedback);
+        versions_list_.update(dt, static_cast<int>(rows.size()), kVersionRows * rommps::RowList::kRowHeight);
+        if (input.is_pressed(Action::back))
+        {
+            feedback.play(audio::Cue::back);
+            versions_open_ = false;
+            return;
+        }
+        const int focus = versions_list_.focus();
+        if (focus != before || focus >= static_cast<int>(picker.size()))
+        {
+            remove_hold_ = -1; // a hold doesn't carry over to another row
+            return;
+        }
+        const VersionRow &row = picker[static_cast<std::size_t>(focus)];
+        if (row.job)
+        {
+            const rommps::Download *job = nullptr;
+            for (const rommps::Download &d : app_.queue())
+                if (d.id == row.job)
+                    job = &d;
+            hold_to_cancel(input, dt, job, feedback);
+        }
+        else if (row.here && !row.disc)
+            hold_to_remove(input, dt, feedback, row.ids); // the row turns back to Download
+        else if (pick.activated && !row.fetch.empty())
+        {
+            for (const rommps::Details::Version &v : app_.details(sheet_game_.id).versions)
+                if (std::find(row.fetch.begin(), row.fetch.end(), v.id) != row.fetch.end())
+                    app_.download(v.id,
+                                  sheet_game_.name + (v.label.empty() ? "" : " (" + v.label + ")") +
+                                      (row.disc ? " (Disc " + std::to_string(row.disc) + ")" : ""),
+                                  row.disc);
+            // The picker stays: another disc or version can follow, and
+            // the row shows this one coming down.
+            feedback.play(audio::Cue::launch);
+            feedback.rumble(0.7f, 0.18f);
+        }
+    }
+
+    void draw_versions(gfx::DrawList &list) const
+    {
+        const rommps::Look &L = look();
+        const ui::Fonts &fonts = context_.fonts;
+        const std::vector<rommps::Row> rows = rows_of(version_rows());
+        const float rows_h = static_cast<float>(std::min<int>(static_cast<int>(rows.size()), kVersionRows)) *
+                             rommps::RowList::kRowHeight;
+        const Rect box{360, 540 - (rows_h + 220) / 2, 1200, rows_h + 220};
+        list.rounded_rect({0, 0, gfx::kVirtualWidth, gfx::kVirtualHeight}, 0, Color::rgb(0x000000, 0.55f));
+        Color solid = L.page; // nothing shows through the panel
+        solid.a = 1.0f;
+        list.rounded_rect(box, L.radius, solid);
+        draw_panel(list, box);
+        ui::text(list, fonts.display, fonts.display.font->fit(sheet_game_.name, 40, box.w - 96), box.x + 48, box.y + 84,
+                 40, L.panel_text);
+        const std::vector<rommps::Details::Version> &versions = app_.details(sheet_game_.id).versions;
+        const std::string what = versions.size() > 1 ? std::to_string(versions.size()) + " versions"
+                                 : versions.empty()  ? std::string()
+                                                     : std::to_string(versions[0].discs.size()) + " discs";
+        ui::text(list, fonts.regular, what, box.x + 48, box.y + 128, 24, L.muted);
+        versions_list_.draw(list, fonts, L, rows, {box.x + 16, box.y + 160, box.w - 32, rows_h}, clock_);
+        // Cross held to remove what's on the console, or to cancel a
+        // download: the bar fills, then it's done.
+        const std::vector<VersionRow> picker = version_rows();
+        const int focus = versions_list_.focus();
+        const float hold = remove_hold_ > 0 ? std::min(1.0f, remove_hold_ / kCancelHold)
+                           : focus < static_cast<int>(picker.size())
+                               ? cancel_progress(picker[static_cast<std::size_t>(focus)].job)
+                               : 0.0f;
+        if (hold > 0)
+        {
+            const Rect bar{box.x + 48, box.y + box.h - 40, box.w - 96, 8};
+            list.rounded_rect(bar, 4, L.outline);
+            list.rounded_rect({bar.x, bar.y, bar.w * hold, bar.h}, 4, L.danger);
         }
     }
 
@@ -1156,13 +1447,17 @@ class RommPS final : public app::Concept
         const float x = space.x + space.w + 56;
         ui::text(list, fonts.semibold, ui::upper(p ? p->name : ""), x, sheet.y + 100, 20, acc, gfx::Align::left, 4.0f);
         float y = ui::paragraph(list, fonts.display, g->name, x - 2, sheet.y + 170, 54, 640, 62, L.panel_text, 2) - 10;
-        if (g->versions > 1)
+        const rommps::Details &info = app_.details(g->id);
+        // What there is to pick from, once the details say (RomM's count
+        // includes versions whose files are gone), else RomM's count.
+        const int versions = info.loaded ? static_cast<int>(info.versions.size()) : g->versions;
+        const int discs = info.versions.size() == 1 ? static_cast<int>(info.versions[0].discs.size()) : 0;
+        if (versions > 1 || discs > 1)
         {
-            const std::string v = g->version + "  \xC2\xB7  1 of " + std::to_string(g->versions) + " versions";
-            ui::text(list, fonts.semibold, fonts.semibold.font->fit(v, 22, 660), x, y, 22, L.panel_text.with_alpha(0.7f));
+            const std::string v = versions > 1 ? std::to_string(versions) + " versions" : std::to_string(discs) + " discs";
+            ui::text(list, fonts.semibold, v, x, y, 22, L.panel_text.with_alpha(0.7f));
             y += 42;
         }
-        const rommps::Details &info = app_.details(g->id);
         // A Switch game's title id, as a tag: what to look for in ProsperoEden.
         if (!info.title_id.empty())
         {
@@ -1304,13 +1599,26 @@ class RommPS final : public app::Concept
                 list.bordered_rect({ax, y, 460, 72}, 36, L.panel_text.with_alpha(0.06f), 1.5f, L.outline);
             const SheetAction &a = actions[static_cast<std::size_t>(i)];
             if (a.kind == 1 && focused)
-                if (const rommps::Download *d = app_.download_for(g->id))
+                if (const rommps::Download *d = version_download())
                     if (const float hold = cancel_progress(d->id); hold > 0)
                         list.rounded_rect({ax, y, std::max(72.0f, 460 * hold), 72}, 36, L.danger.with_alpha(0.85f));
             if (a.kind == 3 && focused && remove_hold_ > 0)
                 list.rounded_rect({ax, y, std::max(72.0f, 460 * std::min(1.0f, remove_hold_ / kCancelHold)), 72}, 36, L.danger.with_alpha(0.85f));
-            ui::text(list, fonts.semibold, context_.fonts.semibold.font->fit(a.label, 26, 400), ax + 36, y + 46, 26,
-                     (focused ? L.on_highlight : L.panel_text).with_alpha(a.enabled ? 1.0f : 0.5f));
+            const Color ink = (focused ? L.on_highlight : L.panel_text).with_alpha(a.enabled ? 1.0f : 0.5f);
+            // The game downloading: a slim bar along the button's foot.
+            if (const float done = a.kind == 1 || a.kind == 6 ? download_progress() : -1.0f; done >= 0.0f)
+            {
+                const Rect bar{ax + 36, y + 58, 460 - 72, 4};
+                list.rounded_rect(bar, 2, ink.with_alpha(0.2f));
+                list.rounded_rect({bar.x, bar.y, std::max(4.0f, bar.w * done), bar.h}, 2, focused ? L.on_highlight : L.accent);
+            }
+            float label_x = ax + 36;
+            if (a.kind == 6) // opens a list: a caret before the label
+            {
+                list.triangle({label_x, y + 31, 16, 10}, ink, 0.0f, 3.14159f);
+                label_x += 30;
+            }
+            ui::text(list, fonts.semibold, context_.fonts.semibold.font->fit(a.label, 26, 400), label_x, y + 46, 26, ink);
         }
     }
 
@@ -1442,6 +1750,8 @@ class RommPS final : public app::Concept
     bool sheet_open_ = false;
     bool addons_open_ = false; // the sheet lists the game's update and DLC
     int addons_top_ = 0;       // the first of them shown
+    bool versions_open_ = false; // the sheet's game's versions, in a list over it
+    rommps::RowList versions_list_;
     tween::Spring sheet_;
     int action_ = 0;
     tween::Spring action_position_;

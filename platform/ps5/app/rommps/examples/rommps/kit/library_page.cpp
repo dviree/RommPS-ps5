@@ -242,10 +242,11 @@ void draw_badge(hui::gfx::DrawList &list, const Look &look, App &app, const Game
 void draw_version(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, const Look &, const Game *g,
                   const Rect &rect)
 {
-    if (!g || g->version.empty())
+    if (!g || g->versions < 2)
         return;
     const float size = rect.w > 160 ? 17.0f : 15.0f, pad = 10;
-    const std::string text = fonts.semibold.font->fit(g->version, size, rect.w - 24 - 2 * pad);
+    const std::string text =
+        fonts.semibold.font->fit(std::to_string(g->versions) + " versions", size, rect.w - 24 - 2 * pad);
     const float w = fonts.semibold.font->measure(text, size) + 2 * pad;
     const Rect tag{rect.x + 12, rect.y + rect.h - size - 30, w, size + 14};
     list.rounded_rect(tag, tag.h * 0.5f, Color::rgb(0x0b0d16, 0.78f));
@@ -718,7 +719,7 @@ void LibraryPage::draw_grid(hui::gfx::DrawList &list, const hui::ui::Fonts &font
                  60, look.text);
         std::string meta = human_size(g->size);
         if (g->versions > 1)
-            meta = g->version + ", 1 of " + std::to_string(g->versions) + " versions  \xC2\xB7  " + meta;
+            meta = std::to_string(g->versions) + " versions  \xC2\xB7  " + meta;
         if (!grid_search_.empty() || !own)
             meta += "  \xC2\xB7  " + (p ? p->name : std::string());
         meta += "  \xC2\xB7  " + (p && !p->profile.empty() ? p->profile : std::string("No emulator"));

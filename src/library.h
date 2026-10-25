@@ -32,9 +32,13 @@ cJSON *library_installed(int limit);
 unsigned library_installed_sig(void);
 /* Whether a game is on the console now (RommPS asks as its sheet opens). */
 int library_on_console(int rom_id);
+/* A game kept as a folder of discs: the discs on the console now, [1, 3];
+ * NULL for any other game. */
+cJSON *library_discs_here(int rom_id);
 
-/* name: the name the client shows; cover: its copy of RomM's path_cover_small. */
-int library_queue_rom(int rom_id, const char *name, const char *cover, char *err, int en);
+/* disc: one disc of a game kept as a folder of discs, 0 for all of it.
+ * name: the name the client shows; cover: its copy of RomM's path_cover_small. */
+int library_queue_rom(int rom_id, int disc, const char *name, const char *cover, char *err, int en);
 int library_queue_firmware(int platform_id, char *err, int en);
 int library_cancel(int id, char *err, int en);
 /* A failed or cancelled download, queued again. 0, or -1 with err set. */
