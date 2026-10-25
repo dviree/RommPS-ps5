@@ -129,6 +129,12 @@ static int appid_cb(pid_t pid, const char *tdname, void *vctx) {
 }
 
 /* The big app's id, then the process that carries it (sdk samples/ps). */
+/* The PS4 has no toasts of its own style: the plain notification it is. */
+int console_toast(const char *message) {
+    (void)message;
+    return -1;
+}
+
 struct alive_ctx { const char *title; int found; };
 
 static int alive_cb(pid_t pid, const char *tdname, void *vctx) {

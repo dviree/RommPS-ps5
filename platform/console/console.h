@@ -16,6 +16,11 @@
 
 int console_mkdir_p(const char *path);
 
+/* A notification in the console's own style, where it has one (the PS5's
+ * toasts, with RommPS's icon): 0 if shown, else -1 and plat_notify falls back
+ * to the plain one. Runs on plat_notify's thread. */
+int console_toast(const char *message);
+
 /* Visits every process. cb returns nonzero to stop; that value is returned,
  * or -1 if the list can't be read. */
 typedef int (*console_proc_cb)(pid_t pid, const char *tdname, void *ctx);

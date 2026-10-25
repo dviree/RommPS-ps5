@@ -6,8 +6,12 @@
  * against SceSystemService and SceAppInstUtil. */
 #include "platform.h"
 #include "emulators_json.h" /* generated from platform/ps5/emulators.json */
+#include "rommps_icon.h"    /* platform/ps5/app/rommps/ps5/sce_sys/icon0.png */
 
+#include <dlfcn.h>
 #include <pthread.h>
+#include <stdbool.h>
+#include <time.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -19,6 +23,7 @@
 
 #include <ps5/kernel.h>
 
+#include "cJSON.h"
 #include "console.h"
 #include "ps5.h"
 #include "util.h" /* APP_VERSION */
@@ -144,6 +149,78 @@ static int appid_cb(pid_t pid, const char *tdname, void *vctx) {
     (void)tdname;
     if (ps5_proc_app(pid, c->title_id, &app_id) || (int)app_id != c->app_id) return 0;
     return 1;
+}
+
+/* ---- Toasts in the PS5's own style ----
+ * sceNotificationSend takes the toast as JSON (the SDK's samples/notify): an
+ * icon, a line in bold and one under it. Apps can't load its library (PS5SX2
+ * found it refused on 11.40 and 12.00), but a payload from the ELF loader runs
+ * in a system process, where it loads. Loaded when first needed, so a console
+ * without it still gets the plain notification. */
+#define TOAST_USER_SYSTEM 0xFE
+#define TOAST_ICON CONSOLE_DATA_DIR "/icon.png"
+typedef int (*notification_send_fn)(int user_id, bool logged, const char *json);
+static notification_send_fn g_toast_send;
+static pthread_once_t g_toast_once = PTHREAD_ONCE_INIT;
+
+static void toast_load(void) {
+    void *lib = dlopen("libSceNotification.sprx", RTLD_LAZY);
+    g_toast_send = lib ? (notification_send_fn)dlsym(lib, "sceNotificationSend") : NULL;
+    if (!g_toast_send) LOGW("notifications: libSceNotification isn't there (%s), the plain ones it is", lib ? "no sceNotificationSend" : "dlopen failed");
+}
+
+/* RommPS's icon, written beside the payload's data for the shell to read. */
+static const char *toast_icon(void) {
+    const size_t len = sizeof ROMMPS_ICON_PNG - 1;
+    struct stat st;
+    if (stat(TOAST_ICON, &st) == 0 && (size_t)st.st_size == len) return TOAST_ICON;
+    return write_file_atomic(TOAST_ICON, ROMMPS_ICON_PNG, len) == 0 ? TOAST_ICON : NULL;
+}
+
+int console_toast(const char *message) {
+    pthread_once(&g_toast_once, toast_load);
+    if (!g_toast_send) return -1;
+    /* "RommPS: 2 saves up\nOkami, Rez": the first line in bold, without the
+     * name the icon already gives; the second under it, else the name. */
+    char text[1024], *sub;
+    const char *start = strncmp(message, "RommPS: ", 8) ? message : message + 8;
+    str_copy(text, sizeof text, start);
+    if ((sub = strchr(text, '\n'))) *sub++ = 0;
+    if (!sub || !*sub) sub = "RommPS";
+    static unsigned serial;
+    char created[32], id[24];
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    struct tm tm;
+    gmtime_r(&ts.tv_sec, &tm);
+    snprintf(created, sizeof created, "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+             tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec / 1000000);
+    snprintf(id, sizeof id, "%u", (unsigned)(ts.tv_sec % 100000000) * 10 + (serial++ % 10));
+
+    cJSON *root = cJSON_CreateObject(), *raw = cJSON_AddObjectToObject(root, "rawData");
+    cJSON_AddStringToObject(raw, "viewTemplateType", "InteractiveToastTemplateB");
+    cJSON_AddStringToObject(raw, "channelType", "Downloads");
+    cJSON_AddStringToObject(raw, "useCaseId", "IDC");
+    cJSON_AddStringToObject(raw, "toastOverwriteType", "No");
+    cJSON_AddBoolToObject(raw, "isImmediate", 1);
+    cJSON_AddNumberToObject(raw, "priority", 100);
+    cJSON *view = cJSON_AddObjectToObject(raw, "viewData");
+    const char *icon = toast_icon();
+    if (icon) {
+        cJSON *i = cJSON_AddObjectToObject(view, "icon");
+        cJSON_AddStringToObject(i, "type", "Url");
+        cJSON_AddStringToObject(cJSON_AddObjectToObject(i, "parameters"), "url", icon);
+    }
+    cJSON_AddStringToObject(cJSON_AddObjectToObject(view, "message"), "body", text);
+    cJSON_AddStringToObject(cJSON_AddObjectToObject(view, "subMessage"), "body", sub);
+    cJSON_AddStringToObject(root, "createdDateTime", created);
+    cJSON_AddStringToObject(root, "localNotificationId", id);
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    const int rc = json ? g_toast_send(TOAST_USER_SYSTEM, true, json) : -1;
+    free(json);
+    if (rc < 0) LOGW("notifications: sceNotificationSend said 0x%08x", (unsigned)rc);
+    return rc < 0 ? -1 : 0;
 }
 
 struct alive_ctx { const char *title; int found; };
