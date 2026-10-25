@@ -6,7 +6,6 @@
  * against SceSystemService and SceAppInstUtil. */
 #include "platform.h"
 #include "emulators_json.h" /* generated from platform/ps5/emulators.json */
-#include "rommps_icon.h"    /* platform/ps5/app/rommps/ps5/sce_sys/icon0.png */
 
 #include <dlfcn.h>
 #include <pthread.h>
@@ -158,7 +157,7 @@ static int appid_cb(pid_t pid, const char *tdname, void *vctx) {
  * in a system process, where it loads. Loaded when first needed, so a console
  * without it still gets the plain notification. */
 #define TOAST_USER_SYSTEM 0xFE
-#define TOAST_ICON CONSOLE_DATA_DIR "/icon.png"
+#define TOAST_ICON "/user/appmeta/" ROMMPS_ID "/icon0.png"
 typedef int (*notification_send_fn)(int user_id, bool logged, const char *json);
 static notification_send_fn g_toast_send;
 static pthread_once_t g_toast_once = PTHREAD_ONCE_INIT;
@@ -169,24 +168,23 @@ static void toast_load(void) {
     if (!g_toast_send) LOGW("notifications: libSceNotification isn't there (%s), the plain ones it is", lib ? "no sceNotificationSend" : "dlopen failed");
 }
 
-/* RommPS's icon, written beside the payload's data for the shell to read. */
+/* RommPS's icon, from the app's home screen copy: the shell reads that one. */
 static const char *toast_icon(void) {
-    const size_t len = sizeof ROMMPS_ICON_PNG - 1;
     struct stat st;
-    if (stat(TOAST_ICON, &st) == 0 && (size_t)st.st_size == len) return TOAST_ICON;
-    return write_file_atomic(TOAST_ICON, ROMMPS_ICON_PNG, len) == 0 ? TOAST_ICON : NULL;
+    return stat(TOAST_ICON, &st) == 0 ? TOAST_ICON : NULL;
 }
 
 int console_toast(const char *message) {
     pthread_once(&g_toast_once, toast_load);
     if (!g_toast_send) return -1;
-    /* "RommPS: 2 saves up\nOkami, Rez": the first line in bold, without the
-     * name the icon already gives; the second under it, else the name. */
+    /* "RommPS: couldn't sync\nCheck your connection": the first line is the
+     * point, in bold, without the name the icon already gives; the second is
+     * the context, which the toast draws small above it. */
     char text[1024], *sub;
     const char *start = strncmp(message, "RommPS: ", 8) ? message : message + 8;
     str_copy(text, sizeof text, start);
     if ((sub = strchr(text, '\n'))) *sub++ = 0;
-    if (!sub || !*sub) sub = "RommPS";
+    if (text[0] >= 'a' && text[0] <= 'z') text[0] -= 32;
     static unsigned serial;
     char created[32], id[24];
     struct timespec ts;
@@ -206,13 +204,22 @@ int console_toast(const char *message) {
     cJSON_AddNumberToObject(raw, "priority", 100);
     cJSON *view = cJSON_AddObjectToObject(raw, "viewData");
     const char *icon = toast_icon();
+    cJSON *i = cJSON_AddObjectToObject(view, "icon");
     if (icon) {
-        cJSON *i = cJSON_AddObjectToObject(view, "icon");
         cJSON_AddStringToObject(i, "type", "Url");
         cJSON_AddStringToObject(cJSON_AddObjectToObject(i, "parameters"), "url", icon);
+    } else {
+        cJSON_AddStringToObject(i, "type", "Predefined");
+        cJSON_AddStringToObject(cJSON_AddObjectToObject(i, "parameters"), "icon", "download");
     }
     cJSON_AddStringToObject(cJSON_AddObjectToObject(view, "message"), "body", text);
-    cJSON_AddStringToObject(cJSON_AddObjectToObject(view, "subMessage"), "body", sub);
+    if (sub && *sub) cJSON_AddStringToObject(cJSON_AddObjectToObject(view, "subMessage"), "body", sub);
+    /* The view the shell uses when notification previews are off (the SDK's notify sample sends one). */
+    cJSON *plain = cJSON_AddObjectToObject(cJSON_AddObjectToObject(cJSON_AddObjectToObject(raw, "platformViews"), "previewDisabled"), "viewData");
+    cJSON *plain_icon = cJSON_AddObjectToObject(plain, "icon");
+    cJSON_AddStringToObject(plain_icon, "type", "Predefined");
+    cJSON_AddStringToObject(cJSON_AddObjectToObject(plain_icon, "parameters"), "icon", "download");
+    cJSON_AddStringToObject(cJSON_AddObjectToObject(plain, "message"), "body", text);
     cJSON_AddStringToObject(root, "createdDateTime", created);
     cJSON_AddStringToObject(root, "localNotificationId", id);
     char *json = cJSON_PrintUnformatted(root);

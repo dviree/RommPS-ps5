@@ -449,6 +449,26 @@ App::App() : api_("127.0.0.1", payload_port())
 
 void App::say(const std::string &message)
 {
+    // The console's own notification, through RomM Sync (an app can't send
+    // one): "Couldn't cancel: <why>" shows "Couldn't cancel" in bold with the
+    // reason above it. Drawn in the app when RomM Sync can't be reached.
+    if (status_.reachable)
+    {
+        std::string text = message;
+        if (const std::size_t colon = text.find(": "); colon != std::string::npos)
+            text.replace(colon, 2, "\n");
+        std::unique_ptr<cJSON, void (*)(cJSON *)> body(cJSON_CreateObject(), cJSON_Delete);
+        cJSON_AddStringToObject(body.get(), "message", text.c_str());
+        char *json = cJSON_PrintUnformatted(body.get());
+        api_.post("/api/notify", json ? json : "{}", [this, message](const Response &r) {
+            if (r.ok())
+                return;
+            toast_ = plain(message.c_str()); // an older RomM Sync, or it just stopped
+            toast_age_ = 0;
+        });
+        cJSON_free(json);
+        return;
+    }
     toast_ = plain(message.c_str()); // the service's errors carry names and paths
     toast_age_ = 0;
 }

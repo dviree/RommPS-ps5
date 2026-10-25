@@ -3126,14 +3126,14 @@ static void *worker(void *arg) {
             LOGE("sync failed: %s; trying again in %ds", r.error, retry_in);
         } else if (r.error[0]) {
             LOGE("sync failed: %s", r.error);
-            if (notify) plat_notify("RommPS: couldn't sync. %s", r.error);
+            if (notify) plat_notify("RommPS: couldn't sync\n%s", r.unreachable ? "Check your connection" : r.error);
         } else {
             /* Issue #10 - Added notification and log file for memory card operations. */
             LOGI("sync done: %d up, %d down, %d conflicts, %d failed, %d states, %d cards up, %d cards down; largest free block %d MB",
                  r.uploaded, r.downloaded, r.conflicts, r.failed, r.states_up, r.cards, r.cards_down, mem_largest_mb());
             char text[200], games[400];
             if (notify && sync_summary(&r, text, sizeof text)) {
-                if (events_games(mark, 3, games, sizeof games)) plat_notify("RommPS: %s\n%s", text, games);
+                if (events_games(mark, 3, games, sizeof games)) plat_notify("RommPS: %s\n%s", games, text);
                 else plat_notify("RommPS: %s", text);
             }
         }
@@ -3167,8 +3167,8 @@ static void plural(char *out, size_t n, int count, const char *what) {
 }
 
 void download_notice(char *out, size_t n, const char *name, const char *system) {
-    if (system && system[0]) snprintf(out, n, "%s was downloaded for %s", name, system);
-    else snprintf(out, n, "%s was downloaded", name);
+    if (system && system[0]) snprintf(out, n, "%s\nDownloaded for %s", name, system);
+    else snprintf(out, n, "%s\nDownloaded", name);
 }
 
 int sync_game(int rom_id, const char *name, const char *system, sync_game_result *out) {
@@ -3192,7 +3192,7 @@ int sync_game(int rom_id, const char *name, const char *system, sync_game_result
     if (out->failed) {
         plat_notify("RommPS: %s, but its saves couldn't sync", head);
     } else if (out->conflicts) {
-        plat_notify("RommPS: %s. A save conflict needs you", head);
+        plat_notify("RommPS: %s, with a save conflict to resolve", head);
     } else if (out->saves || out->states) {
         char saves[32] = "", states[32] = "";
         if (out->saves) plural(saves, sizeof saves, out->saves, "save");

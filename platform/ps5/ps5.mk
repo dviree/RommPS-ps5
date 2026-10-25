@@ -23,15 +23,9 @@ build/ps5/gen/emulators_json.h: platform/ps5/emulators.json tools/embed.py
 	python3 -c "import json,sys; json.load(open(sys.argv[1]))" $<
 	python3 tools/embed.py $< $@ EMULATORS_JSON
 
-# RommPS's icon, for the toasts (platform.c).
-build/ps5/gen/rommps_icon.h: platform/ps5/app/rommps/ps5/sce_sys/icon0.png tools/embed.py
-	@mkdir -p $(dir $@)
-	python3 tools/embed.py $< $@ ROMMPS_ICON_PNG
-
 PS5_PLAT := platform/ps5/platform.c platform/ps5/mounts.c platform/console/console.c
 
-$(PS5_ELF): $(SRCS) $(PS5_PLAT) platform/console/console.h platform/ps5/ps5.h $(HDRS) $(GEN_HEADERS) build/ps5/gen/cacert_pem.h build/ps5/gen/emulators_json.h \
-		build/ps5/gen/rommps_icon.h
+$(PS5_ELF): $(SRCS) $(PS5_PLAT) platform/console/console.h platform/ps5/ps5.h $(HDRS) $(GEN_HEADERS) build/ps5/gen/cacert_pem.h build/ps5/gen/emulators_json.h
 	@mkdir -p $(dir $@)
 	$(PS5_CC) $(COMMON_CFLAGS) -Ibuild/ps5/gen -Iplatform/console -DROMM_EMBED_CA $$($(PS5_PKGCONF) --cflags libcurl) -DCURL_STATICLIB \
 		-o $@ $(SRCS) $(PS5_PLAT) \

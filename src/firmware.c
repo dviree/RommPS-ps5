@@ -256,7 +256,7 @@ static void tidy_pick_one(const char *dir, const cJSON *files, const cJSON *pick
     state_unlock();
     if (removed) {
         LOGI("BIOS: kept %s in %s, removed %d more of RomM's", names[keep], dir, removed);
-        plat_notify("RommPS: %d extra BIOS files removed, %s is kept", removed, names[keep]);
+        plat_notify("RommPS: %d extra BIOS file%s removed\nKept %s", removed, removed == 1 ? "" : "s", names[keep]);
     }
 }
 

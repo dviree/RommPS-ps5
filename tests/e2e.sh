@@ -574,8 +574,8 @@ post /api/setup/emulators "{\"roots\":[\"$HB\",\"$T/psxemu\",\"$T/n64emu\",\"$T/
   || fail "setup with extras refused"
 for _ in $(seq 1 20); do [[ -f "$T/n64b/roms/Old Racer (U).z64" ]] && break; sleep 0.25; done
 [[ -f "$T/n64b/roms/Old Racer (U).z64" ]] || fail "turning an extra on must give it the games already there"
-for _ in $(seq 1 20); do grep -q "NOTIFY.*now also sync with" "$T/daemon.log" && break; sleep 0.25; done
-grep -q "NOTIFY\] RommPS: [0-9]* N64 games\{0,1\} now also sync with" "$T/daemon.log" || fail "no notice that the games now also sync with the extra"
+for _ in $(seq 1 20); do grep -q "NOTIFY.*now also syncs\{0,1\} with" "$T/daemon.log" && break; sleep 0.25; done
+grep -q "NOTIFY\] RommPS: [0-9]* N64 games\{0,1\} now also syncs\{0,1\} with" "$T/daemon.log" || fail "no notice that the games now also sync with the extra"
 dirs=$(curl -sf "$API/api/paths" | python3 -c "import json,sys; print(sorted(m['rom_dir'] for m in json.load(sys.stdin)))")
 [[ "$dirs" != *"$T/nope"* ]] || fail "an emulator not supported yet got a profile: $dirs"
 post /api/config '{"states":"upload"}' >/dev/null
@@ -843,7 +843,7 @@ syncnow
 [[ "$(cat "$XA/bios/SCPH-5501.BIN")" == "mine" ]] || fail "a file of the user's own must never be replaced"
 [[ "$(ls "$T/ps2emu/bios" | tr '\n' ' ')" == "mine.bin old-a.bin old-a.nvm rom1.bin x-b.nvm " ]] \
   || fail "of RomM's BIOS in a take-the-first folder only the one in use must stay, the user's own and the dump's other files too: $(ls "$T/ps2emu/bios" 2>&1)"
-grep -q "NOTIFY\] RommPS: 1 extra BIOS files removed, old-a.bin is kept" "$T/daemon.log" || fail "no notice of the BIOS files removed"
+grep -A1 "NOTIFY\] RommPS: 1 extra BIOS file removed$" "$T/daemon.log" | grep -q "^Kept old-a.bin$" || fail "no notice of the BIOS files removed"
 [[ "$(head -c4 "$T/psxemu/bios/ps2A.bin" 2>/dev/null)" == "ps2A" ]] || fail "a BIOS RomM keeps under another platform must come down when the rules name it"
 [[ "$(cat "$RA/system/bsx.bin" 2>/dev/null)" == "BSXBIOS" ]] || fail "BIOS files from an older RomM (no list in the platform) must come down too"
 grep -q "NOTIFY\] RommPS: [0-9]* BIOS files added" "$T/daemon.log" || fail "no notice of the BIOS files"
@@ -1179,10 +1179,14 @@ grep -q "skipped: save sync is off" "$T/daemon.log" || fail "a skipped sync must
 post /api/config '{"save_sync":true}' >/dev/null
 syncnow
 [[ "$(cat "$sdir/No Sync Game (USA).srm" 2>/dev/null)" == "stays-on-romm" ]] || fail "turned back on, the save must come down"
-grep -qE "\[NOTIFY\] RommPS: No Sync Game was downloaded for [A-Za-z].*$" "$T/daemon.log" || fail "a download with save sync off must still say it's done, and for what system"
-grep -qE "\[NOTIFY\] RommPS: ([0-9]+ (saves?|states?) (up|down)(, )?)+$" "$T/daemon.log" || fail "a sync's notification must say what moved"
-! grep -q "\[NOTIFY\] RommPS: 0 " "$T/daemon.log" || fail "a notification must not count nothing"
-grep -A1 -E "\[NOTIFY\] RommPS: [0-9]+ saves? (up|down)" "$T/daemon.log" | grep -q "No Sync Game" || fail "a sync's notification must name the games"
+grep -A1 "\[NOTIFY\] RommPS: No Sync Game$" "$T/daemon.log" | grep -qE "^Downloaded for [A-Za-z]" || fail "a download with save sync off must still say it's done, and for what system"
+grep -qE "^(\[NOTIFY\] RommPS: )?([0-9]+ (saves?|states?) (up|down)(, )?)+$" "$T/daemon.log" || fail "a sync's notification must say what moved"
+! grep -qE "^(\[NOTIFY\] RommPS: )?0 " "$T/daemon.log" || fail "a notification must not count nothing"
+grep -B1 -E "^[0-9]+ saves? (up|down)" "$T/daemon.log" | grep -q "\[NOTIFY\] RommPS: .*No Sync Game" || fail "a sync's notification must name the games"
+# RommPS's own messages become the console's notifications.
+post /api/notify '{"message":"couldn'"'"'t cancel\nIt already finished"}' >/dev/null
+grep -A1 "\[NOTIFY\] RommPS: couldn't cancel$" "$T/daemon.log" | grep -q "^It already finished$" \
+  || fail "a message from RommPS must reach the notifications: $(grep -A1 NOTIFY "$T/daemon.log" | tail -4)"
 
 echo "24. save sync per emulator and platform: saves only, then off, then everything"
 path_of() { curl -sf "$API/api/paths" | python3 -c "import json,sys; print([m['$1'] for m in json.load(sys.stdin) if m['rom_dir']=='$gdir'][0])"; }
@@ -1474,10 +1478,10 @@ second() {
   local pid=$!; sleep 3; kill $pid; wait $pid 2>/dev/null || true
 }
 second
-n=$(grep -c "NOTIFY\] RommPS found new emulators" "$D2/daemon.log")
+n=$(grep -c "NOTIFY\] RommPS: found" "$D2/daemon.log")
 [[ "$n" == 1 ]] || fail "new emulators must be announced: $(grep -E 'NOTIFY|new emulators' "$D2/daemon.log")"
 grep -q "Turn them on in Emulator Settings" "$D2/daemon.log" || fail "the notice must say where to turn them on"
 second
-[[ "$(grep -c "NOTIFY\] RommPS found new emulators" "$D2/daemon.log")" == 1 ]] || fail "the same emulators must not be announced twice"
+[[ "$(grep -c "NOTIFY\] RommPS: found" "$D2/daemon.log")" == 1 ]] || fail "the same emulators must not be announced twice"
 
 echo "PASS"
