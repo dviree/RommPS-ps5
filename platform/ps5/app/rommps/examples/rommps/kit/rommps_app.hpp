@@ -350,6 +350,9 @@ class App
     void send_page(const std::string &key, int page);
     void refresh_platforms();
     void refresh_queue();
+    // A game came or went: every list's pages are asked for again, drawn as
+    // they were meanwhile.
+    void refresh_lists();
 
     Api api_;
     Api slow_api_; // calls that may take minutes

@@ -1142,7 +1142,7 @@ class RommPS final : public app::Concept
         const Color acc = cover_accent(palette);
         const rommps::Platform *p = app_.platform_by_id(sheet_game_.platform_id);
         const float t = sheet_.value;
-        constexpr float kHeight = 620.0f;
+        constexpr float kHeight = 680.0f;
         const Rect sheet{120, gfx::kVirtualHeight - kHeight * t - 40.0f * t + 60.0f * (1.0f - t), 1680, kHeight};
         list.push_opacity(tween::clamp01(t * 1.4f));
         list.shadow({sheet.x, sheet.y + 20, sheet.w, sheet.h}, 44, 60, Color::rgb(0x000000, 0.5f));
@@ -1239,8 +1239,8 @@ class RommPS final : public app::Concept
         }
         if (!info.summary.empty())
         {
-            // Three lines show; holding Up or Down scrolls the rest through.
-            constexpr float kLine = 30.0f, kShown = 3 * kLine;
+            // Five lines show; holding Up or Down scrolls the rest through.
+            constexpr float kRows = 5.0f, kLine = 30.0f, kShown = kRows * kLine;
             const float lines = static_cast<float>(fonts.regular.font->wrap(info.summary, 20, 660).size());
             summary_max_ = std::max(0.0f, lines * kLine - kShown);
             list.push_clip({x - 4, y - 22, 680, kShown});
@@ -1250,7 +1250,7 @@ class RommPS final : public app::Concept
             // More below: a small marker under the window's right edge.
             if (summary_max_ > 0.0f && summary_scroll_.value < summary_max_ - 1.0f)
                 list.triangle({x + 660 - 14, y - 22 + kShown + 2, 14, 8}, L.panel_text.with_alpha(0.5f), 0.0f, 3.14159f);
-            y += std::min(lines, 3.0f) * kLine + 22;
+            y += std::min(lines, kRows) * kLine + 22;
         }
         std::vector<std::string> facts;
         if (info.play_ms > 0)

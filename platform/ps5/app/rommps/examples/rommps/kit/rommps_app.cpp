@@ -549,7 +549,11 @@ void App::tick(float dt, hui::gfx::Renderer *renderer)
         if (shapes_[job.path].aspect != cover.aspect)
             shapes_[job.path] = {cover.aspect, clock_};
         if (renderer)
+        {
+            if (cover.texture)
+                renderer->destroy_texture(cover.texture); // asked for twice: the first one goes
             cover.texture = renderer->create_texture(w, h, rgba);
+        }
         stbi_image_free(rgba);
     }
 }
@@ -778,7 +782,7 @@ void App::refresh_status()
         const double sig = num(j.get(), "installed_sig", -1);
         if (sig != installed_sig_ && installed_sig_ >= 0 && sig >= 0)
         {
-            lists_.clear();
+            refresh_lists();
             refresh_installed();
         }
         installed_sig_ = sig;
@@ -845,6 +849,13 @@ const Platform *App::platform_by_id(int id) const
         if (p.id == id)
             return &p;
     return nullptr;
+}
+
+void App::refresh_lists()
+{
+    for (auto &[key, entry] : lists_)
+        if (entry.list)
+            std::fill(entry.list->pages.begin(), entry.list->pages.end(), 0);
 }
 
 GameList &App::games(int platform_id, const std::string &search)
@@ -1142,7 +1153,7 @@ void App::refresh_queue()
         // A game that finished shows as downloaded: the lists load again.
         if (finished_one)
         {
-            lists_.clear();
+            refresh_lists();
             refresh_installed();
         }
     });
@@ -1230,7 +1241,7 @@ void App::remove_game(int rom_id)
             return;
         }
         say("Game removed. Its saves are kept.");
-        lists_.clear();
+        refresh_lists();
         refresh_installed();
         refresh_queue();
     });
