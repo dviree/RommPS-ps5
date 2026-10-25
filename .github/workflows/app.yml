@@ -23,10 +23,6 @@ on:
         description: "Artifact holding that release's romm-sync.elf"
         type: string
         required: true
-  # Test runs only, removed before merging: builds this branch with v1.3.0's
-  # payload, and stops at the artifact.
-  push:
-    branches: [ensure-store-zip-creation]
 
 permissions:
   contents: read
@@ -41,38 +37,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.sha || github.sha }}
+          ref: ${{ inputs.sha }}
           path: repo
-
-      - name: Resolve version
-        id: version
-        run: |
-          tag="${{ inputs.tag }}"
-          if [ -z "$tag" ]; then
-            IFS=. read -r major minor patch < <(jq -r .contentVersion repo/platform/ps5/app/rommps/ps5/sce_sys/param.json)
-            tag="v$((10#$major)).$((10#$minor)).$((10#$patch))"
-          fi
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "Building RommPS for $tag"
 
       # RommPS carries the payload and starts it: the release's own romm-sync.elf.
       - uses: actions/download-artifact@v4
-        if: inputs.payloads
         with:
           name: ${{ inputs.payloads }}
           path: payloads
 
       - name: The payload
-        env:
-          TAG: ${{ steps.version.outputs.tag }}
-          FROM_RELEASE: ${{ inputs.payloads == '' }}
         run: |
           mkdir -p repo/build/ps5
-          if [ "$FROM_RELEASE" = true ]; then
-            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -p romm-sync.elf -O repo/build/ps5/romm-sync.elf
-          else
-            cp payloads/romm-sync.elf repo/build/ps5/romm-sync.elf
-          fi
+          cp payloads/romm-sync.elf repo/build/ps5/romm-sync.elf
 
       - name: Check out the PS5 stack
         id: stack
@@ -116,7 +93,7 @@ jobs:
         run: repo/tools/ps5-app-build.sh bash /repo/platform/ps5/app/tools/title-art.sh
 
       - name: Build and package RommPS
-        run: repo/tools/package-app.sh "${{ steps.version.outputs.tag }}"
+        run: repo/tools/package-app.sh "${{ inputs.tag }}"
 
       - name: Logs
         if: failure()
