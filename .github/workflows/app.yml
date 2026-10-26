@@ -1,0 +1,110 @@
+# Builds RommPS, the PS5 app, into PPSA76677.zip: the file ProsperoStore
+# installs. release.yml runs it between building the payloads and publishing,
+# so a PS5 release can't go out without it (1.3.0 did, back when it was built
+# by hand, and the store sat on 1.2.1 for a day).
+#
+# The PS5 stack is checked out at its pins (tools/ps5-stack.sh) and RADV, the
+# slow part, is built once per Mesa and SDK revision and cached. The zip ends
+# up as the artifact "rommps"; this workflow never touches a release.
+name: RommPS
+
+on:
+  workflow_call:
+    inputs:
+      sha:
+        description: "Commit to build"
+        type: string
+        required: true
+      tag:
+        description: "The release, e.g. v1.3.1"
+        type: string
+        required: true
+      payloads:
+        description: "Artifact holding that release's romm-sync.elf"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PS5_STACK: ${{ github.workspace }}/ps5-stack
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha }}
+          path: repo
+
+      # RommPS carries the payload and starts it: the release's own romm-sync.elf.
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.payloads }}
+          path: payloads
+
+      - name: The payload
+        run: |
+          mkdir -p repo/build/ps5
+          cp payloads/romm-sync.elf repo/build/ps5/romm-sync.elf
+
+      - name: Check out the PS5 stack
+        id: stack
+        run: |
+          repo/tools/ps5-stack.sh "$PS5_STACK"
+          pin() { sed -n "s/^$2=//p" "$PS5_STACK/PS5_Vulkan/tools/$1"; }
+          echo "radv=$(pin build-radv.sh mesa_revision)-$(pin setup-native-dependencies.sh sdk_revision)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      # The image tools/ps5-app-build.sh runs everything in. The cache only
+      # saves time, so failing to write it must not fail the build.
+      - uses: docker/build-push-action@v6
+        with:
+          context: repo/platform/ps5/app/docker
+          tags: rommps-ps5app:1
+          load: true
+          cache-from: type=gha,scope=ps5app
+          cache-to: type=gha,mode=max,scope=ps5app,ignore-error=true
+
+      - uses: actions/cache@v4
+        with:
+          path: ps5-stack/PS5_Vulkan/.deps/native/radv-release
+          key: radv-release-${{ steps.stack.outputs.radv }}
+
+      # What ps5/tools/bootstrap.sh does, minus the console: PS5_Vulkan's SDK,
+      # its native tool and libc.prx (make builds those first, then a sample a
+      # title doesn't need), and RADV, which build-radv.sh skips when the
+      # cached archive is already at its pins.
+      - name: Build the PS5 stack
+        run: |
+          repo/tools/ps5-app-build.sh bash -c '
+            set -euo pipefail
+            cd /stack/PS5_Vulkan
+            bash tools/setup-native-dependencies.sh > /dev/null
+            make > build-make.log 2>&1 || true
+            [[ -x build/host/ps5-native-tool && -f runtime/libc.prx ]] || { tail -50 build-make.log; exit 1; }
+            time bash tools/build-radv.sh release'
+
+      - name: Title art
+        run: repo/tools/ps5-app-build.sh bash /repo/platform/ps5/app/tools/title-art.sh
+
+      - name: Build and package RommPS
+        run: repo/tools/package-app.sh "${{ inputs.tag }}"
+
+      - name: Logs
+        if: failure()
+        run: |
+          shopt -s globstar nullglob
+          for log in ps5-stack/PS5_Vulkan/build-make.log ps5-stack/PS5_Vulkan/.deps/work/**/*.log repo/platform/ps5/app/rommps/build/*.log; do
+            echo "::group::$log"; tail -80 "$log"; echo "::endgroup::"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rommps
+          path: repo/build/release/PPSA76677.zip
+          if-no-files-found: error
