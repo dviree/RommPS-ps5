@@ -362,7 +362,7 @@ static void start_run(const char *title, const char *sandbox, const pid_t *pids,
             /* The app runs without the games: say so, as RommPS. */
             events_add("emulator", "failed", 0, h->target, m->name, "Its games couldn't be shown to it this time");
             events_save();
-            plat_notify("RommPS: %s can't see its games this time. Close it and open it again.", m->name);
+            plat_notify("RommPS: %s can't see its games this time\nClose it and open it again", m->name);
         }
     }
     pthread_mutex_unlock(&g_lock);

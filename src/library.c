@@ -1466,7 +1466,7 @@ static void clear_old_copies(const profile_map *maps, int n) {
         if (gone) {
             LOGI("%s plays %s's games now: removed %d copies (%lld bytes)", x->profile_name, x->rom_dir, gone, (long long)freed);
             events_save();
-            plat_notify("RommPS: %s now plays the same game files. %.1f GB freed.", x->profile_name, (double)freed / 1e9);
+            plat_notify("RommPS: %s now plays the same game files\n%.1f GB freed", x->profile_name, (double)freed / 1e9);
         }
     }
 }
@@ -1627,7 +1627,7 @@ again:;
             str_copy(sys, sizeof sys, x->platform_dir);
             for (char *c = sys; *c; c++)
                 if (*c >= 'a' && *c <= 'z') *c -= 32;
-            plat_notify("RommPS: %d %s game%s now also sync with %s", here, sys, here == 1 ? "" : "s",
+            plat_notify("RommPS: %d %s %s with %s", here, sys, here == 1 ? "game now also syncs" : "games now also sync",
                         x->profile_name);
             linked += here;
         }

@@ -1250,6 +1250,15 @@ static void route(request *r) {
         else send_ok(fd);
         return;
     }
+    if (is_post && !strcmp(r->path, "/api/notify")) {
+        /* RommPS's own messages, as the console's notifications: an app can't send those. */
+        cJSON *j = body_json(r);
+        const char *message = jget_str(j, "message", "");
+        if (message[0]) plat_notify("RommPS: %s", message);
+        cJSON_Delete(j);
+        send_ok(fd);
+        return;
+    }
     if (is_post && !strcmp(r->path, "/api/sync")) {
         sync_request("manual");
         send_ok(fd);

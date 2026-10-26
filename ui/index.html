@@ -1353,7 +1353,7 @@ function renderUpdate(u) {
     h += "<p>" + esc(u.message || u.state) + (u.state === "downloading" && u.total ? " (" + pct + "%)" : "") + "</p>";
     if (u.state === "downloading") h += '<div class="bar"><i style="width:' + pct + '%"></i></div>';
   } else if (u.available && u.self_update === false) {
-    h += '<p class="ok">RommPS ' + esc(u.latest) + " is available. Update it in ProsperoStore.</p>";
+    h += '<p class="ok">RommPS ' + esc(u.latest) + " is available. Update it from your homebrew store.</p>";
   } else if (u.available) {
     h += '<p class="ok">Version ' + esc(u.latest) + " is available.</p>";
     if (!u.autostart) h += '<p class="warn">' + (u.autostart_supported ? "Autostart isn't set up, so the" : "The") + " update only lasts until the console restarts.</p>";
