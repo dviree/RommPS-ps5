@@ -154,7 +154,11 @@ expect_eq "installed_sig right after our own download" "$(sig)" "$before"
 all=$(curl -sf "$API/api/roms?platform_id=0&search=metroid" | python3 -c "import json,sys; print([(g['name'], g['platform_id']) for g in json.load(sys.stdin)['items']])")
 [[ "$all" == "[('Super Metroid', 1)]" ]] || fail "a search across every platform: $all"
 colls=$(curl -sf "$API/api/collections" | python3 -c "import json,sys; print([(c['kind'], c['id'], c['name'], c['rom_count'], c['owner']) for c in json.load(sys.stdin)])")
-[[ "$colls" == "[('regular', '7', 'Favourites', 3, ''), ('regular', '9', 'Arcade Nights', 1, 'anna')]" ]] || fail "collections, own first, the empty one left out: $colls"
+[[ "$colls" == "[('regular', '7', 'Favourites', 3, ''), ('smart', '3', 'SNES picks', 2, ''), ('regular', '9', 'Arcade Nights', 1, 'anna')]" ]] || fail "collections, own first, the empty one left out: $colls"
+colls=$(curl -sf "$API/api/collections?kind=smart" | python3 -c "import json,sys; print([(c['name'], c['description']) for c in json.load(sys.stdin)])")
+[[ "$colls" == "[('SNES picks', 'Platform: SNES')]" ]] || fail "smart collections, their filter for a description: $colls"
+cg=$(curl -sf "$API/api/roms?collection_kind=smart&collection_id=3" | python3 -c "import json,sys; j=json.load(sys.stdin); print(j['total'], [g['name'] for g in j['items']])")
+[[ "$cg" == "2 ['EarthBound', 'Super Metroid']" ]] || fail "a smart collection's games: $cg"
 colls=$(curl -sf "$API/api/collections?kind=regular" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
 [[ "$colls" == 2 ]] || fail "collections of one kind: $colls"
 curl -s -o /dev/null -w "%{http_code}" "$API/api/collections?kind=virtual" | grep -qx 400 || fail "listing a kind of collection not offered must be refused"

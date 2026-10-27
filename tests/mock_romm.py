@@ -83,6 +83,11 @@ DB = {
         {"id": 9, "name": "Arcade Nights", "description": "", "rom_ids": [11],
          "user_id": 2, "owner_username": "anna", "is_public": True},
     ],
+    # A smart one (a saved filter): no description, its filter says what it holds.
+    "smart_collections": [
+        {"id": 3, "name": "SNES picks", "description": "", "filter_summary": "Platform: SNES", "rom_ids": [11, 12],
+         "user_id": 1, "owner_username": "tester", "is_public": False},
+    ],
     "firmware": [{"id": 1, "platform_id": 1, "file_name": "bsx.bin", "content": b"BSXBIOS"}],
     "saves": {},    # id -> save dict (+ "content")
     "states": {},
@@ -405,11 +410,15 @@ class H(BaseHTTPRequestHandler):
                 return self.reply(200, platform_public(next(x for x in DB["platforms"] if x["id"] == int(parts[2]))))
             if p == "/api/collections":
                 return self.reply(200, [c | {"rom_count": len(c["rom_ids"])} for c in DB["collections"]])
+            if p == "/api/collections/smart":
+                return self.reply(200, [c | {"rom_count": len(c["rom_ids"])} for c in DB["smart_collections"]])
             if p == "/api/roms":
                 ids = [int(x) for x in q.get("platform_ids", [])]
                 term = (qs("search_term") or "").lower()
-                coll = qs("collection_id")
+                coll, smart = qs("collection_id"), qs("smart_collection_id")
                 in_coll = next((c["rom_ids"] for c in DB["collections"] if str(c["id"]) == coll), []) if coll else None
+                if smart:
+                    in_coll = next((c["rom_ids"] for c in DB["smart_collections"] if str(c["id"]) == smart), [])
                 items = sorted((rom_public(r) for r in DB["roms"].values()
                                 if (not ids or r["platform_id"] in ids) and (in_coll is None or r["id"] in in_coll)
                                 and term in r["name"].lower() + r["fs_name"].lower()),

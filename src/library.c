@@ -1262,15 +1262,14 @@ cJSON *library_platforms(char *err, int en) {
 }
 
 /* RomM's collection kinds: where it lists them, and what /api/roms takes to
- * list one's games. Smart collections need nothing more than turning on here;
- * virtual ones come grouped by a type (genre, developer...), which the
- * clients will want to pick from first. */
+ * list one's games. Virtual ones come grouped by a type (genre, developer...),
+ * which the clients will want to pick from first. */
 static const struct {
     const char *name, *list_path, *rom_param;
     int numeric_ids, offered;
 } g_collection_kinds[] = {
     [COLLECTION_REGULAR] = {"regular", "/api/collections", "collection_id", 1, 1},
-    [COLLECTION_SMART] = {"smart", "/api/collections/smart", "smart_collection_id", 1, 0},
+    [COLLECTION_SMART] = {"smart", "/api/collections/smart", "smart_collection_id", 1, 1},
     [COLLECTION_VIRTUAL] = {"virtual", "/api/collections/virtual?type=all", "virtual_collection_id", 0, 0},
 };
 #define COLLECTION_KINDS ((int)(sizeof g_collection_kinds / sizeof g_collection_kinds[0]))
@@ -1313,6 +1312,10 @@ static int collection_order(const void *a, const void *b) {
 static int collections_of(collection_kind kind, const char *me, cJSON ***all, int *n, int *cap, char *err, int en) {
     long st = 0;
     cJSON *list = romm_get_lean(g_collection_kinds[kind].list_path, COLLECTION_DROP, &st);
+    if (st == 404 && kind != COLLECTION_REGULAR) { /* a RomM from before that kind */
+        cJSON_Delete(list);
+        return 0;
+    }
     if (st != 200 || !cJSON_IsArray(list)) {
         if (st == 403)
             snprintf(err, (size_t)en, "RomM didn't allow reading collections: pair RommPS again to grant it");
@@ -1350,7 +1353,9 @@ static int collections_of(collection_kind kind, const char *me, cJSON ***all, in
         cJSON_AddStringToObject(o, "kind", g_collection_kinds[kind].name);
         cJSON_AddStringToObject(o, "id", id_text);
         cJSON_AddStringToObject(o, "name", jget_str(c, "name", ""));
-        cJSON_AddStringToObject(o, "description", jget_str(c, "description", ""));
+        /* A smart collection with no description says what it gathers. */
+        const char *about = jget_str(c, "description", "");
+        cJSON_AddStringToObject(o, "description", about[0] ? about : jget_str(c, "filter_summary", ""));
         cJSON_AddNumberToObject(o, "rom_count", count);
         cJSON_AddStringToObject(o, "cover", cover);
         cJSON_AddStringToObject(o, "owner", owner);
