@@ -852,7 +852,9 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
             str_template(m->game_ids, sizeof m->game_ids, jstr(p, e, "game_ids", ""), vars);
             str_copy(m->disc_id, sizeof m->disc_id, jstr(p, e, "disc_id", ""));
             m->extra = profile_lists(p, "extra", profiles_system_key(e));
-            const cJSON *mg = state_setting(p, e, "mount_games");
+            /* How it reads its games was checked on the console: the preset's
+             * call, as its cards are, never a saved copy's. */
+            const cJSON *mg = card_setting(p, e, "mount_games");
             m->mount_games = cJSON_IsTrue(mg) ? 1 : cJSON_IsString(mg) && !strcmp(mg->valuestring, "data") ? 2 : 0;
             /* RetroArch reads its folders through its app folder (":/content",
              * ":/savefiles" in retroarch.cfg): an extra takes mounts there. */
