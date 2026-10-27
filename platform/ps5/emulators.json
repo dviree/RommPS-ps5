@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "version": "2026.10.27.1",
+  "version": "2026.10.27.2",
   "console": "ps5",
   "emulators": [
   {
@@ -87,7 +87,7 @@
       "detect": ["/data/homebrew/PPSA99249"],
       "note": "One memory card per game, as Crux2 names them (games that share saves share one), or its two shared cards. Uses /data/crux2 when that folder exists. Its save states load only in Crux2.",
       "profile": {
-        "root": "/data/homebrew/PPSA99249", "user_dir": "/data/crux2,{root}", "mount_games": true,
+        "root": "/data/homebrew/PPSA99249", "user_dir": "/data/crux2,{root}", "mount_games": "data",
         "rom_dir": "{root}/games", "bios_dir": "{user_dir}/bios", "state_dir": "{user_dir}/sstates",
         "memcards": "{card_dir}/Mcd001.ps2,{card_dir}/Mcd002.ps2", "save_layout": "ps2",
         "pcsx2_cards": {"dir": "{user_dir}/memcards", "game_ini": "{user_dir}/gamesettings/{serial}_{crc}.ini",

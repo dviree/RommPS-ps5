@@ -734,6 +734,7 @@ setup16c() {
     \"choices\":{\"psx\":\"$T/psxemu\",\"n64\":\"$T/n64emu\",\"ps2\":\"$T/ps2emu\",\"ngc\":\"$T/gcA\",\"wii\":\"$T/gcA\"},
     \"also\":{\"n64\":[\"$T/n64b\"],\"ngc\":[\"$T/gcB\"],\"wii\":[\"$T/gcB\"],\"psx\":[\"$XA\"]}}" >/dev/null || fail "setup with a mounted extra refused"
 }
+printf 'Put your games here' > "$XA/games/README.txt"   # what an emulator ships there (Crux2) is no game of its own
 setup16c
 for _ in $(seq 1 20); do grep -q "^TEST00002|" "$T/data/mounts.txt" 2>/dev/null && break; sleep 0.25; done
 [[ "$(cat "$T/data/mounts.txt" 2>/dev/null)" == "TEST00002|$T/psxemu/games|app0/games" ]] || fail "the extra must get the main emulator's games mounted on app0/games: $(cat "$T/data/mounts.txt" 2>/dev/null)"

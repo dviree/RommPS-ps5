@@ -1536,7 +1536,7 @@ int library_own_games(const char *root, const char *system, const char *action, 
     DIR *d = opendir(x->rom_dir);
     struct dirent *de;
     while (d && (de = readdir(d))) {
-        if (de->d_name[0] == '.' || ext_in_list(de->d_name, ".part,.tmp")) continue;
+        if (de->d_name[0] == '.' || ext_in_list(de->d_name, ".part,.tmp") || library_not_game(de->d_name)) continue;
         char from[PATH_MAX_LEN], to[PATH_MAX_LEN];
         path_join(from, sizeof from, x->rom_dir, de->d_name);
         path_join(to, sizeof to, m->rom_dir, de->d_name);

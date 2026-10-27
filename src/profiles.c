@@ -10,6 +10,7 @@
 
 #include "config.h"
 #include "detect.h"
+#include "library.h"
 #include "platform.h"
 #include "state.h"
 
@@ -500,7 +501,8 @@ static void mount_main_games(profile_map *maps, int n, profile_map *x) {
     struct dirent *de;
     int own = 0;
     while (d && (de = readdir(d))) {
-        if (de->d_name[0] == '.' || ext_in_list(de->d_name, ".part,.tmp")) continue;
+        /* A README the emulator ships in its games folder (Crux2's) is no game. */
+        if (de->d_name[0] == '.' || ext_in_list(de->d_name, ".part,.tmp") || library_not_game(de->d_name)) continue;
         char there[PATH_MAX_LEN];
         path_join(there, sizeof there, m->rom_dir, de->d_name);
         own += !file_exists(there) && !dir_exists(there);
