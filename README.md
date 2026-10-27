@@ -104,16 +104,17 @@ Note: RommPS relies on your emulator **NOT** being sandboxed. Some emulators req
 | [SwanStationPS5](https://github.com/darkxex/SwanStationPS5) | PS1 | Full Support | One memory card per game, and states | Plays PSXS5's games, keeps its own saves in `/data/SwanStationPS5`. Its states only load in SwanStationPS5 |
 | PSSwanStation | PS1 | Full Support | One memory card per game, and states | Its states only load in PSSwanStation |
 | [PS5SX2](https://github.com/Swordpdf/PS5SX2) | PS2 | Full Support | One memory card per game (the default), or its two shared cards backed up to RomM (5.3 or newer) | No save states yet |
+| [Crux2](https://github.com/Press5elect/Crux2) | PS2 | Full Support | One memory card per game, the one Crux2 picks (games that share saves share a card), or its two shared cards; states | Uses `/data/crux2` when that folder exists. Its states only load in Crux2 |
 | [PS5N64](https://github.com/Globaleliteee/PS5N64) | N64 | Full Support | Full Support | - |
 | [PS5NES](https://github.com/Globaleliteee/PS5NES) | NES | Untested | Untested | Preset uses `/data/PS5NES/games` and `/data/PS5NES/saves`. GH page gone |
 | PSFlyCast | Dreamcast | Full Support | Each game's own VMU; the shared VMUs are backed up as RomM memory cards | Save states don't sync yet |
 | PS64 | Commodore 64 | Full Support | Save disks | Games save into their own disk images. No save states |
-| PS5CEMU-HAR | Wii U, 3DS, DS | Full Support | Wii U, 3DS and DS saves, 3DS and DS states | 3DS and DS states only load in PS5CEMU-HAR |
+| PS5CEMU-HAR | Wii U, 3DS, DS, Switch | Full Support | Wii U, 3DS, DS and Switch saves, 3DS and DS states | 3DS and DS states only load in PS5CEMU-HAR. Switch saves are one player's, the same save as ProsperoEden's on RomM |
 | [Porpoise](https://github.com/elripalda/Porpoise-Dolphin-Emulator-for-PS5) | Wii/GameCube | Full Support | N/A | Couldn't exit sandbox w/o crash. [Issue](https://github.com/elripalda/Porpoise-Dolphin-Emulator-for-PS5/issues/18) reported. Downloading games should work if the emulator is actually working for you.|
-| XPSemu | Xbox | Full Support | Not synced | Games and BIOS files only: its saves live inside its hard disk image |
-| Seedee5 | Philips CD-i | Full Support | Not synced | Games and BIOS files only: it keeps saves as folders, and only after a clean exit |
-| [ProsperoEden](https://github.com/blackbearreloaded/ProsperoEden) | Switch | Full Support | Not synced | Games and keys only: saves are kept per Switch user profile |
-| [PS5X360](https://github.com/BrinooTk/PS5X360) | Xbox 360 | Manual Support | Researching | - |
+| XPSemu | Xbox | Full Support | Saves | Read from and written into its hard disk image, only while it's closed |
+| [PS5X360](https://github.com/BrinooTk/PS5X360) | Xbox 360 | Full Support | Saves | The first signed-in player's saves; games go in `/data/xbox360`, a folder each |
+| Seedee5 | Philips CD-i | Full Support | Saves and states | Each game's NVRAM is its save |
+| [ProsperoEden](https://github.com/blackbearreloaded/ProsperoEden) | Switch | Full Support | Saves | One Switch user's saves (the first PS5 user's, unless set otherwise). Steps aside when ProsperoEden's own RomM sync is set up |
 | Mednafen | PS1, NES, SNES, Game Boy, Game Boy Color, Game Boy Advance, Genesis/Mega Drive, Master System, Game Gear, PC Engine, Neo Geo Pocket, WonderSwan, Virtual Boy, Lynx | Full Support | Full Support | Built-in profile, off until you turn it on |
 | PS2 ISOs (for PS2 FPKG tools) | PS2 | Full Support | Not synced | Downloads PS2 ISOs to a USB drive (`/mnt/usb0/ps2`) for PS2 FPKG tools. Off until you turn it on |
 
