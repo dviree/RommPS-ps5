@@ -935,6 +935,23 @@ static void backup_file(const scan_ctx *c, const char *path, int rom_id) {
     }
 }
 
+/* Whether a save here (a bundle's "<dir>#<id>") was ever synced with RomM. */
+static int ever_synced(const char *path) {
+    state_lock();
+    const cJSON *e = state_entry("saves", path);
+    const int known = e && jget_num(e, "synced_at", 0) > 0;
+    state_unlock();
+    return known;
+}
+
+/* Of two copies of one game's saves in two emulators, whether a beats b: one
+ * RomM knows beats one it never saw (an emulator just turned on, with a save
+ * of its own from before), else the one saved last. */
+static int beats(int a_synced, time_t a_mtime, int b_synced, time_t b_mtime) {
+    if (a_synced != b_synced) return a_synced;
+    return a_mtime > b_mtime;
+}
+
 static void record_save(const local_file *f, int save_id, const char *hash) {
     state_lock();
     cJSON *e = state_entry_ensure("saves", f->path);
@@ -1704,7 +1721,8 @@ static void scan_bundles(scan_ctx *c) {
             local_file f;
             fill_bundle_file(&f, c, r, &b);
             /* Another emulator's copy of the game already here: the one saved
-             * last goes up, and the other gets it after (share_bundle_saves). */
+             * last goes up (one RomM never saw doesn't beat one it knows), and
+             * the other gets it after (share_bundle_saves). */
             int at = -1;
             for (int k = 0; k < c->nsaves && at < 0; k++)
                 if (c->saves[k].rom_id == r->rom_id && !strcmp(c->saves[k].slot, c->slot)) at = k;
@@ -1714,7 +1732,7 @@ static void scan_bundles(scan_ctx *c) {
             } else if (at < 0) {
                 add_file(&c->saves, &c->nsaves, &c->capsaves, &f);
             } else if (c->saves[at].is_bundle && !strcmp(c->saves[at].map->save_layout, r->map->save_layout) &&
-                       f.mtime > c->saves[at].mtime) {
+                       beats(ever_synced(f.path), f.mtime, ever_synced(c->saves[at].path), c->saves[at].mtime)) {
                 c->saves[at] = f;
             }
         }
@@ -2396,7 +2414,7 @@ static int share_bundle_saves(scan_ctx *c, int only_rom) {
         for (int k = 0; k < i && first; k++) first = !same_bundle_group(a, &c->roms[k]);
         char id[24];
         if (!first || rom_game_id(a, id, sizeof id) != 0) continue;
-        struct { const local_rom *r; char print[33], dir[PATH_MAX_LEN]; time_t mtime; } copies[4];
+        struct { const local_rom *r; char print[33], dir[PATH_MAX_LEN]; time_t mtime; int synced; } copies[4];
         int nc = 0, newest = -1;
         for (int k = i; k < c->nroms && nc < 4; k++) {
             const local_rom *r = &c->roms[k];
@@ -2409,9 +2427,11 @@ static int share_bundle_saves(scan_ctx *c, int only_rom) {
                 if (print[0]) {
                     copies[nc].r = r;
                     copies[nc].mtime = b.mtime;
+                    copies[nc].synced = ever_synced(f.path);
                     str_copy(copies[nc].print, sizeof copies[nc].print, print);
                     str_copy(copies[nc].dir, sizeof copies[nc].dir, b.dir);
-                    if (newest < 0 || b.mtime > copies[newest].mtime) newest = nc;
+                    if (newest < 0 || beats(copies[nc].synced, b.mtime, copies[newest].synced, copies[newest].mtime))
+                        newest = nc;
                     nc++;
                 }
             }

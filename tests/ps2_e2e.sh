@@ -253,4 +253,32 @@ echo "   with Crux2's own cards off, slot 1 is its shared card again"
 printf '[MemoryCards]\nSlot1_Filename = Mcd001.ps2\n\n[PS5]\nCardPerGame = false\n' > "$U/inis/PCSX2.ini"
 [[ "$(curl -sf "$API/api/memcards" | python3 -c "import json,sys; print(json.load(sys.stdin)['mode'])")" == shared ]] ||
   fail "Crux2's setting off didn't make its cards shared"
+
+echo "10. an emulator turned on with a newer save of its own, never synced, gets RomM's; its own doesn't go up"
+kill "$DAEMON"; wait "$DAEMON" 2>/dev/null || true
+printf '[MemoryCards]\nSlot1_Filename = Mcd001.ps2\n\n[PS5]\nCardPerGame = true\n' > "$U/inis/PCSX2.ini"   # its own cards on again
+R2="$T/homebrew/PPSA99170"; RC2="$R2/system/pcsx2/memcards"
+mkdir -p "$R2/games" "$RC2/Okami.ps2/BASLUS-21059" "$R2/system/ps5sx2/gamesettings"
+cp "$E/games/Okami.iso" "$R2/games/"
+# A formatted folder card, as PCSX2 keeps one (its superblock says so at 0x16).
+python3 -c "import sys; b=bytearray(0x2000); b[0x16]=0x6F; open(sys.argv[1],'wb').write(bytes(b))" "$RC2/Okami.ps2/_pcsx2_superblock"
+printf okami-stale > "$RC2/Okami.ps2/BASLUS-21059/BASLUS-21059"; printf icon > "$RC2/Okami.ps2/BASLUS-21059/icon.sys"
+printf '[MemoryCards]\nSlot1_Filename = Okami.ps2\n' > "$R2/system/ps5sx2/gamesettings/SLUS-21059_$(cat "$T/crc").ini"
+saves() { curl -sf "$MOCK/_admin/dump" | python3 -c "import json,sys; print(len([s for s in json.load(sys.stdin)['saves'] if s['rom_id'] == 20]))"; }
+before=$(saves)
+python3 - "$ROOT/platform/retroarch_cores.json" "$R2" "$T/data/config.json" <<'PY'
+import json, sys
+rule = next(r for r in json.load(open(sys.argv[1]))["rules"] if r.get("names") == ["PS5SX2"])["entry"]
+c = json.load(open(sys.argv[3]))
+e = dict(rule, romm=["ps2"], dir="ps2", emulator="ps5sx2", core_name="PS5SX2")
+c["profiles"].append({"id": "pcsx2core2", "name": "Another PS5SX2 core", "enabled": True, "root": sys.argv[2],
+                      "rom_dir": "{root}/games", "bios_dir": "{root}/system", "platforms": [e]})
+c.setdefault("extra", {})
+json.dump(c, open(sys.argv[3], "w"))
+PY
+start
+syncnow
+[[ "$(last uploaded)" == 0 ]] || fail "a save RomM never saw went up and beat the one it has"
+[[ "$(cat "$RC2/Okami.ps2/BASLUS-21059/BASLUS-21059")" == okami-v8 ]] || fail "the emulator just turned on didn't get RomM's save over its own"
+[[ "$(saves)" == "$before" ]] || fail "RomM's saves changed: $before -> $(saves)"
 echo "ps2 e2e: ok"
