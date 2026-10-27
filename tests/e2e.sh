@@ -1549,6 +1549,19 @@ nxsaves "{root}/sync.json"
 note=$(curl -sf "$API/api/paths" | python3 -c "import json,sys; print([m['sync_note'] for m in json.load(sys.stdin) if m['profile'] == 'NX-like'])")
 [[ "$note" == *"syncs this user's saves itself"* ]] || fail "an emulator syncing its own saves must be left alone, and say so: $note"
 rm "$NX/sync.json"
+echo "    a game RomM gave a new id (a rescan): matched again, by name"
+# RomM knows no title id for it either, so each sync asks RomM again (as for a console's Pokemon Mystery Dungeon).
+curl -skf -X POST "$SV/_admin/rom" -d '{"id":909,"platform_id":90,"name":"Nameless","fs_name":"Nameless.nsp"}' >/dev/null
+printf 'ROM:nameless' > "$NX/roms/Nameless.nsp"
+syncnow
+nxid() { python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['roms'].get(sys.argv[2], {}).get('rom_id'))" "$T/data/state.json" "$NX/roms/Nameless.nsp"; }
+[[ "$(nxid)" == 909 ]] || fail "the game without a title id in its name wasn't matched: $(nxid)"
+curl -skf -X POST "$SV/_admin/renumber" -d '{"from":909,"to":919}' >/dev/null
+syncnow
+grep -q "Nameless.nsp: RomM no longer has game 909, looked for again" "$T/daemon.log" || fail "a game gone from RomM wasn't let go"
+syncnow
+[[ "$(nxid)" == 919 ]] || fail "the game wasn't matched again under its new id: $(nxid)"
+rm "$NX/roms/Nameless.nsp"
 
 echo "28c. Xbox saves: E:\\UDATA\\<title id> inside xemu's hard disk image, as RomM's save unit; never while xemu runs"
 XB="$T/homebrew/PPSA97358"; XS="$T/xbsave"; mkdir -p "$XB/games" "$XB/hdd" "$XS/006412E217B6"

@@ -1248,6 +1248,21 @@ static int switch_title(const char *path, char *out, size_t n) {
     return rc;
 }
 
+/* RomM no longer has the game this file was matched to (a rescan gives games
+ * new ids): the match goes, and the next sync finds it again by name. */
+static void forget_gone_rom(const local_rom *r) {
+    state_lock();
+    cJSON *e = state_entry("roms", r->path);
+    const int had = e && (int)jget_num(e, "rom_id", 0) == r->rom_id;
+    if (had) {
+        jset_num(e, "rom_id", 0);
+        cJSON_DeleteItemFromObjectCaseSensitive(e, "game_id");
+        cJSON_DeleteItemFromObjectCaseSensitive(e, "miss_at");
+    }
+    state_unlock();
+    if (had) LOGI("%s: RomM no longer has game %d, looked for again by name", path_basename(r->path), r->rom_id);
+}
+
 /* The game's id: from the disc image, RomM (title_id, 5.3+), or its PSP saves. */
 static int rom_game_id(const local_rom *r, char *out, size_t n) {
     out[0] = 0;
@@ -1324,6 +1339,7 @@ static int rom_game_id(const local_rom *r, char *out, size_t n) {
         long st = 0;
         snprintf(api, sizeof api, "/api/roms/%d", r->rom_id);
         cJSON *rom = romm_call("GET", api, NULL, &st);
+        if (st == 404) forget_gone_rom(r);
         /* An Xbox or 360 game's save folder is RomM's save_target, "4D530004"
          * (an Xbox title id is "MS-004"). */
         const char *tid = jget_str(rom, xbox ? "save_target" : "title_id", "");
@@ -1936,6 +1952,7 @@ static int do_upload(const scan_ctx *c, const local_file *f, int session_id, int
         j = romm_upload("POST", path, "saveFile", f->path, path_basename(f->path), &st);
     }
     if (status_out) *status_out = st;
+    if (st == 404 && f->rom) forget_gone_rom(f->rom);
     int ok = (st == 200 || st == 201) && j;
     if (card_up[0]) { /* the card RomM has now is the one kept here */
         char cache[PATH_MAX_LEN];

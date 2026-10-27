@@ -329,6 +329,12 @@ class H(BaseHTTPRequestHandler):
                     f["content"] = f["content"].encode()
                 DB["roms"][b["id"]] = b
                 return self.reply(200, rom_public(b))
+            if p == "/_admin/renumber" and method == "POST":  # a rescan gives a game a new id
+                b = self.json_body()
+                rom = DB["roms"].pop(b["from"])
+                rom["id"] = b["to"]
+                DB["roms"][b["to"]] = rom
+                return self.reply(200, rom_public(rom))
             if p == "/_admin/platform" and method == "POST":
                 b = self.json_body()
                 DB["platforms"].append({"id": b["id"], "slug": b["slug"], "fs_slug": b["slug"], "name": b["name"],
@@ -431,6 +437,8 @@ class H(BaseHTTPRequestHandler):
                 return self.reply(200, {"items": items[off:off + lim], "total": len(items), "limit": lim, "offset": off,
                                         "char_index": char_index})
             if len(parts) == 3 and parts[:2] == ["api", "roms"]:
+                if int(parts[2]) not in DB["roms"]:  # as RomM says it
+                    return self.reply(404, {"detail": "Rom with id '%s' not found" % parts[2]})
                 return self.reply(200, rom_public(DB["roms"][int(parts[2])]))
             if len(parts) == 5 and parts[:2] == ["api", "roms"] and parts[3] == "content":
                 r = DB["roms"][int(parts[2])]
