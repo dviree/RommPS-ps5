@@ -1623,7 +1623,8 @@ static void clear_old_copies(const profile_map *maps, int n) {
         int gone = 0;
         int64_t freed = 0;
         while (d && (de = readdir(d))) {
-            if (de->d_name[0] == '.') continue;
+            /* Not a game (Crux2's README): the emulator's own, never a copy. */
+            if (de->d_name[0] == '.' || library_not_game(de->d_name)) continue;
             char copy[PATH_MAX_LEN], game[PATH_MAX_LEN];
             path_join(copy, sizeof copy, x->own_rom_dir, de->d_name);
             path_join(game, sizeof game, x->rom_dir, de->d_name);
