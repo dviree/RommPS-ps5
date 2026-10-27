@@ -545,17 +545,21 @@ function emuCard(c) {
     return '<div class="emu"><div class="head"><b>' + esc(c.name) + "</b>" + pill("no preset yet", "warn") + "</div>" +
       '<div class="path">' + esc(c.root) + '</div><p class="muted">' + esc(c.note || "") +
       " If yours works, pick its folders below.</p></div>";
-  var plats = (c.profile && c.profile.platforms) || [];
+  var prof = c.profile || {}, plats = prof.platforms || [];
+  // Off for the platform, or for the whole emulator (XPSemu's saves are inside its disk image).
+  var off = function (p) { return p.sync_saves === false || (p.sync_saves === undefined && prof.sync_saves === false); };
   var platPills = plats.map(function (p) {
     if (p.sync_requires_option) return pill(p.dir, "warn");
-    return pill(p.dir, p.sync_saves === false ? "off" : "ok");
+    return pill(p.dir, off(p) ? "off" : "ok");
   }).join("");
+  var why = plats.filter(off).map(function (p) { return p.sync_note || prof.sync_note; }).filter(Boolean)[0];
   var on = wz.editing ? !!wz.current[c.root] : true;
   return '<div class="emu"><label class="head"><input type="checkbox" data-root="' + esc(c.root) + '"' + (on ? " checked" : "") + "><b>" + esc(c.name) + "</b>" +
     (c.title_id ? pill(c.title_id, "off") : "") + "</label>" +
     '<div class="path">' + esc(c.root) + "</div>" +
     (c.cores.length ? '<div class="group"><small>Cores</small><div>' + c.cores.map(function (x) { return pill(x); }).join("") + "</div></div>" : "") +
-    (plats.length ? '<div class="group"><small>Platforms</small><div>' + platPills + "</div></div>" : "") +
+    (plats.length ? '<div class="group"><small>Platforms</small><div>' + platPills +
+      (why ? '<br><small class="muted">' + esc(why) + "</small>" : "") + "</div></div>" : "") +
     ($("wzSaveSync").checked ? '<div class="group"><small>Save sync</small><div><select data-sync="' + esc(c.root) + '">' +
       [["all", "Saves and states"], ["saves", "Saves"], ["off", "Off"]].concat((wz.sync || {})[c.root] === "mixed" ? [["mixed", "Per platform"]] : []).map(function (o) {
         return '<option value="' + o[0] + '"' + (((wz.sync || {})[c.root] || "all") === o[0] ? " selected" : "") + ">" + o[1] + "</option>";
@@ -1247,7 +1251,10 @@ function loadSettings() {
   api("GET", "/api/paths").then(function (list) {
     $("paths").innerHTML = list.map(function (m) {
       var layouts = { psp: "PSP save folders", gci: "GameCube memory card files", wii: "Wii save folder", ps2: "PS2 memory card saves" };
-      var saves = !m.save_dir ? pill("not synced", "off") + (m.sync_note ? '<br><small class="warn">' + esc(m.sync_note) + "</small>" : "")
+      // Saves that only sync as the emulator's shared memory cards (PS4SX2's).
+      var shared = !m.save_dir && m.cards && m.cards.mode === "shared" && m.cards.active;
+      var saves = shared ? pill("shared memory cards", "ok") + "<br><small class=muted>backed up to RomM as they are</small>"
+        : !m.save_dir ? pill("not synced", "off") + (m.sync_note ? '<br><small class="warn">' + esc(m.sync_note) + "</small>" : "")
         : m.save_layout ? pill(layouts[m.save_layout] || m.save_layout, "ok") + "<br><small class=muted>synced as one " + (m.save_layout === "ps2" ? "card" : "zip") + " per game</small>"
         : "<code>" + esc(m.save_dir) + "</code>";
       return "<tr><td>" + esc(m.platforms.split(",")[0]) + "<br><small class=muted>" + esc(m.emulator) + "</small></td><td><code>" + esc(m.rom_dir) + "</code></td><td class=syncCol>" + saves +

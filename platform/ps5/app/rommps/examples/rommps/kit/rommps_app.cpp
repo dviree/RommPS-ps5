@@ -1031,6 +1031,7 @@ const Details &App::details(int rom_id)
         out.completion = static_cast<int>(num(j.get(), "completion"));
         out.my_rating = static_cast<int>(num(j.get(), "my_rating"));
         out.archived = plain(str(j.get(), "archived"));
+        out.saves_off = plain(str(j.get(), "saves_off"));
         out.updates = static_cast<int>(num(j.get(), "updates"));
         out.dlc = static_cast<int>(num(j.get(), "dlc"));
         out.title_id = str(j.get(), "title_id");
@@ -1300,11 +1301,11 @@ void App::retry_download(int job_id)
     });
 }
 
-void App::remove_game(int rom_id, bool quiet)
+void App::remove_game(int rom_id, bool quiet, int disc)
 {
     char body[64];
-    std::snprintf(body, sizeof body, "{\"rom_id\":%d}", rom_id);
-    api_.post("/api/delete", body, [this, quiet](const Response &r) {
+    std::snprintf(body, sizeof body, "{\"rom_id\":%d,\"disc\":%d}", rom_id, disc);
+    api_.post("/api/delete", body, [this, quiet, rom_id](const Response &r) {
         if (!r.ok())
         {
             say("Couldn't remove the game: " + r.message());
@@ -1312,6 +1313,7 @@ void App::remove_game(int rom_id, bool quiet)
         }
         if (!quiet)
             say("Game removed. Its saves are kept.");
+        check_on_console(rom_id); // its discs, for the versions list
         refresh_lists();
         refresh_installed();
         refresh_queue();

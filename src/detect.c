@@ -531,7 +531,7 @@ cJSON *detect_emulators(void) {
             if (g) closedir(g);
             cJSON_AddNumberToObject(d, "games", games);
         }
-        free(maps);
+        profiles_free(maps);
         cJSON_Delete(one);
         const cJSON *fixed = cJSON_GetObjectItemCaseSensitive(profile, "fixed");
         cJSON_AddItemToObject(c, "fixed", fixed ? cJSON_Duplicate(fixed, 1) : cJSON_CreateArray());
@@ -544,6 +544,24 @@ cJSON *detect_emulators(void) {
  * folders the user picked stay; but for the keys nobody can set but the
  * preset, which follow it (PSXS5's cores, as its versions change them). */
 static const char *const PRESET_ONLY[] = {"state_core_setting"};
+
+/* Folders a preset used to have and has moved since: a saved copy of one is
+ * the old preset's, not the user's pick, so it follows the preset now. When a
+ * preset's folder changes, its old value goes here, or the profiles saved
+ * with it keep it. */
+static const struct {
+    const char *profile, *key, *value;
+} SHIPPED_FOLDERS[] = {
+    {"seedee5", "save_dir", "{root}/saves"}, /* CD-i saves: each game's NVRAM, 1.4.0 */
+};
+
+static int shipped_folder(const char *profile, const char *key, const cJSON *have) {
+    for (size_t i = 0; i < sizeof SHIPPED_FOLDERS / sizeof SHIPPED_FOLDERS[0]; i++)
+        if (!strcmp(SHIPPED_FOLDERS[i].profile, profile) && !strcmp(SHIPPED_FOLDERS[i].key, key) &&
+            cJSON_IsString(have) && !strcmp(have->valuestring, SHIPPED_FOLDERS[i].value))
+            return 1;
+    return 0;
+}
 
 /* "sync_saves" says whether an emulator's saves can sync, and only the preset
  * gets to say it now (profiles.c). Saved profiles still carry copies from
@@ -620,7 +638,7 @@ static int fill_from_catalog(cJSON *p) {
         if (!have) {
             cJSON_AddItemToObject(p, k->string, cJSON_Duplicate(k, 1));
             added++;
-        } else if (preset_only && !cJSON_Compare(have, k, 1)) {
+        } else if ((preset_only || shipped_folder(jget_str(p, "id", ""), k->string, have)) && !cJSON_Compare(have, k, 1)) {
             cJSON_ReplaceItemInObjectCaseSensitive(p, k->string, cJSON_Duplicate(k, 1));
             added++;
         }
@@ -643,11 +661,48 @@ static int fill_from_catalog(cJSON *p) {
     return added + dropped;
 }
 
+/* A system a newer preset adds to an emulator (Switch to PS5CEMU-HAR, for
+ * Eden) joins its saved profile. When another emulator already plays that
+ * system, the new one comes in excluded from it, as the user's pick stands:
+ * Emulator Settings can hand it over. */
+static int add_new_platforms(cJSON *profiles) {
+    int added = 0;
+    cJSON *p;
+    cJSON_ArrayForEach(p, profiles) {
+        const cJSON *entry = detect_catalog_entry(jget_str(p, "id", ""));
+        const cJSON *preset = entry ? cJSON_GetObjectItemCaseSensitive(entry, "profile") : NULL, *ce, *pe;
+        cJSON *mine = cJSON_GetObjectItemCaseSensitive(p, "platforms");
+        if (!preset || !cJSON_IsArray(mine)) continue;
+        cJSON_ArrayForEach(ce, cJSON_GetObjectItemCaseSensitive(preset, "platforms")) {
+            const char *key = profiles_system_key(ce);
+            int have = !key[0];
+            cJSON_ArrayForEach(pe, mine) have |= !strcmp(profiles_system_key(pe), key);
+            if (have) continue;
+            cJSON_AddItemToArray(mine, cJSON_Duplicate(ce, 1));
+            const cJSON *o;
+            int taken = 0;
+            cJSON_ArrayForEach(o, profiles) {
+                if (o == p || cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(o, "enabled")) || profiles_excludes(o, key)) continue;
+                cJSON_ArrayForEach(pe, cJSON_GetObjectItemCaseSensitive(o, "platforms")) taken |= !strcmp(profiles_system_key(pe), key);
+            }
+            if (taken) {
+                cJSON *ex = cJSON_GetObjectItemCaseSensitive(p, "exclude");
+                if (!cJSON_IsArray(ex)) ex = cJSON_AddArrayToObject(p, "exclude");
+                cJSON_AddItemToArray(ex, cJSON_CreateString(key));
+            }
+            LOGI("the %s profile plays %s now%s", jget_str(p, "name", ""), key, taken ? " (another emulator keeps it)" : "");
+            added++;
+        }
+    }
+    return added;
+}
+
 int detect_refresh_profiles(cJSON *profiles) {
     int changed = 0;
     cJSON *found = NULL;
     cJSON *each;
     cJSON_ArrayForEach(each, profiles) changed += fill_from_catalog(each) > 0;
+    changed += add_new_platforms(profiles);
     for (int i = 0; i < cJSON_GetArraySize(profiles); i++) {
         cJSON *p = cJSON_GetArrayItem(profiles, i);
         const char *id = jget_str(p, "id", "");

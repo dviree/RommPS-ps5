@@ -216,7 +216,7 @@ void ra2_check(int now) {
     } else {
         cJSON_Delete(folders);
     }
-    free(maps);
+    profiles_free(maps);
     pthread_mutex_unlock(&g_lock);
 }
 

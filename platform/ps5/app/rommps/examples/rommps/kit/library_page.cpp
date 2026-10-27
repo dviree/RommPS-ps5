@@ -453,8 +453,17 @@ void LibraryPage::draw_platforms(hui::gfx::DrawList &list, const hui::ui::Fonts 
                 continue;
             // Each its own shape, as tall as fits 120 wide, standing on the same line.
             const float shape = cover_shape(app, g);
-            const float h = std::min(133.0f, 120.0f / shape), w = h * shape;
-            const Rect c{r.x + r.w - 28 - w - static_cast<float>(k) * 40, r.y + 161 + static_cast<float>(k) * 10 - h, w, h};
+            float h = std::min(133.0f, 120.0f / shape), w = h * shape;
+            // Just loaded, it pops in: from a little smaller, past its size and back.
+            double since = 0;
+            if (!g->cover.empty() && app.cover_aspect(g->cover, &since) > 0)
+            {
+                const float pop = 0.85f + 0.15f * tween::back_out(tween::clamp01(static_cast<float>(app.clock() - since) / 0.35f));
+                w *= pop;
+                h *= pop;
+            }
+            const float right = r.x + r.w - 28 - static_cast<float>(k) * 40 - std::min(133.0f, 120.0f / shape) * shape * 0.5f;
+            const Rect c{right - w * 0.5f, r.y + 161 + static_cast<float>(k) * 10 - h, w, h};
             list.shadow({c.x, c.y + 8, c.w, c.h}, 10, 16, Color::rgb(0x000000, 0.35f));
             draw_cover(list, fonts, look, app, g, c, 1.0f - 0.15f * static_cast<float>(k), 10, false);
         }

@@ -16,7 +16,7 @@ on:
         type: string
         required: true
       tag:
-        description: "The release, e.g. v1.3.1"
+        description: "The release, e.g. v1.4.0"
         type: string
         required: true
       payloads:

@@ -1384,7 +1384,9 @@ static void route(request *r) {
     }
     if (is_post && !strcmp(r->path, "/api/delete")) {
         cJSON *j = body_json(r);
-        int rc = library_delete_rom((int)jget_num(j, "rom_id", 0), err, sizeof err);
+        const int disc = (int)jget_num(j, "disc", 0);
+        int rc = disc > 0 ? library_delete_disc((int)jget_num(j, "rom_id", 0), disc, err, sizeof err)
+                          : library_delete_rom((int)jget_num(j, "rom_id", 0), err, sizeof err);
         cJSON_Delete(j);
         if (rc) send_error(fd, 400, err);
         else send_ok(fd);
@@ -1438,7 +1440,7 @@ static void route(request *r) {
             cJSON_AddNumberToObject(o, "own_games", maps[i].mount_blocked);
             cJSON_AddItemToArray(arr, o);
         }
-        free(maps);
+        profiles_free(maps);
         send_json(fd, 200, arr);
         return;
     }

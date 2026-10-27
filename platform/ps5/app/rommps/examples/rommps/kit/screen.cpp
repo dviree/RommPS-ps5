@@ -562,8 +562,10 @@ class RommPS final : public app::Concept
         return job_id && job_id == cancel_job_ && cancel_hold_ > 0 ? std::min(1.0f, cancel_hold_ / kCancelHold) : 0.0f;
     }
 
-    // rom_ids: the game, or every disc of a set; one notification for them all.
-    bool hold_to_remove(const InputFrame &input, float dt, app::Feedback &feedback, const std::vector<int> &rom_ids)
+    // rom_ids: the game, or every disc of a set; one notification for them
+    // all. disc: one disc of a folder of discs.
+    bool hold_to_remove(const InputFrame &input, float dt, app::Feedback &feedback, const std::vector<int> &rom_ids,
+                        int disc = 0)
     {
         if (!input.is_held(Action::confirm))
         {
@@ -586,7 +588,7 @@ class RommPS final : public app::Concept
             return false;
 
         for (std::size_t i = 0; i < rom_ids.size(); ++i)
-            app_.remove_game(rom_ids[i], i + 1 < rom_ids.size());
+            app_.remove_game(rom_ids[i], i + 1 < rom_ids.size(), disc);
         feedback.play(audio::Cue::back);
         feedback.rumble(0.8f, 0.2f);
         remove_hold_ = -1;
@@ -755,7 +757,7 @@ class RommPS final : public app::Concept
         // busy: something of it downloads; d: its own download, with a bar.
         const auto fill = [&](VersionRow &r, bool busy, const rommps::Download *d, bool all) {
             const bool focused = static_cast<int>(out.size()) == versions_list_.focus();
-            const bool removable = r.here && !r.disc; // a single disc doesn't come off on its own
+            const bool removable = r.here;
             if (d && d->active())
             {
                 busy = true;
@@ -764,11 +766,9 @@ class RommPS final : public app::Concept
             }
             r.row.value = busy ? (focused && r.job ? "Hold to cancel" : d && d->syncing() ? "Syncing saves" : "Downloading")
                           : removable ? (focused ? "Hold to remove" : "Downloaded")
-                          : r.here    ? "Downloaded"
                           : all       ? "Download all"
                                       : "Download";
             r.row.danger = removable && focused;
-            r.row.enabled = !(r.here && r.disc);
             if (busy || r.here)
                 r.fetch.clear();
         };
@@ -875,8 +875,8 @@ class RommPS final : public app::Concept
                     job = &d;
             hold_to_cancel(input, dt, job, feedback);
         }
-        else if (row.here && !row.disc)
-            hold_to_remove(input, dt, feedback, row.ids); // the row turns back to Download
+        else if (row.here)
+            hold_to_remove(input, dt, feedback, row.ids, row.disc); // the row turns back to Download
         else if (pick.activated && !row.fetch.empty())
         {
             for (const rommps::Details::Version &v : app_.details(sheet_game_.id).versions)
@@ -1562,6 +1562,8 @@ class RommPS final : public app::Concept
             facts.push_back("Main story ~" + std::to_string(static_cast<int>(info.main_story_s / 3600.0 + 0.5)) + " h");
         if (!info.players.empty())
             facts.push_back(info.players + (info.players == "1" ? " player" : " players"));
+        if (!info.saves_off.empty())
+            facts.push_back(info.saves_off);
         std::string line;
         for (const std::string &f : facts)
             line += (line.empty() ? "" : "  \xC2\xB7  ") + f;
@@ -1669,6 +1671,24 @@ class RommPS final : public app::Concept
         const bool ready = app_.status().paired && app_.status().setup_complete;
         if (!ready)
             return;
+        if (sheet_open_ && versions_open_)
+        {
+            // What Cross does on the focused row of a game's versions.
+            const std::vector<VersionRow> picker = version_rows();
+            const int focus = versions_list_.focus();
+            const VersionRow *row = focus < static_cast<int>(picker.size()) ? &picker[static_cast<std::size_t>(focus)] : nullptr;
+            const char *cross = !row                    ? nullptr
+                                : row->job              ? "Hold to cancel"
+                                : row->here             ? "Hold to remove"
+                                : !row->fetch.empty()   ? "Download"
+                                                        : nullptr;
+            std::vector<ui::Hint> hints;
+            if (cross)
+                hints.push_back({ui::Button::cross, cross});
+            hints.push_back({ui::Button::circle, "Back"});
+            hint_row(list, fonts, style, hints.data(), static_cast<int>(hints.size()));
+            return;
+        }
         if (sheet_open_)
         {
             // Scrolling, with the D-pad or the left stick, when there's something to scroll.

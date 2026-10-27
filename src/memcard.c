@@ -70,7 +70,7 @@ static int cards_list(card *out, int max) {
             str_copy(c->label, sizeof c->label, m->profile_name);
         }
     }
-    free(maps);
+    profiles_free(maps);
     return n;
 }
 
@@ -489,7 +489,7 @@ cJSON *memcard_status(void) {
     /* An emulator that keeps either: PS2's method can be chosen (lrps2: 1.2's name). */
     cJSON_AddBoolToObject(j, "choice", choice != NULL);
     cJSON_AddBoolToObject(j, "lrps2", choice != NULL);
-    free(maps);
+    profiles_free(maps);
     card cards[MAX_CARDS];
     int n = cards_list(cards, MAX_CARDS);
     cJSON_AddBoolToObject(j, "enabled", n > 0 && config_server_at_least(5, 3, 0));

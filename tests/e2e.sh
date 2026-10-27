@@ -61,7 +61,8 @@ mkdir -p "$T/etaHEN/payloads"; echo "old-payload" > "$T/etaHEN/payloads/romm-syn
 MB="$T/mountable"; mkdir -p "$MB"
 ROMM_SYNC_HOMEBREW="$T/homebrew" ROMM_SYNC_MOUNTS="$MB" ROMM_SYNC_DATA="$T/data" ROMM_SYNC_AUTOSTART="$T/etaHEN/payloads" \
   ROMM_SYNC_CATALOG="$T/catalog.json" ROMM_SYNC_APP_DIRS="$T/apps" ROMM_SYNC_FS_ROOTS="$T" ROMM_SYNC_COVERS_TICK=1 ROMM_SYNC_RA2_EVERY=1 ROMM_SYNC_INSTALLED_SIG_SEC=2 \
-  ROMM_SYNC_UPDATE_URL="http://127.0.0.1:$MOCK_PORT/_github/release" "$ROOT/build/host/romm-sync" >"$T/daemon.log" 2>&1 &
+  ROMM_SYNC_UPDATE_URL="http://127.0.0.1:$MOCK_PORT/_github/release" ROMM_SYNC_PRESETS_URL="http://127.0.0.1:$MOCK_PORT/_github/assets" \
+  "$ROOT/build/host/romm-sync" >"$T/daemon.log" 2>&1 &
 sleep 6   # let the (unpaired, skipped) startup sync pass
 
 echo "web UI script parses"
@@ -165,7 +166,11 @@ for _ in $(seq 1 16); do [[ "$(last reason)" == "save changed" && "$(last upload
 curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/_admin/save" -d '{"rom_id":11,"slot":"autosave","file_name":"SM.srm","content":"from-other-device"}' >/dev/null
 post /api/sync >/dev/null; sleep 2
 [[ "$(last deferred)" == 1 && "$(cat "$RA/saves/Snes9x/Super Metroid (USA).srm")" == "server-save" ]] || fail "download must wait while a game runs"
-rm "$T/data/foreground"
+# The console rests with the game open: nothing in front, its processes still there. It hasn't closed.
+echo "PPSA00000" > "$T/data/alive"; rm "$T/data/foreground"; sleep 7
+! grep -q "game PPSA00000 closed" "$T/daemon.log" || fail "a console resting with the game open counted as the game closing"
+[[ "$(cat "$RA/saves/Snes9x/Super Metroid (USA).srm")" == "server-save" ]] || fail "a download came down while the game rested"
+rm "$T/data/alive"
 for _ in $(seq 1 30); do [[ "$(last reason)" == "game exited" ]] && break; sleep 0.5; done
 [[ "$(cat "$RA/saves/Snes9x/Super Metroid (USA).srm")" == "from-other-device" ]] || fail "deferred download not applied after exit"
 sleep 3 # let the watcher see our own download settle (no-op sync)
@@ -987,6 +992,38 @@ n=$(dump | python3 -c "import json,sys; print(sum(1 for s in json.load(sys.stdin
 [[ "$n" == 1 ]] || fail "a game's own VMU synced while the cards are shared: $n saves"
 rm "$FC/emu.cfg"
 
+echo "16g. CD-i (Seedee5): a game's NVRAM, one file with no extension in a folder named after the game; states by slot"
+CD="$T/cdiemu"; NV="$CD/saves/same_cdi/nvram"
+mkdir -p "$CD/roms" "$CD/saves/states" "$NV/Zelda (USA)/cdimono1"
+printf 'ROM:Zelda' > "$CD/roms/Zelda (USA).chd"; printf 'ROM:Link' > "$CD/roms/Link (USA).chd"
+printf 'zelda-nvram' > "$NV/Zelda (USA)/cdimono1/mk48t08"
+printf 'zelda-slot1' > "$CD/saves/states/Zelda (USA).slot1.state"
+curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/_admin/platform" -d '{"id":95,"slug":"philips-cd-i","name":"Philips CD-i"}' >/dev/null
+curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/_admin/rom" -d '{"id":950,"platform_id":95,"name":"Zelda","fs_name":"Zelda (USA).chd"}' >/dev/null
+curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/_admin/rom" -d '{"id":951,"platform_id":95,"name":"Link","fs_name":"Link (USA).chd"}' >/dev/null
+curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/_admin/save" -d '{"rom_id":951,"slot":"autosave","file_name":"mk48t08","content":"link-nvram-from-pc"}' >/dev/null
+python3 - "$T/catalog.json" "$CD" <<'PY'
+import json, sys
+cat = json.load(open(sys.argv[1]))
+cat.append({"id": "cdilike", "name": "Seedee5-like", "detect": [sys.argv[2]],
+            "profile": {"root": sys.argv[2], "rom_dir": "{root}/roms",
+                        "save_dir": "{root}/saves/same_cdi/nvram/{rom_stem}/cdimono1", "save_exts": "mk48t08", "save_name": "mk48t08",
+                        "state_dir": "{root}/saves/states", "state_exts": ".state", "state_format": "raw", "state_cores": "seedee5",
+                        "platforms": [{"romm": ["philips-cd-i"], "dir": "cdi", "emulator": "same_cdi"}]}})
+json.dump(cat, open(sys.argv[1], "w"))
+PY
+post /api/setup/emulators "{\"roots\":[\"$HB\",\"$T/psxemu\",\"$T/n64emu\",\"$T/n64b\",\"$T/ps2emu\",\"$T/nope\",\"$T/gcA\",\"$T/gcB\",\"$XA\",\"$CE\",\"$FC\",\"$CD\"],
+  \"choices\":{\"psx\":\"$T/psxemu\",\"n64\":\"$T/n64emu\",\"ps2\":\"$T/ps2emu\",\"ngc\":\"$T/gcA\",\"wii\":\"$T/gcA\",\"wiiu\":\"$CE\",\"3ds\":\"$CE\",\"dc\":\"$FC\",\"philips-cd-i\":\"$CD\"},
+  \"also\":{\"n64\":[\"$T/n64b\"],\"ngc\":[\"$T/gcB\"],\"wii\":[\"$T/gcB\"],\"psx\":[\"$XA\"]}}" >/dev/null || fail "setup with a Seedee5-like emulator refused"
+syncnow
+cdi=$(dump | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+print(sorted((s['rom_id'], s['file_name'].split(' [')[0], s.get('content', '')[:20]) for s in d['saves'] + d['states'] if s['rom_id'] == 950))")
+[[ "$cdi" == *"'zelda-nvram')"* ]] || fail "a CD-i game's NVRAM must go up: $cdi"
+[[ "$cdi" == *"'Zelda (USA).slot1"* ]] || fail "a CD-i state must go up: $cdi"
+[[ "$(cat "$NV/Link (USA)/cdimono1/mk48t08" 2>/dev/null)" == "link-nvram-from-pc" ]] \
+  || fail "RomM's NVRAM must land in the game's own folder: $(find "$NV" -type f)"
+
 echo "17. paired with another server, the old server's game and save ids are forgotten"
 hist() { curl -sf "$API/api/status" | python3 -c "import json,sys; print(len(json.load(sys.stdin)['sync']['history']))"; }
 n=$(hist)
@@ -1113,6 +1150,12 @@ sys.exit(any(d.get('rom_id') == 71 and d['status'] not in ('done', 'error', 'can
 done
 post /api/download '{"rom_id":71}' >/dev/null
 discs_here "[1,2]"
+# One disc comes off on its own; the game goes with its last.
+post /api/delete '{"rom_id":71,"disc":1}' >/dev/null || fail "removing one disc refused"
+discs_here "[2]"
+[[ -z "$(find "$T" -name 'Disc Game (USA) (Disc 1).*' -not -path '*/data/*')" ]] || fail "the disc's files must go"
+post /api/delete '{"rom_id":71,"disc":2}' >/dev/null || fail "removing the last disc refused"
+[[ "$(curl -sf "$API/api/roms/71/on_console")" == *'"installed":false'* ]] || fail "with its last disc the game goes: $(curl -sf "$API/api/roms/71/on_console")"
 
 echo "21. one-file folder games: saves named after the file sync; old extensionless downloads are moved into the folder"
 curl -sfk -X POST "$TM/_admin/rom" -d '{"id":70,"platform_id":1,"name":"Folder Game","fs_name":"Folder Game",
@@ -1446,6 +1489,169 @@ for _ in $(seq 1 40); do [[ ! -d "$NX/roms/Old" && ! -d "$NX/roms/Empty" ]] && b
 [[ "$(onc 908)/$(onc 909)" == "True/False" ]] || fail "the unfolded game stays on the console, the empty one doesn't: $(onc 908)/$(onc 909)"
 
 
+echo "28b. Switch saves: the emulator's first user's, a zip per game; never another user's; left alone when it syncs them itself"
+U1=AAAA0000000000000000000000000001; U2=BBBB0000000000000000000000000002; NS="$NX/user/save"
+mkdir -p "$NS/$U1/0100ABCD12340000" "$NS/$U2/0100ABCD12340000"
+printf 'sword-u1' > "$NS/$U1/0100ABCD12340000/SaveData.bin"
+printf 'sword-u2' > "$NS/$U2/0100ABCD12340000/SaveData.bin"
+printf '{"profiles": {"first": "%s", "users": {"1": "%s"}}}' "$U1" "$U1" > "$NX/users.json"
+curl -skf -X POST "$SV/_admin/save" -d "{\"rom_id\":908,\"slot\":\"autosave\",\"file_name\":\"0100AAAA00000000.zip\",\"content_b64\":\"$(python3 -c "
+import base64,io,zipfile
+b=io.BytesIO(); z=zipfile.ZipFile(b,'w'); z.writestr('0100AAAA00000000/SaveData.bin','old-from-switch'); z.close()
+print(base64.b64encode(b.getvalue()).decode())")\"}" >/dev/null
+nxsaves() { python3 - "$API" "$NX" "$1" <<'PY' >/dev/null
+import json, sys, urllib.request
+api, root, own = sys.argv[1], sys.argv[2], sys.argv[3]
+cfg = json.load(urllib.request.urlopen(api + "/api/config"))
+for p in cfg["profiles"]:
+    if p.get("id") == "nxlike":
+        p["sync_saves"] = True
+        p["platforms"][0].update({"save_layout": "switch", "bundle_dirs": "{root}/user/save/{switch_user}",
+                                  "switch_users": "{root}/users.json", "switch_sync": own})
+req = urllib.request.Request(api + "/api/config", json.dumps({"profiles": cfg["profiles"]}).encode(), {"Content-Type": "application/json"})
+urllib.request.urlopen(req)
+PY
+}
+nxsaves "{root}/sync.json"
+syncnow
+nx=$(curl -skf "$SV/_admin/dump" | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+print(sorted((s['rom_id'], s['file_name'].split(' [')[0]) for s in d['saves'] if s['rom_id'] in (905, 908)))")
+[[ "$nx" == *"(905, '0100ABCD12340000"* ]] || fail "the first user's Switch save must go up, as a zip named by title id: $nx"
+# What went up is the first user's: it comes back from RomM when it's gone here.
+rm -r "$NS/$U1/0100ABCD12340000"
+syncnow
+[[ "$(cat "$NS/$U1/0100ABCD12340000/SaveData.bin" 2>/dev/null)" == "sword-u1" ]] \
+  || fail "the first user's save must be the one on RomM: $(find "$NS" -type f)"
+[[ "$(cat "$NS/$U2/0100ABCD12340000/SaveData.bin")" == "sword-u2" ]] || fail "another user's saves must stay as they are"
+[[ "$(cat "$NS/$U1/0100AAAA00000000/SaveData.bin" 2>/dev/null)" == "old-from-switch" ]] \
+  || fail "RomM's Switch save must land in the user's folder: $(find "$NS" -type f)"
+# The emulator syncing this user's saves itself (ProsperoEden's save-sync.json): left alone, and said why.
+printf '{"profiles": [{"profile": "%s", "url": "https://elsewhere.example", "token": "x"}]}' "$U1" > "$NX/sync.json"
+nxsaves "{root}/sync.json"
+note=$(curl -sf "$API/api/paths" | python3 -c "import json,sys; print([m['sync_note'] for m in json.load(sys.stdin) if m['profile'] == 'NX-like'])")
+[[ "$note" == *"syncs this user's saves itself"* ]] || fail "an emulator syncing its own saves must be left alone, and say so: $note"
+rm "$NX/sync.json"
+
+echo "28c. Xbox saves: E:\\UDATA\\<title id> inside xemu's hard disk image, as RomM's save unit; never while xemu runs"
+XB="$T/homebrew/PPSA97358"; XS="$T/xbsave"; mkdir -p "$XB/games" "$XB/hdd" "$XS/006412E217B6"
+python3 "$ROOT/tests/make_disc.py" xiso "$XB/games/Halo (USA).xiso.iso" 4D530004
+head -c 4000 /dev/urandom > "$XB/games/Rally (USA).xiso.iso"   # unreadable: the id comes from RomM's save_target
+printf 'halo-save' > "$XS/006412E217B6/savegame.bin"; printf 'meta' > "$XS/TitleMeta.xbx"
+python3 "$ROOT/tests/xboxhdd.py" make "$XB/hdd/disk.qcow2" 4D530004 "$XS" --compressed
+printf "[sys.files]\nhdd_path = '%s'\n" "$XB/hdd/disk.qcow2" > "$XB/xemu.toml"
+curl -skf -X POST "$SV/_admin/platform" -d '{"id":96,"slug":"xbox","name":"Xbox"}' >/dev/null
+curl -skf -X POST "$SV/_admin/rom" -d '{"id":960,"platform_id":96,"name":"Halo","fs_name":"Halo (USA).xiso.iso"}' >/dev/null
+curl -skf -X POST "$SV/_admin/rom" -d '{"id":961,"platform_id":96,"name":"Rally","fs_name":"Rally (USA).xiso.iso","title_id":"LA-020","save_target":"4C410014"}' >/dev/null
+python3 - "$API" "$XB" <<'PY' >/dev/null
+import json, sys, urllib.request
+api, root = sys.argv[1], sys.argv[2]
+cfg = json.load(urllib.request.urlopen(api + "/api/config"))
+profiles = [p for p in cfg["profiles"] if p.get("id") != "xboxlike"] + [{
+    "id": "xboxlike", "name": "Xbox-like", "enabled": True, "root": root, "rom_dir": "{root}/games", "bios_dir": "{root}",
+    "sync_saves": True, "platforms": [{"romm": ["xbox"], "dir": "xbox", "emulator": "xemu", "save_layout": "xbox"}]}]
+req = urllib.request.Request(api + "/api/config", json.dumps({"profiles": profiles}).encode(), {"Content-Type": "application/json"})
+urllib.request.urlopen(req)
+PY
+xbunits() { curl -skf "$SV/_admin/dump" | python3 -c "
+import json,sys,io,ssl,zipfile,urllib.request
+d=json.load(sys.stdin); out=[]; tls=ssl._create_unverified_context()
+for s in d['saves']:
+    if s['rom_id'] not in (960,961): continue
+    z=zipfile.ZipFile(io.BytesIO(urllib.request.urlopen('$SV/_admin/save_content?id=%d' % s['id'], context=tls).read()))
+    out.append((s['rom_id'], s['file_name'].split(' [')[0], s['emulator'], sorted((n, z.read(n).decode()) for n in z.namelist())))
+print(sorted(out))"; }
+syncnow
+units=$(xbunits)
+[[ "$units" == *"(960, '4D530004', 'xemu', [('4d530004/006412E217B6/savegame.bin', 'halo-save'), ('4d530004/TitleMeta.xbx', 'meta')])"* ]] \
+  || fail "an Xbox save must go up as RomM's save unit, read out of the hard disk image: $units"
+# While xemu runs, its disk is left alone: what changes there waits, and so does RomM's save for the other game.
+b64=$(python3 -c "import base64,io,zipfile; b=io.BytesIO(); z=zipfile.ZipFile(b,'w'); z.writestr('4C410014/SLOT0/rally.sav','rally-from-pc'); z.writestr('4C410014/TitleMeta.xbx','rally'); z.close(); print(base64.b64encode(b.getvalue()).decode())")
+curl -skf -X POST "$SV/_admin/save" -d "{\"rom_id\":961,\"slot\":\"autosave\",\"file_name\":\"4C410014.zip\",\"emulator\":\"xemu\",\"content_b64\":\"$b64\"}" >/dev/null
+echo "PPSA97358" > "$T/data/alive"
+printf 'halo-save-2' > "$XS/006412E217B6/savegame.bin"
+python3 "$ROOT/tests/xboxhdd.py" make "$XB/hdd/disk.qcow2" 4D530004 "$XS"
+units=$(xbunits)
+syncnow
+[[ "$(xbunits)" == "$units" ]] || fail "nothing on the disk must go up while xemu has it open: $(xbunits)"
+[[ "$(python3 "$ROOT/tests/xboxhdd.py" get "$XB/hdd/disk.qcow2" 4C410014 "$T/xbout")" == none ]] \
+  || fail "a save must not go onto the disk while xemu has it open"
+rm "$T/data/alive"
+syncnow
+units=$(xbunits)
+[[ "$units" == *"'4d530004/006412E217B6/savegame.bin', 'halo-save-2'"* ]] || fail "the save changed while xemu ran must go up once it's closed: $units"
+python3 "$ROOT/tests/xboxhdd.py" get "$XB/hdd/disk.qcow2" 4C410014 "$T/xbout" >/dev/null
+[[ "$(cat "$T/xbout/4C410014/SLOT0/rally.sav" 2>/dev/null)" == "rally-from-pc" && "$(cat "$T/xbout/4C410014/TitleMeta.xbx")" == rally ]] \
+  || fail "RomM's save (by save_target) must land on the disk once xemu is closed: $(find "$T/xbout" -type f)"
+python3 "$ROOT/tests/xboxhdd.py" check "$XB/hdd/disk.qcow2" >/dev/null || fail "the hard disk image must stay consistent: $(python3 "$ROOT/tests/xboxhdd.py" check "$XB/hdd/disk.qcow2" 2>&1)"
+python3 "$ROOT/tests/xboxhdd.py" get "$XB/hdd/disk.qcow2" 4D530004 "$T/xbout" >/dev/null
+[[ "$(cat "$T/xbout/4d530004/006412E217B6/savegame.bin")" == halo-save-2 ]] || fail "the other game's save on the disk must stay as it was"
+[[ ! -e "$XB/hdd/disk.qcow2.romm" ]] || fail "no copy of the image may be left behind"
+syncnow
+[[ "$(xbunits)" == "$units" ]] || fail "a save just placed must not go up again: $(xbunits)"
+
+echo "28d. Xbox 360 saves: the first signed-in player's <title id>/00000001 and its headers, as a zip per game; games in a folder each"
+XE="$T/x360emu"; XU="$XE/saves/E0005F7A522743A4"; XO="$XE/saves/E0000000000000AB"
+mkdir -p "$XE/games" "$XU/4D5307E6/00000001/SaveGame" "$XU/4D5307E6/Headers/00000001" "$XU/4D5307E6/00000002" "$XO/4D5307E6/00000001"
+printf 'e0005f7a522743a4\r\n0\r\n0\r\n0\r\n' > "$XE/saves/local-players.txt"
+printf 'gears' > "$XU/4D5307E6/00000001/SaveGame/data.bin"; printf 'hdr' > "$XU/4D5307E6/Headers/00000001/SaveGame.header"
+printf 'dlc' > "$XU/4D5307E6/00000002/dlc.bin"; printf 'other-player' > "$XO/4D5307E6/00000001/x.bin"
+curl -skf -X POST "$SV/_admin/platform" -d '{"id":97,"slug":"xbox360","name":"Xbox 360"}' >/dev/null
+curl -skf -X POST "$SV/_admin/rom" -d '{"id":971,"platform_id":97,"name":"Gears","fs_name":"Gears (USA).iso","save_target":"4D5307E6"}' >/dev/null
+python3 - "$API" "$XE" <<'PY' >/dev/null
+import json, sys, urllib.request
+api, root = sys.argv[1], sys.argv[2]
+cfg = json.load(urllib.request.urlopen(api + "/api/config"))
+profiles = [p for p in cfg["profiles"] if p.get("id") != "x360like"] + [{
+    "id": "x360like", "name": "X360-like", "enabled": True, "root": root, "rom_dir": "{root}/games", "bios_dir": "{root}",
+    "sync_saves": True, "platforms": [{"romm": ["xbox360"], "dir": "xbox360", "emulator": "xenia", "game_folders": True,
+    "save_layout": "x360", "bundle_dirs": "{root}/saves/{xuid}", "x360_users": "{root}/saves/local-players.txt"}]}]
+req = urllib.request.Request(api + "/api/config", json.dumps({"profiles": profiles}).encode(), {"Content-Type": "application/json"})
+urllib.request.urlopen(req)
+PY
+post /api/download '{"rom_id":971,"name":"Gears"}' >/dev/null
+for _ in $(seq 1 80); do [[ -f "$XE/games/Gears (USA)/Gears (USA).iso" ]] && break; sleep 0.25; done
+[[ -f "$XE/games/Gears (USA)/Gears (USA).iso" && ! -e "$XE/games/Gears (USA).iso" ]] \
+  || fail "a single-file game must land in a folder of its own: $(find "$XE/games")"
+# A GOD game: RomM has no title id for it (sigil doesn't read GOD), its header does. It comes down as the tree it is.
+god=$(python3 -c "import json; print(json.dumps({'id':972,'platform_id':97,'name':'War','fs_name':'War GOD','files':[
+  {'id':9721,'file_name':'2E07093A','sub':'41560741/00007000','content':'LIVE'+chr(0)*0x35C+'AV'+chr(7)+'A'+chr(0)*64},
+  {'id':9722,'file_name':'Data0000','sub':'41560741/00007000/2E07093A.data','content':'GODDATA'}]}))")
+curl -skf -X POST "$SV/_admin/rom" -d "$god" >/dev/null
+post /api/download '{"rom_id":972,"name":"War"}' >/dev/null
+G="$XE/games/War GOD/41560741/00007000"
+for _ in $(seq 1 80); do [[ -f "$G/2E07093A.data/Data0000" ]] && break; sleep 0.25; done
+[[ -f "$G/2E07093A" && "$(cat "$G/2E07093A.data/Data0000" 2>/dev/null)" == GODDATA ]] \
+  || fail "a GOD game must come down with its folders: $(find "$XE/games/War GOD")"
+mkdir -p "$XU/41560741/00000001/Campaign"; printf 'war-save' > "$XU/41560741/00000001/Campaign/s.bin"
+x360units() { curl -skf "$SV/_admin/dump" | python3 -c "
+import json,sys,io,ssl,zipfile,urllib.request
+d=json.load(sys.stdin); out=[]; tls=ssl._create_unverified_context()
+for s in d['saves']:
+    if s['rom_id'] != 971: continue
+    z=zipfile.ZipFile(io.BytesIO(urllib.request.urlopen('$SV/_admin/save_content?id=%d' % s['id'], context=tls).read()))
+    out.append((s['rom_id'], s['file_name'].split(' [')[0], s['emulator'], sorted((n, z.read(n).decode()) for n in z.namelist())))
+print(sorted(out))"; }
+syncnow
+units=$(x360units)
+[[ "$units" == "[(971, '4D5307E6', 'xenia', [('4D5307E6/00000001/SaveGame/data.bin', 'gears'), ('4D5307E6/Headers/00000001/SaveGame.header', 'hdr')])]" ]] \
+  || fail "a 360 save must go up as a zip of the first player's title folder, saves and headers only: $units"
+war=$(curl -skf "$SV/_admin/dump" | python3 -c "import json,sys; print([s['file_name'].split(' [')[0] for s in json.load(sys.stdin)['saves'] if s['rom_id'] == 972])")
+[[ "$war" == "['41560741']" ]] || fail "a GOD game's save must go up under the title id in its header: $war"
+# A newer one from another client, in lowercase: it lands in the same player's folder; DLC and the other player stay.
+sleep 1.1
+b64=$(python3 -c "import base64,io,zipfile; b=io.BytesIO(); z=zipfile.ZipFile(b,'w'); z.writestr('4d5307e6/00000001/SaveGame/data.bin','from-pc'); z.writestr('4d5307e6/Headers/00000001/SaveGame.header','hdr-pc'); z.close(); print(base64.b64encode(b.getvalue()).decode())")
+curl -skf -X POST "$SV/_admin/save" -d "{\"rom_id\":971,\"slot\":\"autosave\",\"file_name\":\"4D5307E6.zip\",\"emulator\":\"xenia\",\"content_b64\":\"$b64\"}" >/dev/null
+syncnow
+[[ "$(cat "$XU/4D5307E6/00000001/SaveGame/data.bin")/$(cat "$XU/4D5307E6/Headers/00000001/SaveGame.header")" == "from-pc/hdr-pc" ]] \
+  || fail "RomM's 360 save must land in the first player's folder: $(find "$XE/saves" -type f)"
+[[ "$(cat "$XU/4D5307E6/00000002/dlc.bin")/$(cat "$XO/4D5307E6/00000001/x.bin")" == "dlc/other-player" ]] \
+  || fail "the title's other content and other players' saves must stay as they are"
+# Nobody signed in: nothing to sync, and it says why.
+printf '0\r\n0\r\n0\r\n0\r\n' > "$XE/saves/local-players.txt"
+note=$(curl -sf "$API/api/paths" | python3 -c "import json,sys; print([m['sync_note'] for m in json.load(sys.stdin) if m['profile'] == 'X360-like'])")
+[[ "$note" == *"No player profile in X360-like yet"* ]] || fail "a 360 emulator with no player must say so: $note"
+
 echo "29. a download that failed with RomM away starts again once it answers; failed ones can be retried"
 SV=$(server)
 curl -skf -X POST "$SV/_admin/rom" -d '{"id":950,"platform_id":1,"name":"Retry Me","fs_name":"Retry Me (USA).sfc"}' >/dev/null
@@ -1514,5 +1720,65 @@ n=$(grep -c "NOTIFY\] RommPS: found" "$D2/daemon.log")
 grep -q "Turn them on in Emulator Settings" "$D2/daemon.log" || fail "the notice must say where to turn them on"
 second
 [[ "$(grep -c "NOTIFY\] RommPS: found" "$D2/daemon.log")" == 1 ]] || fail "the same emulators must not be announced twice"
+
+echo "30b. a system a newer preset adds joins the saved profile; excluded when another emulator plays it"
+D3="$T/data3"; mkdir -p "$D3"
+python3 - "$D3/config.json" "$T" <<'PY'
+import json, sys
+t = sys.argv[2]
+json.dump({"web_port": 8786, "sync_interval_min": 0, "profiles_custom": True, "profiles": [
+    {"id": "psxlike", "name": "PSX-like", "enabled": True, "root": t + "/psxemu", "platforms": []},
+    {"id": "mine", "name": "My PSX", "enabled": True, "root": t + "/mypsx", "platforms": [{"romm": ["psx"], "dir": "psx"}]},
+    {"id": "n64b", "name": "Second N64", "enabled": True, "root": t + "/n64b", "platforms": []}]}, open(sys.argv[1], "w"))
+PY
+ROMM_SYNC_HOMEBREW="$T/homebrew" ROMM_SYNC_MOUNTS="$MB" ROMM_SYNC_DATA="$D3" ROMM_SYNC_AUTOSTART="$T/etaHEN3" \
+  ROMM_SYNC_CATALOG="$T/catalog.json" ROMM_SYNC_APP_DIRS="$T/apps" ROMM_SYNC_FS_ROOTS="$T" \
+  "$ROOT/build/host/romm-sync" >>"$D3/daemon.log" 2>&1 &
+pid=$!; sleep 3; kill $pid; wait $pid 2>/dev/null || true
+got=$(python3 -c "
+import json,sys
+for p in json.load(open(sys.argv[1]))['profiles']:
+    print(p['id'], [e['romm'][0] for e in p.get('platforms', [])], p.get('exclude', []))" "$D3/config.json")
+grep -qx "psxlike \['psx'\] \['psx'\]" <<<"$got" || fail "a new system another emulator plays must come in excluded: $got"
+grep -qx "n64b \['n64'\] \[\]" <<<"$got" || fail "a new system nobody plays must come in: $got"
+grep -qx "mine \['psx'\] \[\]" <<<"$got" || fail "the emulator playing it keeps it: $got"
+
+echo "30c. Dolphin's saves: an extra keeping them as the main does gets the main's folders mounted on its own"
+GM="$MB/TEST00003"; mkdir -p "$GM/games" "$GM/User/GC" "$GM/User/Wii"
+python3 - "$T/catalog.json" "$GM" <<'PY'
+import json, sys
+cat = json.load(open(sys.argv[1]))
+cat.append({"id": "gcmount", "name": "Dolphin M", "detect": [sys.argv[2]],
+            "profile": {"root": sys.argv[2], "mount_games": True, "rom_dir": "{root}/games", "save_dir": "{root}/User",
+                        "platforms": [{"romm": ["ngc"], "dir": "gamecube", "emulator": "dolphin", "save_layout": "gci", "bundle_dirs": "{root}/User/GC"},
+                                      {"romm": ["wii"], "dir": "wii", "emulator": "dolphin", "save_layout": "wii", "bundle_dirs": "{root}/User/Wii"}]}})
+json.dump(cat, open(sys.argv[1], "w"))
+PY
+post /api/setup/emulators "{\"roots\":[\"$HB\",\"$T/psxemu\",\"$T/n64emu\",\"$T/n64b\",\"$T/ps2emu\",\"$T/gcA\",\"$T/gcB\",\"$GM\"],
+  \"choices\":{\"psx\":\"$T/psxemu\",\"n64\":\"$T/n64emu\",\"ps2\":\"$T/ps2emu\",\"ngc\":\"$T/gcA\",\"wii\":\"$T/gcA\"},
+  \"also\":{\"n64\":[\"$T/n64b\"],\"ngc\":[\"$T/gcB\",\"$GM\"],\"wii\":[\"$T/gcB\",\"$GM\"]}}" >/dev/null || fail "setup with a mountable Dolphin refused"
+for _ in $(seq 1 20); do grep -q "^TEST00003|" "$T/data/mounts.txt" 2>/dev/null && break; sleep 0.25; done
+mt=$(grep "^TEST00003|" "$T/data/mounts.txt" 2>/dev/null | sort)
+[[ "$mt" == "TEST00003|$T/gcA/User/GC|app0/User/GC"$'\n'"TEST00003|$T/gcA/User/Wii|app0/User/Wii" ]] \
+  || fail "the extra must get the main Dolphin's save folders mounted (its games stay copies: the main keeps two systems in one folder): $mt"
+
+echo "31. presets from the side channel: taken when signed and newer, refused when tampered with"
+publish_presets() { # $1: the version; tamper: the file changes after it's signed
+  python3 -c "import json,sys; json.dump({'format': 1, 'version': sys.argv[1], 'console': 'host', 'emulators': []}, open(sys.argv[2], 'w'))" \
+    "$1" "$REL/presets-host.json"
+  RELEASE_SIGNING_KEY="$(cat "$ROOT/tests/update-test.key")" "$SIGN" sign "$REL/presets-host.json" > "$REL/presets-host.sig" 2>/dev/null
+  [[ "${2:-}" == tamper ]] && sed -i 's/"emulators": \[\]/"emulators": [{}]/' "$REL/presets-host.json"
+  return 0
+}
+presets() { curl -sf "$API/api/presets" | python3 -c "import json,sys; print(json.load(sys.stdin)['$1'])"; }
+check_presets() {
+  post /api/presets/check >/dev/null
+  for _ in $(seq 1 40); do [[ "$(presets state)" != checking ]] && return; sleep 0.25; done
+}
+publish_presets 2099.01.01.1; check_presets
+[[ "$(presets version) $(presets source)" == "2099.01.01.1 download" ]] || fail "signed presets must be taken: $(curl -sf "$API/api/presets")"
+publish_presets 2099.01.01.2 tamper; check_presets
+[[ "$(presets version)" == 2099.01.01.1 && "$(presets error)" == *signature* ]] \
+  || fail "tampered presets must be refused, the last good ones kept: $(curl -sf "$API/api/presets")"
 
 echo "PASS"

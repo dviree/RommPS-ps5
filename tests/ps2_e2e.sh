@@ -7,6 +7,7 @@
 #   - nothing on the cards or in the settings changes while the emulator runs
 #   - PCSX2's own settings (an [MemoryCards] section in <serial>_<crc>.ini),
 #     as RetroArch's PS5SX2 core keeps them
+#   - Crux2, which gives each game a card itself (named by its game database)
 #   make host && tests/ps2_e2e.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -176,4 +177,80 @@ json.dump(s, open(sys.argv[1], "w"))
 PY
 start
 [[ "$(mode)" == per_game ]] || fail "a console with no shared cards synced didn't get one card per game"
+
+echo "7. two emulators play the game: the one with none of its saves gets RomM's, which the other holds"
+kill "$DAEMON"; wait "$DAEMON" 2>/dev/null || true
+rm -rf "$OWN"   # PS5SX2's card for the game is gone; RetroArch's core still has the save RomM has
+python3 - "$ROOT/platform/ps5/emulators.json" "$E" "$T/data/config.json" <<'PY'
+import json, sys
+p = next(e for e in json.load(open(sys.argv[1]))["emulators"] if e["id"] == "ps5sx2")["profile"]
+p.update({"id": "ps5sx2", "name": "PS5SX2", "enabled": True, "root": sys.argv[2]})
+p.pop("firmware", None)
+c = json.load(open(sys.argv[3]))
+c["profiles"].append(p)  # after the core, which holds the save
+json.dump(c, open(sys.argv[3], "w"))
+PY
+start
+syncnow
+has "$RC/Okami.ps2" okami-v6 || fail "RetroArch's core lost the game's save"
+has "$OWN" okami-v6 || fail "PS5SX2 didn't get the game's save its other emulator holds"
+
+echo "8. a save made in one emulator reaches the other: the copy saved last goes up, the other gets it from RomM"
+kill "$DAEMON"; wait "$DAEMON" 2>/dev/null || true
+rm -rf "$OWN"; mkdir -p "$OWN/BASLUS-21059"; : > "$OWN/_pcsx2_superblock"   # PS5SX2 saves anew (a folder card)
+printf okami-v8 > "$OWN/BASLUS-21059/BASLUS-21059"; printf icon > "$OWN/BASLUS-21059/icon.sys"
+start
+syncnow
+has "$RC/Okami.ps2" okami-v8 || fail "RetroArch's core didn't get the save made in PS5SX2"
+[[ "$(cat "$OWN/BASLUS-21059/BASLUS-21059")" == okami-v8 ]] || fail "PS5SX2's new save changed"
+
+echo "9. Crux2 names each game's card itself, by its game database's group: RomM's save lands there,"
+echo "   in /data/crux2's stand-in (user_dir); its numbered states sync, its undo state doesn't"
+kill "$DAEMON"; wait "$DAEMON" 2>/dev/null || true
+X="$T/homebrew/PPSA99249"; U="$T/crux2"; GROUP="$U/memcards/SLUS-20999.ps2"
+mkdir -p "$X/games" "$X/resources" "$U/memcards/Mcd001.ps2" "$U/inis" "$U/sstates"
+cp "$E/games/Okami.iso" "$X/games/"
+: > "$U/memcards/Mcd001.ps2/_pcsx2_superblock"
+# Okami joins SLUS-20999's group through SLUS-21115, which names both forms of list item.
+cat > "$X/resources/GameIndex.yaml" <<'YAML'
+SLUS-20999:
+  name: "Earlier"
+  memcardFilters:
+    - "SLUS-20999"
+    - "SLUS-21115"
+SLUS-21059:
+  name: "Okami"
+  region: "NTSC-U"
+SLUS-21115:
+  name: "Later"
+  memcardFilters:
+    - SLUS-21115 # itself
+    - "SLUS-21059"
+  gameFixes:
+    - SoftwareRendererFMVHack
+YAML
+printf '[MemoryCards]\nSlot1_Filename = Mcd001.ps2\n\n[PS5]\nCardPerGame = true\n' > "$U/inis/PCSX2.ini"
+ST="$U/sstates/SLUS-21059 ($(cat "$T/crc"))"
+printf crux-state-1 > "$ST.01.p2s"; printf crux-undo > "$ST.undo.p2s"
+python3 - "$ROOT/platform/ps5/emulators.json" "$X" "$U" "$T/data/config.json" <<'PY'
+import json, sys
+p = next(e for e in json.load(open(sys.argv[1]))["emulators"] if e["id"] == "crux2")["profile"]
+p.update({"id": "crux2", "name": "Crux2", "enabled": True, "root": sys.argv[2], "user_dir": sys.argv[3] + ",{root}"})
+p.pop("firmware", None)
+c = json.load(open(sys.argv[4]))
+c["profiles"] = [p]
+c["ps2_cards"] = ""
+c["states"] = "upload"
+json.dump(c, open(sys.argv[4], "w"))
+PY
+start
+syncnow
+has "$GROUP" okami-v8 || fail "RomM's save didn't land on the card Crux2 gives the game ($(ls "$U/memcards"))"
+[[ "$(ls "$U/memcards/Mcd001.ps2")" == _pcsx2_superblock ]] || fail "the shared card changed: $(ls "$U/memcards/Mcd001.ps2")"
+states=$(curl -sf "$MOCK/_admin/dump" | python3 -c "import json,re,sys; print(sorted(re.sub(r' \[[^]]*\]', '', s['file_name']) for s in json.load(sys.stdin)['states'] if s['rom_id'] == 20))")
+[[ "$states" == "['SLUS-21059 ($(cat "$T/crc")).01.p2s']" ]] || fail "Crux2's states on RomM: $states"
+echo "   with Crux2's own cards off, slot 1 is its shared card again"
+printf '[MemoryCards]\nSlot1_Filename = Mcd001.ps2\n\n[PS5]\nCardPerGame = false\n' > "$U/inis/PCSX2.ini"
+[[ "$(curl -sf "$API/api/memcards" | python3 -c "import json,sys; print(json.load(sys.stdin)['mode'])")" == shared ]] ||
+  fail "Crux2's setting off didn't make its cards shared"
 echo "ps2 e2e: ok"

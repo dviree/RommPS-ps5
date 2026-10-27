@@ -157,6 +157,9 @@ static int appid_cb(pid_t pid, const char *tdname, void *vctx) {
  * in a system process, where it loads. Loaded when first needed, so a console
  * without it still gets the plain notification. */
 #define TOAST_USER_SYSTEM 0xFE
+/* A notice of one line has a template of its own: the two-line one keeps room
+ * for the small line above it, which leaves a lone line sitting low. */
+#define TOAST_ONE_LINE_TEMPLATE "InteractiveToastTemplateA"
 #define TOAST_ICON "/user/appmeta/" ROMMPS_ID "/icon0.png"
 typedef int (*notification_send_fn)(int user_id, bool logged, const char *json);
 static notification_send_fn g_toast_send;
@@ -196,7 +199,7 @@ int console_toast(const char *message) {
     snprintf(id, sizeof id, "%u", (unsigned)(ts.tv_sec % 100000000) * 10 + (serial++ % 10));
 
     cJSON *root = cJSON_CreateObject(), *raw = cJSON_AddObjectToObject(root, "rawData");
-    cJSON_AddStringToObject(raw, "viewTemplateType", "InteractiveToastTemplateB");
+    cJSON_AddStringToObject(raw, "viewTemplateType", sub && *sub ? "InteractiveToastTemplateB" : TOAST_ONE_LINE_TEMPLATE);
     cJSON_AddStringToObject(raw, "channelType", "Downloads");
     cJSON_AddStringToObject(raw, "useCaseId", "IDC");
     cJSON_AddStringToObject(raw, "toastOverwriteType", "No");
@@ -214,6 +217,15 @@ int console_toast(const char *message) {
     }
     cJSON_AddStringToObject(cJSON_AddObjectToObject(view, "message"), "body", text);
     if (sub && *sub) cJSON_AddStringToObject(cJSON_AddObjectToObject(view, "subMessage"), "body", sub);
+    /* RommPS installed (its icon is there): a button that opens it. */
+    if (icon) {
+        cJSON *open = cJSON_CreateObject();
+        cJSON_AddStringToObject(open, "actionName", "Open RommPS");
+        cJSON_AddStringToObject(open, "actionType", "DeepLink");
+        cJSON_AddBoolToObject(open, "defaultFocus", 1);
+        cJSON_AddStringToObject(cJSON_AddObjectToObject(open, "parameters"), "actionUrl", "psgm:play?id=" ROMMPS_ID);
+        cJSON_AddItemToArray(cJSON_AddArrayToObject(view, "actions"), open);
+    }
     /* The view the shell uses when notification previews are off (the SDK's notify sample sends one). */
     cJSON *plain = cJSON_AddObjectToObject(cJSON_AddObjectToObject(cJSON_AddObjectToObject(raw, "platformViews"), "previewDisabled"), "viewData");
     cJSON *plain_icon = cJSON_AddObjectToObject(plain, "icon");

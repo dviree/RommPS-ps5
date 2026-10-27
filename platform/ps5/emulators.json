@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "version": "2026.10.25.1",
+  "version": "2026.10.27.1",
   "console": "ps5",
   "emulators": [
   {
@@ -82,6 +82,28 @@
       }
     },
     {
+      "id": "crux2", "name": "Crux2",
+      "title_ids": ["PPSA99249"],
+      "detect": ["/data/homebrew/PPSA99249"],
+      "note": "One memory card per game, as Crux2 names them (games that share saves share one), or its two shared cards. Uses /data/crux2 when that folder exists. Its save states load only in Crux2.",
+      "profile": {
+        "root": "/data/homebrew/PPSA99249", "user_dir": "/data/crux2,{root}", "mount_games": true,
+        "rom_dir": "{root}/games", "bios_dir": "{user_dir}/bios", "state_dir": "{user_dir}/sstates",
+        "memcards": "{card_dir}/Mcd001.ps2,{card_dir}/Mcd002.ps2", "save_layout": "ps2",
+        "pcsx2_cards": {"dir": "{user_dir}/memcards", "game_ini": "{user_dir}/gamesettings/{serial}_{crc}.ini",
+                        "global_ini": "{user_dir}/inis/PCSX2.ini", "format": "ini",
+                        "auto_card": "PS5/CardPerGame", "game_db": "{root}/resources/GameIndex.yaml"},
+        "state_exts": ".01.p2s,.02.p2s,.03.p2s,.04.p2s,.05.p2s,.06.p2s,.07.p2s,.08.p2s,.09.p2s,.10.p2s,.auto.p2s,.resume.p2s",
+        "state_stems": "{serial} ({crc})", "state_name": "{serial} ({crc}).01{ext}",
+        "state_format": "raw", "state_cores": "crux2",
+        "firmware": {"pick_one": ["21038400dc633070a78ad53090c53017", "dc69f0643a3030aaa4797501b483d6c4", "80ac46fa7e77b8ab4366e86948e54f83",
+                    "93ea3bcee4252627919175ff1b16a1d9", "d3e81e95db25f5a86a7b7474550a2155"]},
+        "platforms": [{"romm": ["ps2"], "dir": "ps2", "cards": {"default": "per_game", "modes": "per_game,shared",
+                       "change": "Turn on Settings > Memory cards > A memory card for each game in Crux2",
+                       "setting": {"file": "{user_dir}/inis/PCSX2.ini", "key": "CardPerGame", "per_game": "true", "shared": "false"}}}]
+      }
+    },
+    {
       "id": "ps5n64", "name": "PS5N64",
       "title_ids": ["PPSA99206"],
       "detect": ["/data/PS5N64", "/data/homebrew/PPSA99206"],
@@ -146,10 +168,12 @@
       "id": "seedee5", "name": "Seedee5",
       "title_ids": ["PPSA99142"],
       "detect": ["/data/homebrew/PPSA99142"],
-      "note": "Games and BIOS files only: saved games are kept as folders, and only after a clean exit.",
+      "note": "Each game's saves are the console's NVRAM (one 8 KB file, written every 20 s while playing), and states from its five slots.",
       "profile": {
-        "root": "/data/homebrew/PPSA99142/data", "rom_dir": "{root}/roms", "save_dir": "{root}/saves",
-        "bios_dir": "{root}/system/same_cdi/bios", "sync_saves": false,
+        "root": "/data/homebrew/PPSA99142/data", "rom_dir": "{root}/roms",
+        "save_dir": "{root}/saves/same_cdi/nvram/{rom_stem}/cdimono1", "save_exts": "mk48t08", "save_name": "mk48t08",
+        "state_dir": "{root}/saves/states", "state_exts": ".state", "state_format": "raw", "state_cores": "seedee5",
+        "bios_dir": "{root}/system/same_cdi/bios",
         "platforms": [{"romm": ["philips-cd-i"], "dir": "cdi", "emulator": "same_cdi"}]
       }
     },
@@ -157,18 +181,29 @@
       "id": "xpsemu", "name": "XPSemu",
       "title_ids": ["PPSA97358"],
       "detect": ["/data/xemu", "/data/homebrew/PPSA97358"],
-      "note": "Games and BIOS files only: saves live inside its hard disk image.",
+      "note": "Saves sync from inside its hard disk image, once it's closed.",
       "profile": {
-        "root": "/data/xemu", "rom_dir": "{root}/games", "bios_dir": "{root}", "sync_saves": false,
+        "root": "/data/xemu", "rom_dir": "{root}/games", "bios_dir": "{root}", "sync_saves": true,
         "firmware": {"only_files": ["mcpx_1.0.bin", "Complex_4627.bin"]},
-        "platforms": [{"romm": ["xbox"], "dir": "xbox", "emulator": "xemu"}]
+        "platforms": [{"romm": ["xbox"], "dir": "xbox", "emulator": "xemu", "save_layout": "xbox"}]
+      }
+    },
+    {
+      "id": "ps5x360", "name": "PS5X360",
+      "title_ids": ["PPSA50011"],
+      "detect": ["/data/homebrew/PPSA50011"],
+      "note": "Xbox 360 (Xenia). Games go in /data/xbox360, a folder each; saves sync for the player signed in first.",
+      "profile": {
+        "root": "/data/homebrew/PPSA50011", "rom_dir": "/data/xbox360", "bios_dir": "{root}", "sync_saves": true,
+        "platforms": [{"romm": ["xbox360"], "dir": "xbox360", "emulator": "xenia", "game_folders": true,
+          "save_layout": "x360", "bundle_dirs": "{root}/saves/{xuid}", "x360_users": "{root}/saves/local-players.txt"}]
       }
     },
     {
       "id": "ps5cemu", "name": "PS5CEMU-HAR",
       "title_ids": ["PPSA99360"],
       "detect": ["/data/ps5cemu", "/data/homebrew/PPSA99360"],
-      "note": "Wii U (Cemu), 3DS (Azahar) and DS (melonDS). Saves sync for all three; 3DS and DS save states load only in PS5CEMU-HAR.",
+      "note": "Wii U (Cemu), 3DS (Azahar), DS (melonDS) and Switch (Eden). Saves sync for all four; 3DS and DS save states load only in PS5CEMU-HAR.",
       "profile": {
         "root": "/data/ps5cemu",
         "platforms": [
@@ -183,7 +218,11 @@
           {"romm": ["nds"], "dir": "nds", "emulator": "melonds", "rom_dir": "{root}/melonds/games",
           "save_dir": "{root}/melonds/saves", "save_exts": ".sav", "bios_dir": "{root}/melonds/bios", "sync_saves": true,
           "state_dir": "{root}/melonds/states", "state_exts": ".ml*", "state_format": "raw", "state_cores": "ps5cemu-melonds",
-          "firmware": {"only_files": ["bios7.bin", "bios9.bin", "firmware.bin"]}}
+          "firmware": {"only_files": ["bios7.bin", "bios9.bin", "firmware.bin"]}},
+          {"romm": ["switch"], "dir": "switch", "emulator": "eden", "rom_dir": "{root}/eden/roms", "bios_dir": "{root}/eden",
+          "firmware": {"by_ext": {".keys": "keys", ".nca": "firmware"}},
+          "save_layout": "switch", "bundle_dirs": "{root}/eden/user/nand/user/save/0000000000000000/{switch_user}",
+          "switch_users": "{root}/eden/config/prosperoeden.json"}
         ]
       }
     },
@@ -191,12 +230,14 @@
       "id": "prosperoeden", "name": "ProsperoEden",
       "title_ids": ["PPSA99008", "PPSA99186"],
       "detect": ["/data/prosperoeden", "/data/homebrew/PPSA99008", "/data/homebrew/PPSA99186"],
-      "note": "Games (with their updates and DLC) and keys only: saves are kept per Switch user profile. Its Switch UI app shares the same folders.",
+      "note": "Games (with their updates and DLC), keys and saves: one Switch user's, its first unless you pick another. Its Switch UI app shares the same folders.",
       "profile": {
         "root": "/data/prosperoeden", "rom_dir": "{root}/roms", "update_dir": "{root}/updates", "dlc_dir": "{root}/updates",
-        "bios_dir": "{root}", "sync_saves": false,
+        "bios_dir": "{root}",
         "firmware": {"by_ext": {".keys": "keys", ".nca": "firmware"}},
-        "platforms": [{"romm": ["switch"], "dir": "switch", "emulator": "prosperoeden"}]
+        "platforms": [{"romm": ["switch"], "dir": "switch", "emulator": "prosperoeden",
+          "save_layout": "switch", "bundle_dirs": "{root}/user/nand/user/save/0000000000000000/{switch_user}",
+          "switch_users": "{root}/config/prosperoeden.json", "switch_sync": "{root}/config/remote/save-sync.json"}]
       }
     }
   ]

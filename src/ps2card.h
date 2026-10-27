@@ -31,7 +31,8 @@ int ps2card_restore(const ps2_cards *c, const char *content_path, const char *se
 
 /* A memory card setting ("Slot1_Filename", "Slot1_Enable") from an emulator's
  * settings text: PCSX2's [MemoryCards] section (ini), or PS5SX2's
- * "MemoryCards/Slot1_Filename=X" lines (flat), the last one winning. 0 if set. */
+ * "MemoryCards/Slot1_Filename=X" lines (flat), the last one winning. 0 if set.
+ * "Section/Key" reads one from another section ("PS5/CardPerGame"). */
 int ps2card_setting(const char *txt, int ini, const char *key, char *out, size_t n);
 
 /* Sets one in the settings file at path, keeping the rest of it; the file
@@ -47,5 +48,11 @@ int ps2card_file_has(const char *path, const char *serial);
 
 /* Whether a card folder entry ("BASLUS-21059TEKKEN") is a save of the game. */
 int ps2card_folder_is_game(const char *name, const char *serial);
+
+/* The card PCSX2's own one-card-per-game names for a game ("PBPX-95503.ps2"),
+ * from its game database at db (GameIndex.yaml): games that read each other's
+ * saves (memcardFilters) share one, named by the smallest serial among them
+ * (Crux2's rule). -1 for a game the database doesn't know. */
+int ps2card_db_card(const char *db, const char *serial, char *out, size_t n);
 
 #endif

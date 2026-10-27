@@ -76,7 +76,8 @@ const char *path_ext(const char *file_name);    /* ".sfc" or "" */
 
 int str_ieq(const char *a, const char *b);
 int str_ends_with_ci(const char *s, const char *suffix);
-/* Is the file's extension in a list like ".srm,.sav,.state*"? */
+/* Is the file's extension in a list like ".srm,.sav,.state*"? An entry with no dot
+ * is a whole name ("mk48t08"). */
 int ext_in_list(const char *file_name, const char *list);
 void str_copy(char *dst, size_t n, const char *src);
 /* str_copy for names people read (and RomM keeps): a cut never splits a

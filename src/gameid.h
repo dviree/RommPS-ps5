@@ -36,6 +36,17 @@ int gameid_psx(const char *path, char *out, size_t n);
  * .bin, .cue or .chd (CD or DVD). */
 int gameid_ps2_crc(const char *path, uint32_t *crc);
 
+/* An Xbox game's title id as its save folder is named, E:\UDATA\4D530004:
+ * the XBE certificate's, from a .xiso or full disc image, a default.xbe or the
+ * game's folder. */
+int gameid_xbox(const char *path, char *out, size_t n);
+
+/* An Xbox 360 game's title id, "4D5307E6", as its save folder is named: the
+ * XEX's execution info, from a disc image (.iso, .xiso), a default.xex or the
+ * game's folder; a GOD folder or an STFS package (Xbox Live Arcade), from its
+ * header. */
+int gameid_x360(const char *path, char *out, size_t n);
+
 /* A string value from a PARAM.SFO file, e.g. "TITLE" or "DISC_ID". */
 int sfo_get(const unsigned char *sfo, size_t len, const char *key, char *out, size_t n);
 int sfo_file_get(const char *path, const char *key, char *out, size_t n);

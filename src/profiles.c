@@ -1,6 +1,8 @@
 #include "profiles.h"
 
+#include <ctype.h>
 #include <dirent.h>
+#include <sys/mman.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,6 +11,7 @@
 #include "config.h"
 #include "detect.h"
 #include "platform.h"
+#include "state.h"
 
 /* Platforms are matched on RomM's slug or fs_slug. The roots are the PS5's;
  * profiles_default() swaps in the console's own (plat_info). */
@@ -72,7 +75,7 @@ static const char *DEFAULT_PROFILES_JSON =
     "]},"
     "{\"id\":\"ps2-classics\",\"name\":\"PS2 ISOs (for PS2 FPKG tools)\",\"enabled\":false,"
     "\"root\":\"/mnt/usb0\",\"rom_dir\":\"{root}/ps2\",\"bios_dir\":\"{root}/ps2/bios\","
-    "\"sync_saves\":false,"
+    "\"sync_saves\":false,\"sync_note\":\"PS2 games made into packages keep their saves in the console's own save data.\","
     "\"platforms\":[{\"romm\":[\"ps2\"],\"emulator\":\"ps2-classics\"}]}"
     "]";
 
@@ -307,7 +310,8 @@ static void check_requirement(const profile_map *m, const char *game, const char
                               size_t nn) {
     *sync = m->base_sync_saves;
     note[0] = 0;
-    if (m->sync_off) str_copy(note, nn, "save sync is off for this platform");
+    if (m->sync_off) str_copy(note, nn, "Save sync is off for this platform.");
+    else if (!m->base_sync_saves) str_copy(note, nn, m->off_note);
     if (!m->req_key[0] || !m->base_sync_saves) return;
     char val[64];
     if (!m->ra_cfg_dir[0] || !core_option(m, m->req_key, game, cdir, val, sizeof val)) str_copy(val, sizeof val, m->req_default);
@@ -405,13 +409,63 @@ static int app0_path(const char *dir, char *title, size_t tn, char *into, size_t
  * Wii), or the extra's own folder has games that aren't the main one's: the
  * mount would hide them. Copies the main one has too are RommPS's, from
  * before mounts (library.c clears them out). */
+/* A Dolphin's GameCube or Wii save folder: the first of its candidates that's
+ * there, else the first (sync.c's bundle_bases has the same defaults). */
+static void dolphin_dir(const profile_map *m, char *out, size_t n) {
+    static const char *gci = "{save_root}/dolphin-emu/User/GC,{save_path}/User/GC,{save_path}/dolphin-emu/User/GC,{bios}/dolphin-emu/User/GC";
+    static const char *wii = "{save_root}/dolphin-emu/User/Wii,{save_path}/User/Wii,{save_path}/dolphin-emu/User/Wii,{bios}/dolphin-emu/User/Wii";
+    char save_path[PATH_MAX_LEN], list[2048], *save = NULL;
+    str_copy(save_path, sizeof save_path, m->save_dir);
+    if (m->by_core[0] && m->core_name[0]) path_join(save_path, sizeof save_path, m->save_dir, m->core_name);
+    const char *vars[] = {"save_path", save_path, "save_root", m->save_dir, "bios", m->bios_dir, "root", m->root, NULL};
+    str_template(list, sizeof list, m->bundle_dirs[0] ? m->bundle_dirs : !strcmp(m->save_layout, "gci") ? gci : wii, vars);
+    out[0] = 0;
+    for (char *t = strtok_r(list, ",", &save); t; t = strtok_r(NULL, ",", &save)) {
+        if (!out[0]) str_copy(out, n, t);
+        if (dir_exists(t)) {
+            str_copy(out, n, t);
+            return;
+        }
+    }
+}
+
+/* Dolphin's saves, kept the same way by the main emulator and an extra
+ * (Porpoise and RetroArch's Dolphin core): the main's folder is mounted on the
+ * extra's, so both play the same saves, synced once from the main's. Even
+ * when the games can't be mounted (Porpoise keeps GameCube and Wii games in
+ * one folder): the saves are each system's own. */
+static void mount_main_saves(const profile_map *m, profile_map *x) {
+    if (strcmp(x->save_layout, m->save_layout) != 0 || (strcmp(x->save_layout, "gci") && strcmp(x->save_layout, "wii")))
+        return;
+    char from[PATH_MAX_LEN], to[PATH_MAX_LEN], title[16], into[256];
+    dolphin_dir(m, from, sizeof from);
+    dolphin_dir(x, to, sizeof to);
+    if (!from[0] || !to[0] || !strcmp(from, to) || strlen(from) >= sizeof x->saves_from || strlen(to) >= sizeof x->saves_dir)
+        return;
+    if (x->mount_games == 2) { /* out of its sandbox: the real folder */
+        const cJSON *ids = cJSON_GetObjectItemCaseSensitive(detect_catalog_entry(x->profile_id), "title_ids");
+        const char *tid = cJSON_IsString(cJSON_GetArrayItem(ids, 0)) ? cJSON_GetArrayItem(ids, 0)->valuestring : "";
+        if (strlen(tid) != 9 || snprintf(into, sizeof into, "%s", to) >= (int)sizeof into) return;
+        str_copy(title, sizeof title, tid);
+    } else if (!app0_path(to, title, sizeof title, into, sizeof into)) {
+        return;
+    }
+    str_copy(x->saves_from, sizeof x->saves_from, from);
+    str_copy(x->saves_dir, sizeof x->saves_dir, to);
+    str_copy(x->saves_into, sizeof x->saves_into, into);
+    str_copy(x->saves_title, sizeof x->saves_title, title);
+    str_copy(x->bundle_dirs, sizeof x->bundle_dirs, from);
+}
+
 static void mount_main_games(profile_map *maps, int n, profile_map *x) {
     if (!x->extra || !x->mount_games || !plat_info()->can_mount) return;
     char sys[64], title[16], into[256];
     str_copy(sys, sizeof sys, x->romm_slugs);
     sys[strcspn(sys, ",")] = 0;
     const profile_map *m = profile_find_for_platform(maps, n, sys, NULL);
-    if (!m || m == x || m->extra || !strcmp(m->rom_dir, x->rom_dir)) return;
+    if (!m || m == x || m->extra) return;
+    mount_main_saves(m, x);
+    if (!strcmp(m->rom_dir, x->rom_dir)) return;
     if (x->mount_games == 2) {
         /* It leaves its sandbox and reads the real folder under /data. */
         const cJSON *ids = cJSON_GetObjectItemCaseSensitive(detect_catalog_entry(x->profile_id), "title_ids");
@@ -514,14 +568,117 @@ static void card_methods(profile_map *maps, int cnt) {
     }
 }
 
+/* The table lives in memory mapped for it, outside malloc's pool: the PS4's
+ * payload shares that pool with GoldHEN, and once it runs low a block of a
+ * couple of MB can't be found in it while mapped memory still can. Its size
+ * is kept in front of it, for profiles_free. */
+#define MAPS_HEAD 64
+
+void profiles_free(profile_map *maps) {
+    if (!maps) return;
+    unsigned char *base = (unsigned char *)maps - MAPS_HEAD;
+    size_t bytes;
+    memcpy(&bytes, base, sizeof bytes);
+    munmap(base, bytes);
+}
+
+/* Room for count entries, the first used of them copied over. */
+static profile_map *maps_grow(profile_map *old, size_t used, size_t count) {
+    const size_t bytes = MAPS_HEAD + sizeof *old * count;
+    unsigned char *base = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (base == MAP_FAILED) return NULL;
+    memcpy(base, &bytes, sizeof bytes);
+    profile_map *maps = (profile_map *)(base + MAPS_HEAD);
+    if (old) {
+        memcpy(maps, old, sizeof *old * used);
+        profiles_free(old);
+    }
+    return maps;
+}
+
+/* A Switch emulator's user whose saves sync: the one the profile names
+ * ("switch_user"), else its first (ProsperoEden, and PS5CEMU-HAR's Eden, keep
+ * profiles.first in their config: "switch_users"). That user's saves are left
+ * alone when the emulator syncs them itself ("switch_sync": ProsperoEden's
+ * save-sync.json gives the user a server). Never another user's. */
+static cJSON *read_json(const char *path) {
+    char *txt = path[0] ? read_file(path, NULL) : NULL;
+    cJSON *j = txt ? cJSON_Parse(txt) : NULL;
+    free(txt);
+    return j;
+}
+
+static void switch_user_for(profile_map *m, const cJSON *p, const cJSON *e, const char **vars) {
+    char path[PATH_MAX_LEN];
+    str_copy(m->switch_user, sizeof m->switch_user, jstr(p, e, "switch_user", ""));
+    if (!m->switch_user[0]) {
+        str_template(path, sizeof path, jstr(p, e, "switch_users", ""), vars);
+        cJSON *cfg = read_json(path);
+        str_copy(m->switch_user, sizeof m->switch_user,
+                 jget_str(cJSON_GetObjectItemCaseSensitive(cfg, "profiles"), "first", ""));
+        cJSON_Delete(cfg);
+    }
+    if (!m->switch_user[0]) {
+        m->sync_saves = m->base_sync_saves = 0;
+        str_copy(m->off_note, sizeof m->off_note, "No Switch user in the emulator yet: open it and make one.");
+        str_copy(m->sync_note, sizeof m->sync_note, m->off_note);
+        return;
+    }
+    str_template(path, sizeof path, jstr(p, e, "switch_sync", ""), vars);
+    cJSON *own = read_json(path);
+    const cJSON *u;
+    cJSON_ArrayForEach(u, cJSON_GetObjectItemCaseSensitive(own, "profiles"))
+        if (!strcmp(jget_str(u, "profile", ""), m->switch_user) && jget_str(u, "url", "")[0]) {
+            m->sync_saves = m->base_sync_saves = 0;
+            snprintf(m->off_note, sizeof m->off_note, "%s syncs this user's saves itself.", m->profile_name);
+            str_copy(m->sync_note, sizeof m->sync_note, m->off_note);
+        }
+    cJSON_Delete(own);
+}
+
+/* An Xbox 360 emulator's player whose saves sync: the one the profile names
+ * ("x360_user"), else the first signed in (PS5X360's local-players.txt, one
+ * XUID per player slot, 0 for none: "x360_users"). Its saves folder is the
+ * XUID in capitals, as Xenia names it. Never another player's. */
+static void x360_user_for(profile_map *m, const cJSON *p, const cJSON *e, const char **vars) {
+    char path[PATH_MAX_LEN];
+    str_copy(m->xuid, sizeof m->xuid, jstr(p, e, "x360_user", ""));
+    str_template(path, sizeof path, jstr(p, e, "x360_users", ""), vars);
+    char *txt = !m->xuid[0] && path[0] ? read_file(path, NULL) : NULL, *save = NULL;
+    for (char *l = txt ? strtok_r(txt, "\r\n", &save) : NULL; l && !m->xuid[0]; l = strtok_r(NULL, "\r\n", &save)) {
+        size_t n = 0;
+        while (isxdigit((unsigned char)l[n])) n++;
+        if (n == 16 && !l[n] && strspn(l, "0") != 16) str_copy(m->xuid, sizeof m->xuid, l);
+    }
+    free(txt);
+    for (char *c = m->xuid; *c; c++) *c = (char)toupper((unsigned char)*c);
+    if (!m->xuid[0]) {
+        m->sync_saves = m->base_sync_saves = 0;
+        snprintf(m->off_note, sizeof m->off_note, "No player profile in %s yet: open it and make one.", m->profile_name);
+        str_copy(m->sync_note, sizeof m->sync_note, m->off_note);
+    }
+}
+
 int profiles_expand(const cJSON *profiles, profile_map **out) {
     int cap = 0, cnt = 0;
     profile_map *maps = NULL;
     const cJSON *p;
     cJSON_ArrayForEach(p, profiles) {
         if (!jbool(p, NULL, "enabled", 1)) continue;
-        char root[PATH_MAX_LEN];
+        char root[PATH_MAX_LEN], user_dir[PATH_MAX_LEN];
         str_copy(root, sizeof root, jstr(p, NULL, "root", ""));
+        {
+            /* The first folder that exists (else the last): where the emulator
+             * keeps its own files. */
+            const char *uvars[] = {"root", root, NULL};
+            char list[PATH_MAX_LEN], *save = NULL;
+            str_template(list, sizeof list, jstr(p, NULL, "user_dir", "{root}"), uvars);
+            user_dir[0] = 0;
+            for (char *t = strtok_r(list, ",", &save); t; t = strtok_r(NULL, ",", &save)) {
+                str_copy(user_dir, sizeof user_dir, t);
+                if (dir_exists(t)) break;
+            }
+        }
 
         char ra_save[PATH_MAX_LEN] = "", ra_state[PATH_MAX_LEN] = "", ra_sys[PATH_MAX_LEN] = "";
         int ra_in_content[2] = {0, 0}, ra_by_content[2] = {0, 0}, ra_by_core[2] = {0, 0};
@@ -562,16 +719,16 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
                 }
                 /* Short of memory for a moment (the PS4 payload, while downloads
                  * finish together): it frees up, so wait for it a little. */
-                const size_t bytes = sizeof *maps * (size_t)(want > cap ? want : cap + 1);
-                profile_map *grown = realloc(maps, bytes);
+                const size_t count = (size_t)(want > cap ? want : cap + 1);
+                profile_map *grown = maps_grow(maps, (size_t)cnt, count);
                 for (int tries = 1; !grown && tries < 10; tries++) {
                     usleep(200 * 1000);
-                    grown = realloc(maps, bytes);
+                    grown = maps_grow(maps, (size_t)cnt, count);
                     if (grown) LOGI("memory for %d emulator platforms after %d tries", want, tries + 1);
                 }
                 if (!grown) {
                     LOGE("no memory for %d emulator platforms (largest free block %d MB)", want, mem_largest_mb());
-                    free(maps);
+                    profiles_free(maps);
                     *out = NULL;
                     return 0;
                 }
@@ -592,10 +749,10 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
             if (comma) *comma = 0;
             str_copy(m->platform_dir, sizeof m->platform_dir, jstr(p, e, "dir", first));
 
-            const char *vars[] = {"root", root, "platform", m->platform_dir, "data",
+            const char *vars[] = {"root", root, "user_dir", user_dir, "platform", m->platform_dir, "data",
                                   plat_data_dir(), "rom_dir", NULL, NULL};
             str_template(m->rom_dir, sizeof m->rom_dir, jstr(p, e, "rom_dir", "{root}/roms/{platform}"), vars);
-            vars[7] = m->rom_dir;
+            vars[9] = m->rom_dir;
             str_template(m->update_dir, sizeof m->update_dir, jstr(p, e, "update_dir", "{rom_dir}"), vars);
             str_template(m->dlc_dir, sizeof m->dlc_dir, jstr(p, e, "dlc_dir", jstr(p, e, "update_dir", "{rom_dir}")), vars);
             str_template(m->save_dir, sizeof m->save_dir, jstr(p, e, "save_dir", "{rom_dir}"), vars);
@@ -631,6 +788,7 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
             str_copy(m->state_stems, sizeof m->state_stems, jstr(p, e, "state_stems", ""));
             str_copy(m->state_name, sizeof m->state_name, jstr(p, e, "state_name", "{rom_stem}{ext}"));
             str_copy(m->save_format, sizeof m->save_format, jstr(p, e, "save_format", ""));
+            m->game_folders = jbool(p, e, "game_folders", 0);
             /* Every Dolphin with a GCI folder keeps GameCube saves the same way. */
             if (!m->save_format[0] && !strcmp(jstr(p, e, "save_layout", ""), "gci"))
                 str_copy(m->save_format, sizeof m->save_format, "gc-gci");
@@ -673,7 +831,8 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
             }
             /* Shared cards can sit in the BIOS folder RetroArch's config names
              * (Flycast's <system>/dc): {bios}. */
-            const char *cvars[] = {"root", root, "bios", m->bios_dir, "data", plat_data_dir(), "card_dir", NULL, NULL};
+            const char *cvars[] = {"root", root, "user_dir", user_dir, "bios", m->bios_dir, "data", plat_data_dir(),
+                                   "card_dir", NULL, NULL};
             const cJSON *pc = card_setting(p, e, "pcsx2_cards");
             if (cJSON_IsObject(pc)) {
                 str_template(m->pc_dirs, sizeof m->pc_dirs, jstr(pc, NULL, "dir", ""), cvars);
@@ -681,16 +840,21 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
                 str_template(m->pc_global_ini, sizeof m->pc_global_ini, jstr(pc, NULL, "global_ini", ""), cvars);
                 str_copy(m->pc_format, sizeof m->pc_format, jstr(pc, NULL, "format", "flat"));
                 str_copy(m->pc_own_card, sizeof m->pc_own_card, jstr(pc, NULL, "own_card", ""));
+                str_copy(m->pc_auto_card, sizeof m->pc_auto_card, jstr(pc, NULL, "auto_card", ""));
+                str_template(m->pc_game_db, sizeof m->pc_game_db, jstr(pc, NULL, "game_db", ""), cvars);
             }
             char card_dir[PATH_MAX_LEN];
             profile_card_dir(m, card_dir, sizeof card_dir);
-            cvars[7] = card_dir;
+            cvars[9] = card_dir;
             str_template(m->memcards, sizeof m->memcards, card_str(p, e, "memcards", ""), cvars);
             str_template(m->game_ids, sizeof m->game_ids, jstr(p, e, "game_ids", ""), vars);
             str_copy(m->disc_id, sizeof m->disc_id, jstr(p, e, "disc_id", ""));
             m->extra = profile_lists(p, "extra", profiles_system_key(e));
             const cJSON *mg = state_setting(p, e, "mount_games");
             m->mount_games = cJSON_IsTrue(mg) ? 1 : cJSON_IsString(mg) && !strcmp(mg->valuestring, "data") ? 2 : 0;
+            /* RetroArch reads its folders through its app folder (":/content",
+             * ":/savefiles" in retroarch.cfg): an extra takes mounts there. */
+            if (!mg && jstr(p, NULL, "retroarch_cfg", NULL)) m->mount_games = 1;
             /* Whether its saves can sync at all is the preset's call, never a
              * saved copy's: a preset turns them on once they're tested, or off
              * when an emulator update breaks them. The user's say is "sync". */
@@ -701,6 +865,11 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
             m->sync_off = !strcmp(mode, "off");
             m->sync_states = !m->sync_off && strcmp(mode, "saves") != 0;
             if (m->sync_off) m->sync_saves = m->base_sync_saves = 0;
+            /* Why the preset turns them off, for the user ("sync_note"). */
+            if (!m->sync_saves && !m->sync_off) {
+                const cJSON *why = catalog_setting(p, e, "sync_note", &in_catalog);
+                str_copy(m->off_note, sizeof m->off_note, cJSON_IsString(why) ? why->valuestring : jstr(p, e, "sync_note", ""));
+            }
             str_copy(m->root, sizeof m->root, root);
             str_copy(m->ra_cfg_dir, sizeof m->ra_cfg_dir, ra_cfg_dir);
             const cJSON *tids = cJSON_GetObjectItemCaseSensitive(detect_catalog_entry(m->profile_id), "title_ids");
@@ -744,7 +913,9 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
             }
             /* Platform-wide answer, for the UI; games can override it. */
             check_requirement(m, NULL, NULL, &m->sync_saves, m->sync_note, sizeof m->sync_note);
-            if (m->sync_off) str_copy(m->sync_note, sizeof m->sync_note, "save sync is off for this platform");
+            if (!strcmp(m->save_layout, "switch")) switch_user_for(m, p, e, vars);
+            if (!strcmp(m->save_layout, "x360")) x360_user_for(m, p, e, vars);
+            if (m->sync_off) str_copy(m->sync_note, sizeof m->sync_note, "Save sync is off for this platform.");
             cnt++;
         }
     }

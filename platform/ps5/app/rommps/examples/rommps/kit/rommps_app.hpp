@@ -80,6 +80,7 @@ struct Details
     double play_ms = 0;      // every device's sessions RomM has
     int sessions = 0, completion = 0, my_rating = 0;
     std::string archived;    // why it can't be downloaded: it's an archive
+    std::string saves_off;   // why its saves don't sync here, "" when they do
     int updates = 0, dlc = 0; // a Switch game's, downloaded with it
     std::string title_id;     // a Switch game's ("0100ABF008968000"), "" otherwise
     struct Addon
@@ -266,7 +267,7 @@ class App
     // (assets/rommps/romm-sync.elf, version kMinPayload): it starts it when
     // none is running, puts it in place of an older one (never of a newer
     // one), and keeps the copies the console starts it from up to date.
-    static constexpr const char *kMinPayload = "1.3.1";
+    static constexpr const char *kMinPayload = "1.4.0";
     bool payload_too_old() const;
     void start_payload(); // sends the payload to the HEN's loader
     // Sending it, or RomM Sync is running and not answering yet (starting up,
@@ -339,8 +340,9 @@ class App
     void download(int rom_id, const std::string &name, int disc = 0);
     void cancel_download(int job_id);
     void retry_download(int job_id);
-    // quiet: no notification, one of several going together.
-    void remove_game(int rom_id, bool quiet = false);
+    // quiet: no notification, one of several going together. disc: one disc
+    // of a game kept as a folder of discs, 0 for all of it.
+    void remove_game(int rom_id, bool quiet = false, int disc = 0);
     void clear_finished_queue();
     void sync_now();
 

@@ -40,6 +40,7 @@ typedef struct {
     /* For profiles that name files by them (save_stems, state_stems): */
     char serial[24];      /* a PS1 disc's, "SCUS-94194" */
     char fnv64[17];       /* FNV-1a 64 of the game file */
+    char crc[9];          /* a PS2 disc's, as PCSX2 names its states: "248E6126" */
     char safe_stem[256];  /* stems[0], non-alphanumerics as "_" */
     char game_id[24];     /* a disc's, "GAFE01" (DolphinPS4 names states by it), or a title's */
     rom_rules rules;
@@ -125,7 +126,7 @@ static const char *slot_for(const scan_ctx *c, const profile_map *m, const char 
     /* An extra emulator whose saves can't be shared keeps them apart. */
     if (m->own_slot) snprintf(base, sizeof base, "%s-%s", c->slot, m->profile_id);
     else str_copy(base, sizeof base, c->slot);
-    if (!first[0] || str_ieq(ext, first)) {
+    if (!first[0] || str_ieq(ext, first) || str_ieq(path_basename(file), first)) {
         str_copy(buf, n, base);
     } else {
         snprintf(buf, n, "%s-%s", base, ext[0] == '.' ? ext + 1 : ext);
@@ -178,9 +179,11 @@ static int map_uses(const profile_map *m, const char *var) {
 }
 
 /* The template variables a game's file names can use. */
-static void name_vars(const local_rom *r, const char *ext, const char *vars[15]) {
+static void name_vars(const local_rom *r, const char *ext, const char *vars[17]) {
+    /* An unknown CRC stays a placeholder, so a name made with it names nothing. */
     const char *v[] = {"rom_stem", r->stems[0], "ext", ext ? ext : "", "rom_md5", r->md5, "serial", r->serial,
-                       "rom_fnv64", r->fnv64, "rom_stem_safe", r->safe_stem, "game_id", r->game_id, NULL};
+                       "rom_fnv64", r->fnv64, "rom_stem_safe", r->safe_stem, "game_id", r->game_id,
+                       "crc", r->crc[0] ? r->crc : "{crc}", NULL};
     memcpy(vars, v, sizeof v);
 }
 
@@ -193,8 +196,8 @@ static void add_derived_stems(local_rom *r, cJSON *e) {
         r->safe_stem[k++] = isalnum((unsigned char)*p) ? *p : '_';
     r->safe_stem[k] = 0;
     char file[PATH_MAX_LEN];
-    int need_serial = map_uses(m, "{serial}"), need_fnv = map_uses(m, "{rom_fnv64}");
-    if ((need_serial || need_fnv) && game_file(r, file, sizeof file) == 0) {
+    int need_serial = map_uses(m, "{serial}"), need_fnv = map_uses(m, "{rom_fnv64}"), need_crc = map_uses(m, "{crc}");
+    if ((need_serial || need_fnv || need_crc) && game_file(r, file, sizeof file) == 0) {
         double size = (double)file_size(file), mtime = (double)file_mtime(file);
         int fresh = e && jget_num(e, "id_size", -1) == size && jget_num(e, "id_mtime", -1) == mtime;
         if (need_serial) {
@@ -209,14 +212,24 @@ static void add_derived_stems(local_rom *r, cJSON *e) {
             else if (fnv1a64_file_hex(file, r->fnv64) != 0)
                 r->fnv64[0] = 0;
         }
+        if (need_crc) {
+            uint32_t crc;
+            if (fresh && cJSON_GetObjectItemCaseSensitive(e, "crc"))
+                str_copy(r->crc, sizeof r->crc, jget_str(e, "crc", ""));
+            else if (gameid_ps2_crc(file, &crc) == 0)
+                snprintf(r->crc, sizeof r->crc, "%08X", crc);
+            else
+                r->crc[0] = 0;
+        }
         if (e) {
             jset_num(e, "id_size", size);
             jset_num(e, "id_mtime", mtime);
             if (need_serial) jset_str(e, "serial", r->serial);
             if (need_fnv) jset_str(e, "fnv64", r->fnv64);
+            if (need_crc) jset_str(e, "crc", r->crc);
         }
     }
-    const char *vars[15];
+    const char *vars[17];
     name_vars(r, "", vars);
     for (int pass = 0; pass < 2; pass++) {
         char list[256], *save = NULL;
@@ -563,13 +576,19 @@ static void scan_rom_dir(scan_ctx *c, const profile_map *m) {
  * when saves are sorted by core and the core name isn't known. */
 static int expected_dir(const local_rom *r, int states, char *out, size_t n) {
     const rom_rules *ru = &r->rules;
-    /* A folder per game, by its id (Porpoise's states/GAFE01). */
+    /* A folder per game, by its id (Porpoise's states/GAFE01) or its file's
+     * name (Seedee5's nvram/<game>/cdimono1). */
     const char *at = strstr(states ? ru->state_dir : ru->save_dir, "{game_id}");
     if (at) {
         char id[24];
         if (rom_game_id(r, id, sizeof id) != 0) return 0;
         const char *dir = states ? ru->state_dir : ru->save_dir;
         snprintf(out, n, "%.*s%s%s", (int)(at - dir), dir, id, at + 9);
+        return 1;
+    }
+    const char *dir = states ? ru->state_dir : ru->save_dir, *stem = strstr(dir, "{rom_stem}");
+    if (stem) {
+        snprintf(out, n, "%.*s%s%s", (int)(stem - dir), dir, r->stems[0], stem + 10);
         return 1;
     }
     char content_dir[PATH_MAX_LEN];
@@ -606,7 +625,8 @@ static const local_rom *match_rom(const scan_ctx *c, const char *file_dir, const
         const local_rom *r = &c->roms[i];
         if (!r->rules.sync_saves || (states && !r->map->sync_states) || (!states && r->map->save_layout[0])) continue;
         if (!ext_in_list(file_name, states ? r->map->state_exts : r->map->save_exts)) continue;
-        if (strstr(states ? r->rules.state_dir : r->rules.save_dir, "{game_id}")) {
+        const char *dir = states ? r->rules.state_dir : r->rules.save_dir;
+        if (strstr(dir, "{game_id}") || strstr(dir, "{rom_stem}")) {
             char exp[PATH_MAX_LEN];
             if (expected_dir(r, states, exp, sizeof exp) && !strcmp(exp, file_dir)) {
                 *active = 1;
@@ -787,8 +807,10 @@ static void base_dir(const local_rom *r, int states, char *out, size_t n) {
         }
     } else {
         str_copy(out, n, states ? r->rules.state_dir : r->rules.save_dir);
-        /* A folder per game ("states/{game_id}"): scan from its parent. */
+        /* A folder per game ("states/{game_id}", "nvram/{rom_stem}/cdimono1"):
+         * scan from its parent. */
         char *id = strstr(out, "/{game_id}");
+        if (!id) id = strstr(out, "/{rom_stem}");
         if (id) *id = 0;
     }
 }
@@ -852,7 +874,7 @@ static int scan_prepare(scan_ctx *c) {
 }
 
 static void scan_free(scan_ctx *c) {
-    free(c->maps);
+    profiles_free(c->maps);
     free(c->roms);
     free(c->saves);
     free(c->states);
@@ -1024,14 +1046,34 @@ static void ps2_cards_for(const local_rom *r, ps2_cards *out) {
     int on[2] = {1, 1};
     char game[PATH_MAX_LEN];
     ps2_slot_settings(r->map->pc_global_ini, ini, out, on);
-    if (ps2_game_ini(r, game, sizeof game) == 0) ps2_slot_settings(game, ini, out, on);
+    const int global_slot1 = on[0];
+    int game_slot1 = 0; /* the game's settings say anything of slot 1 */
+    if (ps2_game_ini(r, game, sizeof game) == 0) {
+        ps2_slot_settings(game, ini, out, on);
+        char *txt = read_file(game, NULL), v[256];
+        game_slot1 = txt && (ps2card_setting(txt, ini, "Slot1_Filename", v, sizeof v) == 0 ||
+                             ps2card_setting(txt, ini, "Slot1_Enable", v, sizeof v) == 0);
+        free(txt);
+    }
+    /* The emulator's own card per game (Crux2): slot 1 holds it unless the
+     * game's settings say anything of slot 1 or it's off for every game. */
+    if (r->map->pc_auto_card[0] && global_slot1 && !game_slot1) {
+        char *txt = read_file(r->map->pc_global_ini, NULL), v[16] = "", serial[24], card[64];
+        const int auto_on = !txt || ps2card_setting(txt, 1, r->map->pc_auto_card, v, sizeof v) != 0 ||
+                            (strcasecmp(v, "false") != 0 && strcmp(v, "0") != 0);
+        free(txt);
+        if (auto_on && rom_game_id(r, serial, sizeof serial) == 0 &&
+            ps2card_db_card(r->map->pc_game_db, serial, card, sizeof card) == 0)
+            str_copy(out->slot[0], sizeof out->slot[0], card);
+    }
     for (int s = 0; s < 2; s++)
         if (!on[s]) out->slot[s][0] = 0;
 }
 
-/* Whether the emulator is closed, so its cards and settings can change: none
- * of its processes runs (a console resting with it open still has them). */
-static int ps2_emulator_closed(const profile_map *m) {
+/* Whether the emulator is closed, so its cards, settings or hard disk can
+ * change: none of its processes runs (a console resting with it open still
+ * has them). */
+static int emulator_closed(const profile_map *m) {
     const int alive = m->app_title[0] ? plat_app_alive(m->app_title) : -1;
     return alive == 0 || (alive < 0 && !g_game_running);
 }
@@ -1050,7 +1092,7 @@ static void ps2_own_card(const local_rom *r, const char *serial) {
     char *txt = read_file(path, NULL);
     const int named = txt && ps2card_setting(txt, ini, "Slot1_Filename", v, sizeof v) == 0 && v[0];
     free(txt);
-    if (named || !ps2_emulator_closed(m)) return;
+    if (named || !emulator_closed(m)) return;
     ps2_cards now;
     ps2_cards_for(r, &now);
     if (!now.dir[0]) return;
@@ -1100,6 +1142,21 @@ static int bundle_bases(const local_rom *r, char bases[][PATH_MAX_LEN], int max)
             if (pc.slot[s][0] && (s == 0 || strcmp(pc.slot[1], pc.slot[0]) != 0)) path_join(bases[n++], PATH_MAX_LEN, pc.dir, pc.slot[s]);
         return n;
     }
+    if (!strcmp(r->map->save_layout, "xbox")) { /* the hard disk image, wherever xemu.toml says */
+        char toml[PATH_MAX_LEN];
+        path_join(toml, sizeof toml, r->map->root, "xemu.toml");
+        char *t = read_file(toml, NULL), *at = t ? strstr(t, "hdd_path") : NULL;
+        char *q = at ? strpbrk(at, "'\"\n") : NULL;
+        char *end = q && *q != '\n' ? strchr(q + 1, *q) : NULL;
+        if (end && end - q - 1 > 0 && (size_t)(end - q) < PATH_MAX_LEN) {
+            memcpy(bases[0], q + 1, (size_t)(end - q - 1));
+            bases[0][end - q - 1] = 0;
+        } else {
+            path_join(bases[0], PATH_MAX_LEN, r->map->root, "xbox_hdd.qcow2");
+        }
+        free(t);
+        return max > 0;
+    }
     static const char *defaults[][3] = {
         /* {save_path} follows RetroArch's sorting. {save_root} is the bare save
          * folder, because Dolphin ignores sort-by-core entirely and drops
@@ -1117,7 +1174,8 @@ static int bundle_bases(const local_rom *r, char bases[][PATH_MAX_LEN], int max)
     if (!tpl) return 0;
     char save_path[PATH_MAX_LEN], list[2048], *save = NULL;
     if (!expected_dir(r, 0, save_path, sizeof save_path)) str_copy(save_path, sizeof save_path, r->rules.save_dir);
-    const char *vars[] = {"save_path", save_path, "save_root", r->rules.save_dir, "bios", r->map->bios_dir, "root", r->map->root, NULL};
+    const char *vars[] = {"save_path", save_path, "save_root", r->rules.save_dir, "bios", r->map->bios_dir, "root", r->map->root,
+                          "switch_user", r->map->switch_user, "xuid", r->map->xuid, NULL};
     str_template(list, sizeof list, tpl, vars);
     int n = 0;
     for (char *t = strtok_r(list, ",", &save); t && n < max; t = strtok_r(NULL, ",", &save))
@@ -1128,6 +1186,8 @@ static int bundle_bases(const local_rom *r, char bases[][PATH_MAX_LEN], int max)
 static int bundle_for_rom(const local_rom *r, const char *game_id, bundle *b) {
     char bases[6][PATH_MAX_LEN];
     int n = bundle_bases(r, bases, 6);
+    /* xemu writes its disk as it goes: while it runs, the copy made last. */
+    if (n && !strcmp(r->map->save_layout, "xbox") && !emulator_closed(r->map)) bases[0][0] = 0;
     return n ? bundle_open(b, r->map->save_layout, game_id, bases, n) : -1;
 }
 
@@ -1161,6 +1221,31 @@ static int psp_id_from_saves(const local_rom *r, const char *name, char *out, si
         if (d) closedir(d);
     }
     return -1;
+}
+
+/* A Switch game's title id from its file's name, as dumps carry it
+ * ("Pokemon Brilliant Diamond [0100000011D90000][v0].nsp"), or from a folder
+ * game's files. An update's id names its game (the last three digits 000), as
+ * the game's save folder does. */
+static int switch_title(const char *path, char *out, size_t n) {
+    const char *name = path_basename(path);
+    for (const char *p = strchr(name, '['); p; p = strchr(p + 1, '[')) {
+        size_t k = 0;
+        while (k < 16 && isxdigit((unsigned char)p[1 + k])) k++;
+        if (k != 16 || p[17] != ']') continue;
+        char hex[17];
+        memcpy(hex, p + 1, 16);
+        hex[16] = 0;
+        snprintf(out, n, "%016llX", strtoull(hex, NULL, 16) & ~0xFFFULL);
+        return 0;
+    }
+    DIR *d = dir_exists(path) ? opendir(path) : NULL;
+    struct dirent *de;
+    int rc = -1;
+    while (d && rc != 0 && (de = readdir(d)))
+        if (de->d_name[0] != '.') rc = switch_title(de->d_name, out, n);
+    if (d) closedir(d);
+    return rc;
 }
 
 /* The game's id: from the disc image, RomM (title_id, 5.3+), or its PSP saves. */
@@ -1209,13 +1294,20 @@ static int rom_game_id(const local_rom *r, char *out, size_t n) {
         struct dirent *de;
         disc[0] = 0;
         while (d && (de = readdir(d)) && !disc[0])
-            if (ext_in_list(de->d_name, ".iso,.cso,.rvz,.wia,.gcm,.ciso,.wbfs,.cci,.3ds,.cxi,.cia,.chd")) path_join(disc, sizeof disc, r->path, de->d_name);
+            if (ext_in_list(de->d_name, ".iso,.cso,.rvz,.wia,.gcm,.ciso,.wbfs,.cci,.3ds,.cxi,.cia,.chd,.xiso")) path_join(disc, sizeof disc, r->path, de->d_name);
         if (d) closedir(d);
     }
     const char *layout = r->map->save_layout;
-    const int title = !strcmp(layout, "3ds") || !strcmp(layout, "wiiu");
+    const int title = !strcmp(layout, "3ds") || !strcmp(layout, "wiiu"), nx = !strcmp(layout, "switch"),
+              x360 = !strcmp(layout, "x360"), xbox = x360 || !strcmp(layout, "xbox");
     int ok = 0;
-    if (title) {
+    if (x360) { /* a GOD or STFS package has no XEX to read: RomM's save_target */
+        ok = gameid_x360(r->path, out, n) == 0 || (disc[0] && gameid_x360(disc, out, n) == 0);
+    } else if (xbox) {
+        ok = gameid_xbox(r->path, out, n) == 0 || (disc[0] && gameid_xbox(disc, out, n) == 0);
+    } else if (nx) {
+        ok = switch_title(r->path, out, n) == 0;
+    } else if (title) {
         /* The front end's list first (a .wux can't be read without its disc
          * key), then the game file's header. */
         char lib[PATH_MAX_LEN];
@@ -1232,11 +1324,13 @@ static int rom_game_id(const local_rom *r, char *out, size_t n) {
         long st = 0;
         snprintf(api, sizeof api, "/api/roms/%d", r->rom_id);
         cJSON *rom = romm_call("GET", api, NULL, &st);
-        const char *tid = jget_str(rom, "title_id", "");
+        /* An Xbox or 360 game's save folder is RomM's save_target, "4D530004"
+         * (an Xbox title id is "MS-004"). */
+        const char *tid = jget_str(rom, xbox ? "save_target" : "title_id", "");
         size_t o = 0;
         for (; *tid && o + 1 < n; tid++) if (isalnum((unsigned char)*tid)) out[o++] = (char)toupper((unsigned char)*tid);
         out[o] = 0;
-        ok = title ? o == 16 : o >= 4;
+        ok = title || nx ? o == 16 : xbox ? o == 8 : o >= 4;
         /* A PS2 serial keeps its dash, as the saves on a card name it. */
         if (!strcmp(layout, "ps2") && o == 9 && o + 1 < n) {
             memmove(out + 5, out + 4, 6);
@@ -1540,6 +1634,9 @@ static void fill_bundle_file(local_file *f, const scan_ctx *c, const local_rom *
         ps2_hash_for_romm(r, identity, f->hash);
     } else if (!strcmp(r->map->save_layout, "psp")) {
         snprintf(f->upload_name, sizeof f->upload_name, "%s.zip", b->game_id);
+    } else if (!strcmp(r->map->save_layout, "switch") || !strcmp(r->map->save_layout, "xbox") ||
+               !strcmp(r->map->save_layout, "x360")) {
+        snprintf(f->upload_name, sizeof f->upload_name, "%s.zip", b->game_id);
     } else if (!strcmp(r->map->save_layout, "3ds") || !strcmp(r->map->save_layout, "wiiu")) {
         /* As RomM's save units name them: the title id's low half. */
         snprintf(f->upload_name, sizeof f->upload_name, "%s.zip", strlen(b->game_id) == 16 ? b->game_id + 8 : b->game_id);
@@ -1580,16 +1677,30 @@ static void scan_bundles(scan_ctx *c) {
         if (rom_game_id(r, id, sizeof id) != 0) continue;
         ps2_own_card(r, id);
         if (bundle_for_rom(r, id, &b) != 0) continue;
-        state_lock();
-        cJSON_AddItemToArray(g_bundle_roots, cJSON_CreateString(b.dir));
-        state_unlock();
+        /* An Xbox save's folder is our own copy: the sync once xemu closes sees its changes. */
+        if (strcmp(r->map->save_layout, "xbox") != 0) {
+            state_lock();
+            cJSON_AddItemToArray(g_bundle_roots, cJSON_CreateString(b.dir));
+            state_unlock();
+        }
         if (!strcmp(r->map->save_layout, "gci")) gc_learn_form(c, r);
-        if (b.n > 0 && !find_save(c, r->rom_id, c->slot)) {
+        if (b.n > 0) {
             local_file f;
             fill_bundle_file(&f, c, r, &b);
-            if (f.hash[0]) add_file(&c->saves, &c->nsaves, &c->capsaves, &f);
-            else if (strcmp(r->map->save_layout, "ps2") != 0) /* ps2card logged why */
-                LOGW("%s: its saves can't go on RomM's memory card yet", path_basename(r->path));
+            /* Another emulator's copy of the game already here: the one saved
+             * last goes up, and the other gets it after (share_bundle_saves). */
+            int at = -1;
+            for (int k = 0; k < c->nsaves && at < 0; k++)
+                if (c->saves[k].rom_id == r->rom_id && !strcmp(c->saves[k].slot, c->slot)) at = k;
+            if (!f.hash[0]) {
+                if (strcmp(r->map->save_layout, "ps2") != 0) /* ps2card logged why */
+                    LOGW("%s: its saves can't go on RomM's memory card yet", path_basename(r->path));
+            } else if (at < 0) {
+                add_file(&c->saves, &c->nsaves, &c->capsaves, &f);
+            } else if (c->saves[at].is_bundle && !strcmp(c->saves[at].map->save_layout, r->map->save_layout) &&
+                       f.mtime > c->saves[at].mtime) {
+                c->saves[at] = f;
+            }
         }
         bundle_free(&b);
     }
@@ -1660,7 +1771,7 @@ static int gc_place(const local_rom *r, bundle *b, const char *file) {
  * cards in place of the game's saves there. 1 when placed, -1 when not. The
  * bundle is listed again. */
 static int ps2_place(const local_rom *r, bundle *b, const char *file) {
-    if (!ps2_emulator_closed(r->map)) {
+    if (!emulator_closed(r->map)) {
         LOGI("%s: its save comes down once %s is closed", path_basename(r->path), r->map->profile_name);
         return -1;
     }
@@ -1693,6 +1804,11 @@ static int do_download_bundle(const scan_ctx *c, int save_id, const local_rom *r
                               const char *server_hash, int record) {
     char id[24], api[256], zip[PATH_MAX_LEN], tmpdir[PATH_MAX_LEN];
     bundle b;
+    if (!strcmp(r->map->save_layout, "xbox") && !emulator_closed(r->map)) {
+        /* xemu would go on writing to the disk it has open, and lose this one. */
+        LOGI("%s: its save comes down once %s is closed", path_basename(r->path), r->map->profile_name);
+        return -1;
+    }
     if (rom_game_id(r, id, sizeof id) != 0 || bundle_for_rom(r, id, &b) != 0) {
         LOGE("no game id for %s, cannot place its save", path_basename(r->path));
         return -1;
@@ -1868,7 +1984,7 @@ static void download_target(const local_rom *r, const char *server_name, const c
         if (comma) *comma = 0;
         str_copy(ext, sizeof ext, first[0] ? first : path_ext(server_name));
     }
-    const char *vars[15];
+    const char *vars[17];
     name_vars(r, ext, vars);
     char name[512], dir[PATH_MAX_LEN], tmpl[128];
     save_name_now(r->map, tmpl, sizeof tmpl);
@@ -2031,6 +2147,25 @@ static int map_takes_state(const profile_map *m, const char *emulator) {
 }
 
 /* The local copy of a game whose emulator can load a state from `emulator`. */
+/* A game here whose emulator takes no save (or state): which, and why. 0 when
+ * the game isn't here at all. */
+static int why_no_sync(const scan_ctx *c, int rom_id, int states, char *err, int en) {
+    for (int i = 0; i < c->nroms; i++) {
+        const local_rom *r = &c->roms[i];
+        if (r->rom_id != rom_id) continue;
+        if (!r->rules.sync_saves) {
+            const char *why = r->rules.sync_note[0] ? r->rules.sync_note : r->map->sync_note;
+            snprintf(err, (size_t)en, "%s: saves don't sync.%s%s", r->map->profile_name, why[0] ? " " : "", why);
+            return 1;
+        }
+        if (states && !r->map->sync_states) {
+            snprintf(err, (size_t)en, "%s: save states don't sync.", r->map->profile_name);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static const local_rom *find_rom_for_state(const scan_ctx *c, int rom_id, const char *emulator) {
     for (int i = 0; i < c->nroms; i++) {
         const local_rom *r = &c->roms[i];
@@ -2183,19 +2318,21 @@ static int restore_missing_saves(scan_ctx *c, int only_rom) {
     return n;
 }
 
-/* A game whose saves are a folder (GameCube, PSP, Wii) with none of them on
- * this console while RomM has some: a new emulator, or files deleted. RomM's
- * newest in this console's slot (or else anywhere) comes down. */
+/* A game whose saves are a folder or a card (GameCube, PSP, Wii, PS2) with
+ * none of them in an emulator while RomM has some: a new emulator, files
+ * deleted, or a second emulator of the game. RomM's newest in this console's
+ * slot (or else anywhere) comes down. Each emulator is looked at on its own:
+ * the sync sees the game's save in the first one, the same as RomM's, and
+ * brings nothing to the second. One sharing a folder with the first finds the
+ * saves already there. */
 static int restore_missing_bundles(scan_ctx *c, int only_rom) {
     int n = 0;
     for (int i = 0; i < c->nroms; i++) {
         const local_rom *r = &c->roms[i];
         if (!r->rules.sync_saves || !bundle_supported(r->map->save_layout) || (only_rom && r->rom_id != only_rom)) continue;
-        int done_before = 0; /* another emulator's copy of the game */
-        for (int k = 0; k < i; k++) done_before |= c->roms[k].rom_id == r->rom_id && c->roms[k].rules.sync_saves && bundle_supported(c->roms[k].map->save_layout);
         char id[24];
         bundle b = {0};
-        if (done_before || rom_game_id(r, id, sizeof id) != 0 || bundle_for_rom(r, id, &b) != 0) continue;
+        if (rom_game_id(r, id, sizeof id) != 0 || bundle_for_rom(r, id, &b) != 0) continue;
         const int empty = b.n == 0;
         bundle_free(&b);
         if (!empty) continue;
@@ -2215,6 +2352,76 @@ static int restore_missing_bundles(scan_ctx *c, int only_rom) {
         if (pick && do_download_bundle(c, (int)jget_num(pick, "id", 0), r, c->slot, 0, jget_str(pick, "content_hash", ""), 1) == 0) {
             n++;
             events_add("save", "downloaded", r->rom_id, b.dir, emu_name(r->map), "Missing here");
+        }
+        cJSON_Delete(all);
+    }
+    return n;
+}
+
+/* The emulators of a game sharing its saves as cards or folders (PS2, PSP,
+ * Wii U, 3DS; GameCube has share_bundles): when their copies differ, the one
+ * saved last went up (scan_bundles), and the others get RomM's newest, what
+ * they had backed up first. Copies are told apart by what's in them: a PS2
+ * game's by its saves (identity), not the card's timestamps. */
+static int same_bundle_group(const local_rom *a, const local_rom *b) {
+    return a->rom_id == b->rom_id && !strcmp(a->map->save_layout, b->map->save_layout) && b->rules.sync_saves &&
+           !b->map->own_slot;
+}
+
+static int share_bundle_saves(scan_ctx *c, int only_rom) {
+    int n = 0;
+    for (int i = 0; i < c->nroms; i++) {
+        const local_rom *a = &c->roms[i];
+        if (!a->rules.sync_saves || a->map->own_slot || !bundle_supported(a->map->save_layout) ||
+            !strcmp(a->map->save_layout, "gci") || (only_rom && a->rom_id != only_rom))
+            continue;
+        int first = 1;
+        for (int k = 0; k < i && first; k++) first = !same_bundle_group(a, &c->roms[k]);
+        char id[24];
+        if (!first || rom_game_id(a, id, sizeof id) != 0) continue;
+        struct { const local_rom *r; char print[33], dir[PATH_MAX_LEN]; time_t mtime; } copies[4];
+        int nc = 0, newest = -1;
+        for (int k = i; k < c->nroms && nc < 4; k++) {
+            const local_rom *r = &c->roms[k];
+            bundle b;
+            if (!same_bundle_group(a, r) || bundle_for_rom(r, id, &b) != 0) continue;
+            if (b.n > 0) { /* none at all: restore_missing_bundles */
+                local_file f;
+                fill_bundle_file(&f, c, r, &b);
+                const char *print = !strcmp(r->map->save_layout, "ps2") ? f.ps2_identity : f.hash;
+                if (print[0]) {
+                    copies[nc].r = r;
+                    copies[nc].mtime = b.mtime;
+                    str_copy(copies[nc].print, sizeof copies[nc].print, print);
+                    str_copy(copies[nc].dir, sizeof copies[nc].dir, b.dir);
+                    if (newest < 0 || b.mtime > copies[newest].mtime) newest = nc;
+                    nc++;
+                }
+            }
+            bundle_free(&b);
+        }
+        int differ = 0;
+        for (int k = 0; k < nc; k++) differ |= strcmp(copies[k].print, copies[newest].print) != 0;
+        if (nc < 2 || !differ) continue;
+        char api[64];
+        snprintf(api, sizeof api, "/api/saves?rom_id=%d", a->rom_id);
+        long st = 0;
+        cJSON *all = romm_call("GET", api, NULL, &st);
+        const cJSON *s, *pick = NULL;
+        cJSON_ArrayForEach(s, (st == 200 ? all : NULL))
+            if ((int)jget_num(s, "rom_id", 0) == a->rom_id && !strcmp(jget_str(s, "slot", ""), c->slot) &&
+                (!pick || strcmp(jget_str(s, "updated_at", ""), jget_str(pick, "updated_at", "")) > 0))
+                pick = s;
+        for (int k = 0; pick && k < nc; k++) {
+            if (k == newest || !strcmp(copies[k].print, copies[newest].print)) continue;
+            if (do_download_bundle(c, (int)jget_num(pick, "id", 0), copies[k].r, c->slot, 0,
+                                   jget_str(pick, "content_hash", ""), 1) == 0) {
+                n++;
+                LOGI("shared save: %s's saves from %s -> %s", id, copies[newest].r->map->profile_name,
+                     copies[k].r->map->profile_name);
+                events_add("save", "downloaded", a->rom_id, copies[k].dir, emu_name(copies[k].r->map),
+                           "Saved in another emulator");
+            }
         }
         cJSON_Delete(all);
     }
@@ -2394,7 +2601,7 @@ static void state_local_name(const local_rom *r, const char *server_name, char *
             return;
         }
     }
-    const char *ext = path_ext(server_name), *vars[15];
+    const char *ext = path_ext(server_name), *vars[17];
     if (!strcmp(ext, ".state")) ext = r->map->state_slot0;
     name_vars(r, ext, vars);
     str_template(out, n, r->map->state_name, vars);
@@ -2934,6 +3141,10 @@ static void run_sync(const char *reason, int only_rom, sync_result *res) {
                 res->skipped++; /* game isn't on this console */
                 continue;
             }
+            if (!strcmp(r->map->save_layout, "xbox") && !emulator_closed(r->map)) {
+                res->deferred++; /* not onto a disk xemu has open */
+                continue;
+            }
             char dest[PATH_MAX_LEN];
             int ok;
             if (r->map->save_layout[0]) {
@@ -2966,7 +3177,9 @@ static void run_sync(const char *reason, int only_rom, sync_result *res) {
         }
     }
     cJSON_Delete(neg);
-    if (!upload_only) res->downloaded += restore_missing_saves(&c, only_rom) + restore_missing_bundles(&c, only_rom);
+    if (!upload_only)
+        res->downloaded += restore_missing_saves(&c, only_rom) + restore_missing_bundles(&c, only_rom) +
+                           share_bundle_saves(&c, only_rom);
     if (!upload_only) res->downloaded += fetch_slotless_saves(&c, only_rom);
 
     set_phase("finishing");
@@ -3589,7 +3802,7 @@ int sync_restore(const char *kind, int id, char *err, int en) {
         goto done;
     }
     if (!r) {
-        snprintf(err, (size_t)en, "the game isn't on this console");
+        if (!why_no_sync(&c, rom_id, is_state, err, en)) snprintf(err, (size_t)en, "the game isn't on this console");
         goto done;
     }
     char dest[PATH_MAX_LEN], dir[PATH_MAX_LEN], name[256];
@@ -3723,7 +3936,7 @@ cJSON *sync_tracked(int only_rom) {
             tracked_file(games, roms, maps, nmaps, kinds[k][1], e, conflicts);
         }
     state_unlock();
-    free(maps);
+    profiles_free(maps);
 
     /* {"platforms": [{"platform": "gba", "games": [...]}], "saves": n, "states": n, "conflicts": n} */
     cJSON *out = cJSON_CreateObject(), *plats = cJSON_AddArrayToObject(out, "platforms"), *gm;

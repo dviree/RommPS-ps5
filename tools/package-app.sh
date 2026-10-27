@@ -2,7 +2,7 @@
 # Builds RommPS from scratch and packages it as build/release/PPSA76677.zip,
 # the file ProsperoStore installs.
 #
-#   tools/package-app.sh v1.3.1
+#   tools/package-app.sh v1.4.0
 #
 # Used by the release workflow (.github/workflows/app.yml) and by
 # tools/release-app.sh. It expects build/ps5/romm-sync.elf to be the payload

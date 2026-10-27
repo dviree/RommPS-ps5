@@ -254,6 +254,11 @@ static void *app_main(void *arg) {
             thread_start(tile_thread, NULL);
         }
         if (fg <= 0 || !is_game_title(title)) title[0] = 0;
+        /* Resting with a game open: nothing in front, but the game's
+         * processes are all there. It hasn't closed: no "game exited" sync as
+         * the console sleeps, no "game started" one as it wakes, and downloads
+         * keep waiting for it. */
+        if (!title[0] && current[0] && plat_app_alive(current) == 1) str_copy(title, sizeof title, current);
         web_set_foreground(title);
         sync_set_game_running(title[0] != 0);
 

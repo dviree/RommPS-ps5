@@ -732,7 +732,7 @@ static void run_rom_job(job *j) {
     if (!m) {
         if (maps_failed(maps, n)) job_end(j, JOB_ERROR, MAPS_SHORT_MSG "%s", "");
         else job_end(j, JOB_ERROR, "no emulator is set up for %s", slug);
-        free(maps);
+        profiles_free(maps);
         cJSON_Delete(rom);
         return;
     }
@@ -747,20 +747,20 @@ static void run_rom_job(job *j) {
         if (strcmp(jget_str(f, "file_name", ""), fs_name) == 0) { multi = 0; break; }
     if (library_not_game(fs_name)) {
         job_end(j, JOB_ERROR, "%s isn't a game", fs_name);
-        free(maps);
+        profiles_free(maps);
         cJSON_Delete(rom);
         return;
     }
     const char *archive = rom_archive(rom, is_switch(slug));
     if (archive) {
         job_end(j, JOB_ERROR, ARCHIVED_MSG, archive);
-        free(maps);
+        profiles_free(maps);
         cJSON_Delete(rom);
         return;
     }
     if (is_switch(slug)) {
         run_switch_job(j, rom, maps, n, m);
-        free(maps);
+        profiles_free(maps);
         cJSON_Delete(rom);
         return;
     }
@@ -772,8 +772,19 @@ static void run_rom_job(job *j) {
         if (skipped < j->total) j->total -= skipped;
         pthread_mutex_unlock(&g_q_lock);
     }
-    path_join(dest, sizeof dest, m->rom_dir, fs_name);
-    mkdir_p(m->rom_dir);
+    /* The game is dest, or with game_folders a folder of its own holding it. */
+    char game[PATH_MAX_LEN];
+    const int wrap = !multi && m->game_folders;
+    if (wrap) {
+        char stem[256];
+        path_stem(stem, sizeof stem, fs_name);
+        path_join(game, sizeof game, m->rom_dir, stem);
+        path_join(dest, sizeof dest, game, fs_name);
+    } else {
+        path_join(dest, sizeof dest, m->rom_dir, fs_name);
+        str_copy(game, sizeof game, dest);
+    }
+    mkdir_p(wrap ? game : m->rom_dir);
     /* A game downloaded again: cancelling keeps what was already there. */
     const int had = file_exists(dest) || dir_exists(dest);
     int ok = 1;
@@ -784,14 +795,25 @@ static void run_rom_job(job *j) {
         free(q);
         ok = romm_download(path, dest, progress_cb, j, &r) == 0;
     } else {
-        /* Fetched file by file into <rom_dir>/<fs_name>/ so nothing needs unzipping. */
+        /* Fetched file by file into <rom_dir>/<fs_name>/ so nothing needs
+         * unzipping, each in its folder within the game ("file_path" below
+         * RomM's "<fs_path>/<fs_name>": a GOD game's 415607E1/00007000/...). */
+        char top[PATH_MAX_LEN];
+        snprintf(top, sizeof top, "%s/%s", jget_str(rom, "fs_path", ""), fs_name);
         int64_t base = 0;
         const cJSON *f;
         cJSON_ArrayForEach(f, files) {
-            const char *fn = jget_str(f, "file_name", "");
+            const char *fn = jget_str(f, "file_name", ""), *fp = jget_str(f, "file_path", "");
             if (extra_file(f) || other_disc(j, f)) continue;
-            char fdest[PATH_MAX_LEN];
-            path_join(fdest, sizeof fdest, dest, fn);
+            char fdest[PATH_MAX_LEN], sub[PATH_MAX_LEN];
+            const size_t tl = strlen(top);
+            if (!strncmp(fp, top, tl) && fp[tl] == '/' && fp[tl + 1] && !strstr(fp + tl, "/../") && !str_ends_with_ci(fp, "/..")) {
+                path_join(sub, sizeof sub, dest, fp + tl + 1);
+                path_join(fdest, sizeof fdest, sub, fn);
+                mkdir_p(sub);
+            } else {
+                path_join(fdest, sizeof fdest, dest, fn);
+            }
             int64_t size = (int64_t)jget_num(f, "file_size_bytes", -1);
             if (file_size(fdest) == size) {
                 base += size;
@@ -812,8 +834,8 @@ static void run_rom_job(job *j) {
     }
 
     if (ok && !cancelled(j)) {
-        record_rom(j, rom, m, dest, multi);
-        LOGI("downloaded %s to %s", j->name, dest);
+        record_rom(j, rom, m, game, multi);
+        LOGI("downloaded %s to %s", j->name, game);
         /* The extra emulators for this system get the same game: a hard link
          * where they share a drive, a copy where they don't. */
         for (int i = 0; i < n; i++) {
@@ -823,8 +845,8 @@ static void run_rom_job(job *j) {
             for (int k = 0; k < n && !covered; k++) covered = maps[k].mount_title[0] && !strcmp(maps[k].own_rom_dir, x->rom_dir);
             if (covered) continue; /* an extra's mount shows it the game */
             char other[PATH_MAX_LEN];
-            path_join(other, sizeof other, x->rom_dir, fs_name);
-            if (!strcmp(other, dest)) continue;
+            path_join(other, sizeof other, x->rom_dir, path_basename(game));
+            if (!strcmp(other, game)) continue;
             mkdir_p(x->rom_dir);
             pthread_mutex_lock(&g_q_lock);
             snprintf(j->note, sizeof j->note, "Copying to %s", x->profile_name);
@@ -832,7 +854,7 @@ static void run_rom_job(job *j) {
             j->speed = 0;
             j->sample_t = 0;
             pthread_mutex_unlock(&g_q_lock);
-            if (link_or_copy_progress(dest, other, progress_cb, j) == 0) {
+            if (link_or_copy_progress(game, other, progress_cb, j) == 0) {
                 record_rom(j, rom, x, other, multi);
                 LOGI("also for %s: %s", x->profile_name, other);
             } else {
@@ -842,9 +864,10 @@ static void run_rom_job(job *j) {
         finish_download(j, maps, n, rom);
     } else {
         if (cancelled(j) && !(multi && had)) discard_partial(dest, multi);
+        if (wrap && !had) rmdir(game); /* only when empty */
         job_end(j, JOB_ERROR, "%s", r.error);
     }
-    free(maps);
+    profiles_free(maps);
     cJSON_Delete(rom);
 }
 
@@ -862,7 +885,7 @@ static void run_firmware_job(job *j) {
         if (st == 200 && maps_failed(maps, n)) job_end(j, JOB_ERROR, MAPS_SHORT_MSG "%s", "");
         else job_end(j, JOB_ERROR, "no emulator is set up for %s", plat ? jget_str(plat, "slug", "") : "this platform");
         cJSON_Delete(plat);
-        free(maps);
+        profiles_free(maps);
         return;
     }
     /* Every emulator that plays it gets them, as a sync does. */
@@ -876,7 +899,7 @@ static void run_firmware_job(job *j) {
     char msg[32];
     snprintf(msg, sizeof msg, "%d file(s) failed", failed);
     job_end(j, failed || count < 0 ? JOB_ERROR : JOB_DONE, "%s", msg);
-    free(maps);
+    profiles_free(maps);
 }
 
 static int concurrency(void) {
@@ -1139,6 +1162,40 @@ int library_delete_rom(int rom_id, char *err, int en) {
     return 0;
 }
 
+int library_delete_disc(int rom_id, int disc, char *err, int en) {
+    char key[12];
+    snprintf(key, sizeof key, "%d", disc);
+    int found = 0, left = 0;
+    state_lock();
+    const cJSON *e, *d, *f;
+    cJSON_ArrayForEach(e, state_section("roms")) {
+        const cJSON *discs = cJSON_GetObjectItemCaseSensitive(e, "discs");
+        if ((int)jget_num(e, "rom_id", -1) != rom_id || !cJSON_IsObject(discs)) continue;
+        cJSON_ArrayForEach(d, discs) {
+            const int this_one = !strcmp(d->string, key);
+            found |= this_one;
+            cJSON_ArrayForEach(f, d) {
+                char path[PATH_MAX_LEN];
+                path_join(path, sizeof path, e->string, cJSON_IsString(f) ? f->valuestring : "");
+                if (!this_one) {
+                    left |= file_exists(path);
+                } else if (file_exists(path)) {
+                    LOGI("removing %s (disc %d; saves are kept)", path, disc);
+                    unlink(path);
+                }
+            }
+        }
+    }
+    state_unlock();
+    if (!found) {
+        snprintf(err, (size_t)en, "no disc %d of that game here", disc);
+        return -1;
+    }
+    if (!left) return library_delete_rom(rom_id, err, en); /* the last disc: the folder goes too */
+    installed_changed();
+    return 0;
+}
+
 cJSON *library_downloads(void) {
     static const char *names[] = {"queued", "downloading", "done", "error", "cancelled", "syncing"};
     cJSON *arr = cJSON_CreateArray();
@@ -1198,7 +1255,7 @@ cJSON *library_platforms(char *err, int en) {
         }
         cJSON_AddItemToArray(out, o);
     }
-    free(maps);
+    profiles_free(maps);
     cJSON_Delete(plats);
     return out;
 }
@@ -1236,20 +1293,25 @@ static void record_link(const char *from, const char *to, const profile_map *x) 
 /* The extras that play the main emulator's games through a mount (see
  * profile_map.mount_games), for the console to put on when they start. */
 static void update_mounts(const profile_map *maps, int n) {
-    plat_mount *want = calloc((size_t)(n > 0 ? n : 1), sizeof *want);
+    plat_mount *want = calloc((size_t)(n > 0 ? 2 * n : 1), sizeof *want);
     int nw = 0;
     for (int i = 0; want && i < n; i++) {
         const profile_map *x = &maps[i];
-        if (!x->mount_title[0]) continue;
-        int dup = 0;
-        for (int k = 0; k < nw && !dup; k++) dup = !strcmp(want[k].title, x->mount_title) && !strcmp(want[k].into, x->mount_into);
-        if (dup) continue;
-        mkdir_p(x->own_rom_dir); /* to mount on */
-        str_copy(want[nw].title, sizeof want[nw].title, x->mount_title);
-        str_copy(want[nw].name, sizeof want[nw].name, x->profile_name);
-        str_copy(want[nw].from, sizeof want[nw].from, x->rom_dir);
-        str_copy(want[nw].into, sizeof want[nw].into, x->mount_into);
-        nw++;
+        /* Its games, then its saves (Dolphin's folders). */
+        const char *title[2] = {x->mount_title, x->saves_title}, *from[2] = {x->rom_dir, x->saves_from},
+                   *into[2] = {x->mount_into, x->saves_into}, *dir[2] = {x->own_rom_dir, x->saves_dir};
+        for (int s = 0; s < 2 && nw < 2 * n; s++) {
+            if (!title[s][0]) continue;
+            int dup = 0;
+            for (int k = 0; k < nw && !dup; k++) dup = !strcmp(want[k].title, title[s]) && !strcmp(want[k].into, into[s]);
+            if (dup) continue;
+            mkdir_p(dir[s]); /* to mount on */
+            str_copy(want[nw].title, sizeof want[nw].title, title[s]);
+            str_copy(want[nw].name, sizeof want[nw].name, x->profile_name);
+            str_copy(want[nw].from, sizeof want[nw].from, from[s]);
+            str_copy(want[nw].into, sizeof want[nw].into, into[s]);
+            nw++;
+        }
     }
     plat_mounts_set(want, nw);
     free(want);
@@ -1334,12 +1396,12 @@ int library_own_games(const char *root, const char *system, const char *action, 
     }
     if (!x || !m || m == x || m->extra) {
         snprintf(err, (size_t)en, "no extra emulator at %s for %s with games in the way of its mount", root, system);
-        free(maps);
+        profiles_free(maps);
         return -1;
     }
     if (plat_is_mount(x->rom_dir)) {
         snprintf(err, (size_t)en, "close %s first", x->profile_name);
-        free(maps);
+        profiles_free(maps);
         return -1;
     }
     DIR *d = opendir(x->rom_dir);
@@ -1377,7 +1439,7 @@ int library_own_games(const char *root, const char *system, const char *action, 
     }
     if (d) closedir(d);
     events_save();
-    free(maps);
+    profiles_free(maps);
     library_link_extras(); /* the mount can go on now */
     return done;
 }
@@ -1571,7 +1633,7 @@ again:;
     profile_map *maps = NULL;
     int n = load_maps(&maps), linked = 0;
     if (move_to_main(maps, n)) { /* now it can have a mount */
-        free(maps);
+        profiles_free(maps);
         maps = NULL;
         n = load_maps(&maps);
     }
@@ -1633,7 +1695,7 @@ again:;
         }
     }
     if (config_is_paired()) firmware_sync(maps, n, NULL, 0, NULL); /* emulators just turned on */
-    free(maps);
+    profiles_free(maps);
     if (linked) {
         LOGI("extra emulators: %d games linked in", linked);
         sync_request("extra emulators");
@@ -1714,6 +1776,17 @@ cJSON *library_details(int rom_id, char *err, int en) {
     const int nx = is_switch(jget_str(rom, "platform_slug", ""));
     if (!nx) add_version_list(out, rom);
     const char *archive = rom_archive(rom, nx);
+    /* Saves its emulator doesn't sync: why, for the game's sheet. */
+    profile_map *maps = NULL;
+    const int nmaps = load_maps(&maps);
+    const profile_map *m = profile_find_for_platform(maps, nmaps, jget_str(rom, "platform_slug", ""),
+                                                     jget_str(rom, "platform_fs_slug", ""));
+    if (m && !m->sync_saves) {
+        char why[256];
+        snprintf(why, sizeof why, "%s: saves don't sync.%s%s", m->profile_name, m->sync_note[0] ? " " : "", m->sync_note);
+        cJSON_AddStringToObject(out, "saves_off", why);
+    }
+    profiles_free(maps);
     if (archive) {
         char msg[200];
         snprintf(msg, sizeof msg, ARCHIVED_MSG, archive);

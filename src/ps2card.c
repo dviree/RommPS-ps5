@@ -3,6 +3,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -306,8 +307,11 @@ static void each_setting(const char *txt, int ini, setting_fn fn, void *ctx) {
     }
 }
 
+/* want is a [MemoryCards] key, or "Section/Key" for one elsewhere ("PS5/CardPerGame"). */
 static int is_card_key(const char *sec, size_t sl, const char *key, size_t kl, const char *want) {
-    return sl == 11 && !strncasecmp(sec, "MemoryCards", 11) && kl == strlen(want) && !strncasecmp(key, want, kl);
+    const char *slash = strchr(want, '/'), *ws = slash ? want : "MemoryCards", *wk = slash ? slash + 1 : want;
+    const size_t wsl = slash ? (size_t)(slash - want) : 11;
+    return sl == wsl && !strncasecmp(sec, ws, sl) && kl == strlen(wk) && !strncasecmp(key, wk, kl);
 }
 
 typedef struct {
@@ -414,5 +418,147 @@ int ps2card_set_setting(const char *path, int ini, const char *key, const char *
     if (rc == 0) share(path, 0);
     free(out);
     free(old);
+    return rc;
+}
+
+/* ---- PCSX2's game database (GameIndex.yaml) ---- */
+
+/* Games that read each other's saves, as memcardFilters lists them: one edge
+ * per game and serial it names. Read once per file (by size and mtime). */
+typedef struct {
+    char a[24], b[24];
+} db_edge;
+
+static struct {
+    pthread_mutex_t lock;
+    char path[PATH_MAX_LEN];
+    long long size, mtime;
+    db_edge *edges;
+    size_t n;
+    char **games; /* every serial with an entry, sorted */
+    size_t ngames;
+} g_db = {PTHREAD_MUTEX_INITIALIZER, "", 0, 0, NULL, 0, NULL, 0};
+
+/* A serial as PCSX2 names cards by it, upper case; 0 when it can't be one. */
+static int db_key(const char *b, const char *e, char out[24]) {
+    size_t n = 0;
+    for (; b < e; b++) {
+        if (!isalnum((unsigned char)*b) && *b != '-' && *b != '.' && *b != '_') return -1;
+        if (n + 1 >= 24) return -1;
+        out[n++] = (char)toupper((unsigned char)*b);
+    }
+    out[n] = 0;
+    return n && out[0] != '.' ? 0 : -1;
+}
+
+static int str_cmp(const void *a, const void *b) {
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+static void db_free(void) {
+    for (size_t i = 0; i < g_db.ngames; i++) free(g_db.games[i]);
+    free(g_db.games);
+    free(g_db.edges);
+    g_db.games = NULL;
+    g_db.edges = NULL;
+    g_db.n = g_db.ngames = 0;
+}
+
+/* Top level "SLUS-20552:" lines are games; "  memcardFilters:" starts a list
+ * of '    - "SLUS-20552"' lines (quotes and "# comments" optional). */
+static int db_load(const char *path) {
+    struct stat st;
+    if (stat(path, &st) != 0) return -1;
+    if (!strcmp(g_db.path, path) && g_db.size == (long long)st.st_size && g_db.mtime == (long long)st.st_mtime) return 0;
+    char *txt = read_file(path, NULL);
+    if (!txt) return -1;
+    db_free();
+    str_copy(g_db.path, sizeof g_db.path, path);
+    g_db.size = (long long)st.st_size;
+    g_db.mtime = (long long)st.st_mtime;
+    size_t cap = 0, gcap = 0;
+    char game[24] = "";
+    int in_filters = 0;
+    for (char *line = txt; *line;) {
+        char *eol = line + strcspn(line, "\n"), *next = *eol ? eol + 1 : eol;
+        char *b = line, *e = eol;
+        trim(&b, &e);
+        if (line[0] != ' ' && line[0] != '\t' && line[0] != '#' && e > b && e[-1] == ':') {
+            in_filters = 0;
+            if (db_key(line, e - 1, game) == 0) {
+                if (g_db.ngames == gcap) {
+                    gcap = gcap ? gcap * 2 : 4096;
+                    char **grown = realloc(g_db.games, gcap * sizeof *grown);
+                    if (!grown) break;
+                    g_db.games = grown;
+                }
+                if (!(g_db.games[g_db.ngames] = strdup(game))) break;
+                g_db.ngames++;
+            } else {
+                game[0] = 0;
+            }
+        } else if (b < e && !strncmp(b, "memcardFilters:", 15)) {
+            in_filters = game[0] != 0;
+        } else if (in_filters && b < e && *b == '-') {
+            char *v = b + 1, *ve = memchr(v, '#', (size_t)(e - v));
+            if (!ve) ve = e;
+            trim(&v, &ve);
+            if (ve - v >= 2 && (*v == '"' || *v == '\'') && ve[-1] == *v) v++, ve--;
+            db_edge ed;
+            str_copy(ed.a, sizeof ed.a, game);
+            if (db_key(v, ve, ed.b) == 0 && strcmp(ed.a, ed.b) != 0) {
+                if (g_db.n == cap) {
+                    cap = cap ? cap * 2 : 1024;
+                    db_edge *grown = realloc(g_db.edges, cap * sizeof *grown);
+                    if (!grown) break;
+                    g_db.edges = grown;
+                }
+                g_db.edges[g_db.n++] = ed;
+            }
+        } else if (b < e && *b != '#' && (line[0] != ' ' || strspn(line, " ") <= 2)) {
+            in_filters = 0; /* the game's next key */
+        }
+        line = next;
+    }
+    free(txt);
+    qsort(g_db.games, g_db.ngames, sizeof *g_db.games, str_cmp);
+    return 0;
+}
+
+int ps2card_db_card(const char *db, const char *serial, char *out, size_t n) {
+    char key[24];
+    out[0] = 0;
+    if (!db || !db[0] || !serial || db_key(serial, serial + strlen(serial), key) != 0) return -1;
+    pthread_mutex_lock(&g_db.lock);
+    if (db_load(db) != 0) {
+        pthread_mutex_unlock(&g_db.lock);
+        return -1;
+    }
+    const char *k = key;
+    int rc = -1;
+    if (bsearch(&k, g_db.games, g_db.ngames, sizeof *g_db.games, str_cmp)) {
+        /* The game's group, grown until nothing joins it: its smallest serial
+         * names the card. A few hundred edges, so a plain sweep does. */
+        str_list group = {0};
+        list_add(&group, key);
+        for (int grew = 1; grew;) {
+            grew = 0;
+            for (size_t i = 0; i < g_db.n; i++) {
+                int ha = 0, hb = 0;
+                for (size_t j = 0; j < group.n; j++) {
+                    ha |= !strcmp(group.items[j], g_db.edges[i].a);
+                    hb |= !strcmp(group.items[j], g_db.edges[i].b);
+                }
+                if (ha != hb && list_add(&group, ha ? g_db.edges[i].b : g_db.edges[i].a) == 0) grew = 1;
+            }
+        }
+        const char *least = group.items[0];
+        for (size_t j = 1; j < group.n; j++)
+            if (strcmp(group.items[j], least) < 0) least = group.items[j];
+        snprintf(out, n, "%s.ps2", least);
+        rc = 0;
+        list_free(&group);
+    }
+    pthread_mutex_unlock(&g_db.lock);
     return rc;
 }

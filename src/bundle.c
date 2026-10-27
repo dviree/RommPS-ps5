@@ -9,12 +9,15 @@
 #include <unistd.h>
 
 #include "gameid.h"
+#include "platform.h"
 #include "ps2card.h"
+#include "xboxhdd.h"
 #include "zip.h"
 
 int bundle_supported(const char *layout) {
     return layout && (!strcmp(layout, "psp") || !strcmp(layout, "gci") || !strcmp(layout, "wii") ||
-                      !strcmp(layout, "3ds") || !strcmp(layout, "wiiu") || !strcmp(layout, "ps2"));
+                      !strcmp(layout, "3ds") || !strcmp(layout, "wiiu") || !strcmp(layout, "ps2") ||
+            !strcmp(layout, "switch") || !strcmp(layout, "xbox") || !strcmp(layout, "x360"));
 }
 
 static void add(bundle *b, const char *path, const char *name) {
@@ -106,6 +109,30 @@ static void wiiu_account(const char *base, char out[16]) {
     free(xml);
 }
 
+/* The game's save, copied out of the Xbox hard disk image into b->dir. The
+ * copy is made again only when the image has changed since: ".image" in it
+ * says which version it came from. No image (""): the copy as it is. */
+static void xbox_copy_out(bundle *b, const char *image) {
+    char stamp[PATH_MAX_LEN], now[64];
+    snprintf(b->dir, sizeof b->dir, "%s/xbox/%s", plat_data_dir(), b->game_id);
+    path_join(stamp, sizeof stamp, b->dir, ".image");
+    snprintf(now, sizeof now, "%lld %lld", (long long)file_mtime_ns(image), (long long)file_size(image));
+    char *had = read_file(stamp, NULL);
+    const int fresh = had && !strcmp(had, now);
+    free(had);
+    if (fresh || !image[0] || file_size(image) < 0) return;
+    remove_tree(b->dir);
+    xhdd *h = xhdd_open(image, 0);
+    const int rc = h ? xhdd_get_save(h, b->game_id, b->dir) : -1;
+    xhdd_close(h);
+    if (rc < 0) {
+        remove_tree(b->dir); /* tried again next time */
+        return;
+    }
+    mkdir_p(b->dir);
+    write_file_atomic(stamp, now, strlen(now));
+}
+
 int bundle_open(bundle *b, const char *layout, const char *id, char bases[][PATH_MAX_LEN], int nbases) {
     memset(b, 0, sizeof *b);
     if (!bundle_supported(layout) || !id[0] || nbases < 1) return -1;
@@ -176,6 +203,26 @@ int bundle_open(bundle *b, const char *layout, const char *id, char bases[][PATH
             if (ok) add(b, path, de->d_name);
         }
         if (d) closedir(d);
+    } else if (!strcmp(layout, "xbox")) {
+        /* E:\UDATA\<id> inside the image (base), hashed and zipped from a copy. */
+        if (strlen(id) != 8) return -1;
+        xbox_copy_out(b, base);
+        add_tree(b, b->dir, "", 0);
+    } else if (!strcmp(layout, "x360")) {
+        /* <title id>/00000001 (saved games) and its headers under the player's
+         * folder; the title's other content (DLC, updates) stays out. */
+        char dir[PATH_MAX_LEN], name[64];
+        snprintf(b->dir, sizeof b->dir, "%s/%s", base, id);
+        snprintf(dir, sizeof dir, "%s/00000001", b->dir);
+        snprintf(name, sizeof name, "%s/00000001", id);
+        add_tree(b, dir, name, 0);
+        snprintf(dir, sizeof dir, "%s/Headers/00000001", b->dir);
+        snprintf(name, sizeof name, "%s/Headers/00000001", id);
+        add_tree(b, dir, name, 0);
+    } else if (!strcmp(layout, "switch")) {
+        /* The game's folder under the user's: save/0000000000000000/<user>/<title id>. */
+        snprintf(b->dir, sizeof b->dir, "%s/%s", base, id);
+        add_tree(b, b->dir, id, 0);
     } else if (!strcmp(layout, "3ds")) {
         char hi[9], lo[9], root[64], meta[PATH_MAX_LEN];
         if (title_halves(id, hi, lo) != 0) return -1;
@@ -289,6 +336,43 @@ static int place_unpacked(bundle *b, const char *tmp) {
         /* "<id>/..." (RomM's save units), or the folder's contents as 1.2 sent them. */
         wii_title_hex(b->game_id, hex);
         path_join(src, sizeof src, tmp, hex);
+        return put_folder(dir_exists(src) ? src : tmp, b->dir);
+    }
+    if (!strcmp(b->layout, "xbox")) {
+        /* "<title id>/..." in any case, or the folder's contents; onto the
+         * image, and the copy here goes so it's made again. */
+        DIR *d = opendir(tmp);
+        struct dirent *de;
+        str_copy(src, sizeof src, tmp);
+        while (d && (de = readdir(d)))
+            if (!strcasecmp(de->d_name, b->game_id)) path_join(src, sizeof src, tmp, de->d_name);
+        if (d) closedir(d);
+        const int rc = xhdd_put_save_file(b->base, b->game_id, src);
+        remove_tree(b->dir);
+        return rc;
+    }
+    if (!strcmp(b->layout, "x360")) {
+        /* "<title id>/00000001" and "<title id>/Headers/00000001" (any case),
+         * or the title folder's contents; the title's other content stays. */
+        str_copy(src, sizeof src, tmp);
+        DIR *d = opendir(tmp);
+        struct dirent *de;
+        while (d && (de = readdir(d)))
+            if (!strcasecmp(de->d_name, b->game_id)) path_join(src, sizeof src, tmp, de->d_name);
+        if (d) closedir(d);
+        char saves[PATH_MAX_LEN], headers[PATH_MAX_LEN], to[PATH_MAX_LEN];
+        path_join(saves, sizeof saves, src, "00000001");
+        snprintf(headers, sizeof headers, "%s/Headers/00000001", src);
+        if (!dir_exists(saves)) return -1;
+        snprintf(to, sizeof to, "%s/00000001", b->dir);
+        int rc = put_folder(saves, to);
+        snprintf(to, sizeof to, "%s/Headers/00000001", b->dir);
+        if (dir_exists(headers)) rc |= put_folder(headers, to);
+        else remove_tree(to);
+        return rc;
+    }
+    if (!strcmp(b->layout, "switch")) { /* "<title id>/...", or the folder's contents */
+        path_join(src, sizeof src, tmp, b->game_id);
         return put_folder(dir_exists(src) ? src : tmp, b->dir);
     }
     if (!strcmp(b->layout, "3ds")) {

@@ -35,6 +35,9 @@ int library_on_console(int rom_id);
 /* A game kept as a folder of discs: the discs on the console now, [1, 3];
  * NULL for any other game. */
 cJSON *library_discs_here(int rom_id);
+/* One disc of a game kept as a folder of discs: its files go, the game stays
+ * (all of it with its last disc). Saves are kept. */
+int library_delete_disc(int rom_id, int disc, char *err, int en);
 
 /* disc: one disc of a game kept as a folder of discs, 0 for all of it.
  * name: the name the client shows; cover: its copy of RomM's path_cover_small. */

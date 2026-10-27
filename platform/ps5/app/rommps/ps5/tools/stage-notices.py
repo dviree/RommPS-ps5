@@ -150,7 +150,7 @@ def main():
 
     # The RomM Sync payload RommPS carries (assets/rommps/romm-sync.elf): the
     # repository's own code, the libraries compiled into it and the web UI it
-    # serves. A library the commit doesn't have yet (sigil, from 1.3.1) is left out.
+    # serves. A library the commit doesn't have yet (sigil, from 1.4.0) is left out.
     if (repo / "third_party/cJSON.LICENSE").exists():
         payload = [
             ("LICENSE", "LICENSE", "RomM Sync", "GPL-3.0-or-later", "Copyright (C) 2026 s0liton"),

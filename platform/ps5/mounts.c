@@ -412,6 +412,26 @@ static void scan_sandboxes(void) {
                 take_off_all(r);
             }
             r->used = 0;
+        } else if (r->over) {
+            /* The app carries on in a new process in the same sandbox
+             * (RetroArch starts itself again to load a core): its mounts go
+             * back on, and come off at that one's exit as at any other. */
+            pid_t pids[MAX_PIDS];
+            const int np = find_pids(r->title, pids, MAX_PIDS);
+            int fresh = 0;
+            for (int k = 0; k < np && !fresh; k++) {
+                int old = 0;
+                for (int j = 0; j < r->np; j++) old |= pids[k] == r->pids[j];
+                fresh = !old;
+            }
+            if (fresh) {
+                char title[16], sandbox[256];
+                snprintf(title, sizeof title, "%s", r->title);
+                snprintf(sandbox, sizeof sandbox, "%s", r->sandbox);
+                LOGI("mounts: %s goes on in a new process", title);
+                r->used = 0;
+                start_run(title, sandbox, pids, np, mnt, nmnt);
+            }
         }
     }
     for (int k = 0; k < nmnt; k++) {

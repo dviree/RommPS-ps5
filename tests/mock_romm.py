@@ -99,17 +99,20 @@ def rom_public(r):
     stem = r["fs_name"].rsplit(".", 1)[0] if "." in r["fs_name"] else r["fs_name"]
     cover = "/assets/romm/resources/roms/%d/%d/cover/small.png?ts=%s" % (
         r["platform_id"], r["id"], DB["cover_ts"].get(r["id"], "2026-01-01 00:00:00"))
+    fs_path = r.get("fs_path", p["fs_slug"])
     if r.get("files"):
+        # file_path is the file's folder: the game's own, or one inside it ("sub").
         files = [{"id": f["id"], "file_name": f["file_name"], "file_size_bytes": len(f["content"]),
+                  "file_path": "/".join(x for x in (fs_path, r["fs_name"], f.get("sub", "")) if x),
                   "category": f.get("category", "content")} for f in r["files"]]
-        return {**{k: v for k, v in r.items() if k != "files"}, "fs_name_no_ext": stem,
+        return {**{k: v for k, v in r.items() if k != "files"}, "fs_name_no_ext": stem, "fs_path": fs_path,
                 "fs_size_bytes": sum(f["file_size_bytes"] for f in files),
                 "platform_slug": p["slug"], "platform_fs_slug": p["fs_slug"], "platform_display_name": p["name"],
                 "has_multiple_files": len(files) > 1, "files": files,
                 "md5_hash": hashlib.md5(b"".join(f["content"] for f in r["files"])).hexdigest(),
                 "path_cover_small": cover}
     content = ("ROM:" + r["fs_name"]).encode()
-    return {**r, "fs_name_no_ext": stem, "fs_size_bytes": len(content), "platform_slug": p["slug"],
+    return {**r, "fs_name_no_ext": stem, "fs_path": fs_path, "fs_size_bytes": len(content), "platform_slug": p["slug"],
             "platform_fs_slug": p["fs_slug"], "platform_display_name": p["name"], "has_multiple_files": False, "files": [],
             "md5_hash": hashlib.md5(content).hexdigest(),
             # Like RomM's: the cover's path carries a stamp that changes with it.

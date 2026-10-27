@@ -65,7 +65,12 @@ static int load_dirs(watch_dir **out) {
         const profile_map *m = &maps[i];
         if (!m->sync_saves) continue;
         for (int k = 0; k < (states ? 2 : 1); k++) {
-            const char *d = m->in_content[k] ? m->rom_dir : (k ? m->state_dir : m->save_dir);
+            /* A folder per game ("states/{game_id}", "nvram/{rom_stem}/cdimono1")
+             * is watched from above it. */
+            char d[PATH_MAX_LEN];
+            str_copy(d, sizeof d, m->in_content[k] ? m->rom_dir : (k ? m->state_dir : m->save_dir));
+            char *var = strstr(d, "/{");
+            if (var) *var = 0;
             const char *e = k ? m->state_exts : m->save_exts;
             if (!d[0]) continue;
             watch_dir *w = NULL;
@@ -96,7 +101,7 @@ static int load_dirs(watch_dir **out) {
             strncat(all_exts, e[k], sizeof all_exts - strlen(all_exts) - 1);
         }
     }
-    free(maps);
+    profiles_free(maps);
     static char scanned[64][1024];
     static int any_file[64];
     int ns = sync_scanned_dirs(scanned, any_file, 64);

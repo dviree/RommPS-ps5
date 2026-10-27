@@ -36,12 +36,18 @@
  *    "global_ini": "{root}/gs.ini"              the settings for every game, if any
  *    "format": "flat" | "ini"                   "MemoryCards/Slot1_Filename=X" lines, or
  *                                               an [MemoryCards] section
- *    "own_card": "{rom_stem}.ps2"}              each game's own card, the one the game's
+ *    "own_card": "{rom_stem}.ps2"               each game's own card, the one the game's
  *                                               settings get with one card per game
+ *    "auto_card": "PS5/CardPerGame"             or: the emulator gives each game its own card
+ *                                               while this setting isn't false (Crux2), named
+ *    "game_db": "{root}/resources/GameIndex.yaml"}  as ps2card_db_card says
  * "memcards" can name the card folder as {card_dir}.
  * A platform entry can override any profile key. "sync_requires_option"
  * ({"key", "value", "default", "hint"}) turns save sync on only while a core
- * option has that value. Paths can use {root}, {platform}, {rom_dir} and {data}.
+ * option has that value. Paths can use {root}, {platform}, {rom_dir} and {data},
+ * and {user_dir}: the first folder of "user_dir" that exists (else its last),
+ * for an emulator that keeps its files elsewhere when a folder is there
+ * (Crux2: "/data/crux2,{root}").
  *
  * A system is named by the first slug of its platform entry ("psx", "genesis";
  * the first slugs of detect.c's DB_MAP). When several emulators play one, the
@@ -129,6 +135,9 @@ typedef struct {
      * share its save on RomM; the others keep their own slot (own_slot). */
     int extra;
     int own_slot;
+    /* Lists each game as a folder of its own ("game_folders": PS5X360): a
+     * download of one file goes in <rom_dir>/<its name>/. */
+    int game_folders;
     char save_format[32];
     /* An extra that reads its games through its own app folder ("mount_games":
      * true) or, out of its sandbox, through the real /data ("mount_games":
@@ -143,6 +152,11 @@ typedef struct {
     char own_rom_dir[PATH_MAX_LEN];
     char mount_title[16];
     char mount_into[256];
+    /* An extra keeping Dolphin's saves as the main emulator does (GameCube and
+     * Wii folders): the main's folder is mounted on its own (saves_dir, inside
+     * its sandbox saves_into, for app mount_title or saves_title), so both play
+     * the same saves; bundle_dirs is then the main's, synced once. */
+    char saves_from[512], saves_dir[512], saves_into[256], saves_title[16];
     char mount_note[200];
     /* Memory cards every game shares ("memcards": "{root}/Mcd001.ps2,..."),
      * backed up to RomM's memory cards (memcard.h). */
@@ -174,14 +188,22 @@ typedef struct {
     char core_name[64]; /* core library name, e.g. "mGBA" */
     char save_layout[8];    /* "" for one file per game, or psp, gci, wii, ps2 (see bundle.h) */
     char bundle_dirs[512];  /* candidate folders for bundled saves, comma separated */
+    /* switch: the Switch user whose saves sync ({switch_user} in bundle_dirs):
+     * the profile's "switch_user", else the emulator's first user. */
+    char switch_user[40];
+    /* x360: the player (XUID) whose saves sync ({xuid} in bundle_dirs): the
+     * profile's "x360_user", else the emulator's player 1 ("x360_users", its
+     * local-players.txt). */
+    char xuid[20];
     /* ps2: "pcsx2_cards" (above). Folders are filled in, the game's names
      * ({rom_stem}, {serial}, {crc}) are left for each game. */
     char pc_dirs[512], pc_game_ini[PATH_MAX_LEN], pc_global_ini[PATH_MAX_LEN];
-    char pc_format[8], pc_own_card[128];
+    char pc_format[8], pc_own_card[128], pc_auto_card[48], pc_game_db[PATH_MAX_LEN];
     /* The app's title id ("PPSA99203"), "" if unknown: nothing on its cards
      * changes while one of its processes runs (plat_app_alive). */
     char app_title[16];
     /* Why saves aren't synced for this platform, shown in the UI. */
+    char off_note[200]; /* the preset's reason when its saves don't sync ("sync_note") */
     char sync_note[200];
 
     /* Kept for per-game overrides (see profile_rules_for). */
@@ -219,8 +241,10 @@ const char *profiles_system_key(const cJSON *entry);
 int profiles_excludes(const cJSON *profile, const char *key);
 
 /* One entry per enabled profile and platform, with paths resolved.
- * Returns the count; free *out. */
+ * Returns the count; profiles_free(*out). */
 int profiles_expand(const cJSON *profiles, profile_map **out);
+/* Frees what profiles_expand made. */
+void profiles_free(profile_map *maps);
 
 /* The map's "firmware" rules (see firmware.h), from its platform entry or
  * profile, else the built-in catalog's; NULL if none. A custom profile with
