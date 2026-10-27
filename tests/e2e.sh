@@ -1417,6 +1417,7 @@ cfg = json.load(urllib.request.urlopen(api + "/api/config"))
 profiles = [p for p in cfg["profiles"] if p.get("id") != "nxlike"] + [{
     "id": "nxlike", "name": "NX-like", "enabled": True, "root": root, "rom_dir": "{root}/roms",
     "update_dir": "{root}/updates", "dlc_dir": "{root}/updates", "bios_dir": "{root}", "sync_saves": False,
+    "firmware": {"by_ext": {".keys": "keys", ".nca": "firmware"}},
     "platforms": [{"romm": ["switch"], "dir": "switch", "emulator": "nxlike"}]}]
 req = urllib.request.Request(api + "/api/config", json.dumps({"profiles": profiles}).encode(), {"Content-Type": "application/json"})
 urllib.request.urlopen(req)
@@ -1563,6 +1564,18 @@ grep -q "Nameless.nsp: RomM no longer has game 909, looked for again" "$T/daemon
 syncnow
 [[ "$(nxid)" == 919 ]] || fail "the game wasn't matched again under its new id: $(nxid)"
 rm "$NX/roms/Nameless.nsp"
+echo "    Switch firmware is one set: RomM's goes only where there's none of the user's"
+curl -skf -X POST "$SV/_admin/firmware" -d '{"platform_id":90,"file_name":"aaaa.nca","content":"romm-fw-a"}' >/dev/null
+curl -skf -X POST "$SV/_admin/firmware" -d '{"platform_id":90,"file_name":"bbbb.cnmt.nca","content":"romm-fw-b"}' >/dev/null
+rm -rf "$NX/firmware"
+syncnow
+[[ "$(ls "$NX/firmware" 2>/dev/null | tr '\n' ' ')" == "aaaa.nca bbbb.cnmt.nca " ]] || fail "RomM's firmware must fill an empty folder: $(ls "$NX/firmware" 2>&1)"
+printf 'my-fw' > "$NX/firmware/mine.nca"   # the user puts their own set in
+syncnow
+[[ "$(ls "$NX/firmware" | tr '\n' ' ')" == "mine.nca " ]] || fail "RomM's firmware beside the user's set must come out: $(ls "$NX/firmware")"
+grep -q "NOTIFY\] RommPS: removed RomM's Switch firmware" "$T/daemon.log" || fail "no notice of RomM's firmware removed"
+syncnow
+[[ "$(ls "$NX/firmware" | tr '\n' ' ')" == "mine.nca " ]] || fail "RomM's firmware must not come back beside the user's: $(ls "$NX/firmware")"
 
 echo "28c. Xbox saves: E:\\UDATA\\<title id> inside xemu's hard disk image, as RomM's save unit; never while xemu runs"
 XB="$T/homebrew/PPSA97358"; XS="$T/xbsave"; mkdir -p "$XB/games" "$XB/hdd" "$XS/006412E217B6"

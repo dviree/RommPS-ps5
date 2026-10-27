@@ -260,6 +260,67 @@ static void tidy_pick_one(const char *dir, const cJSON *files, const cJSON *pick
     }
 }
 
+static int still_ours(const char *path, const char *rec_md5, int64_t rec_size);
+
+/* A Switch firmware folder is one set, matched to the keys beside it: files of
+ * two versions together fail ProsperoEden's check ("NCA validation failed",
+ * code 21) for every game. RomM's set goes only into a folder with none of the
+ * user's; RomM's files already put in beside the user's set come out again.
+ * 1 when the folder holds the user's own set. */
+#define ONE_SET_EXTS ".nca"
+static int users_set(const char *folder, const char *ext) {
+    DIR *d = opendir(folder);
+    struct dirent *de;
+    int users = 0, removed = 0;
+    char paths[64][PATH_MAX_LEN];
+    int nours = 0;
+    while (d && (de = readdir(d))) {
+        if (de->d_name[0] == '.' || !str_ieq(path_ext(de->d_name), ext)) continue;
+        char path[PATH_MAX_LEN];
+        path_join(path, sizeof path, folder, de->d_name);
+        state_lock();
+        const int ours = state_entry("firmware", path) != NULL;
+        state_unlock();
+        if (!ours) users = 1;
+    }
+    if (d) closedir(d);
+    if (!users) return 0;
+    /* In batches: the folder changes as files go. */
+    do {
+        nours = 0;
+        state_lock();
+        const cJSON *recs = state_section("firmware"), *e;
+        cJSON_ArrayForEach(e, recs) {
+            const char *slash = strrchr(e->string, '/');
+            if (nours < 64 && slash && (size_t)(slash - e->string) == strlen(folder) &&
+                !strncmp(e->string, folder, strlen(folder)) && str_ieq(path_ext(e->string), ext))
+                str_copy(paths[nours++], sizeof paths[0], e->string);
+        }
+        state_unlock();
+        for (int i = 0; i < nours; i++) {
+            char md5[33];
+            state_lock();
+            const cJSON *rec = state_entry("firmware", paths[i]);
+            str_copy(md5, sizeof md5, jget_str(rec, "md5", ""));
+            const int64_t size = rec ? (int64_t)jget_num(rec, "size", -1) : -1;
+            state_unlock();
+            /* Changed since we put it there: the user's now, left as it is. */
+            if (file_exists(paths[i]) && still_ours(paths[i], md5, size) && unlink(paths[i]) == 0) removed++;
+            state_lock();
+            cJSON_DeleteItemFromObjectCaseSensitive(state_section("firmware"), paths[i]);
+            state_unlock();
+        }
+    } while (nours == 64);
+    if (removed) {
+        state_lock();
+        state_save();
+        state_unlock();
+        LOGI("BIOS: %s holds a firmware set of its own: removed the %d files of RomM's put in beside it", folder, removed);
+        plat_notify("RommPS: removed RomM's Switch firmware\nYour own firmware was there already");
+    }
+    return 1;
+}
+
 /* Which of the platform's files go to this emulator, under which names. */
 static int make_plan(const cJSON *rules, const cJSON *files, const char *dir, plan_t *plan) {
     int n = 0;
@@ -296,6 +357,7 @@ static int make_plan(const cJSON *rules, const cJSON *files, const char *dir, pl
     const cJSON *only = cJSON_GetObjectItemCaseSensitive(rules, "only_files");
     const cJSON *by_ext = cJSON_GetObjectItemCaseSensitive(rules, "by_ext");
     const int named = n;
+    int sets_checked = 0; /* ONE_SET_EXTS: 1 RomM's set goes in, 2 the user's is there */
     const cJSON *f;
     cJSON_ArrayForEach(f, files) {
         if (!usable(f) || planned_file(plan, n, f)) continue;
@@ -313,6 +375,19 @@ static int make_plan(const cJSON *rules, const cJSON *files, const char *dir, pl
             cJSON_ArrayForEach(e, by_ext) if (cJSON_IsString(e) && str_ieq(path_ext(name), e->string)) sub = e;
             if (!sub) continue;
             if (sub->valuestring[0]) snprintf(full, sizeof full, "%s/%s", sub->valuestring, name);
+        }
+        if (ext_in_list(name, ONE_SET_EXTS)) {
+            if (sets_checked == 0) {
+                char folder[PATH_MAX_LEN];
+                str_copy(folder, sizeof folder, full);
+                char *slash = strrchr(folder, '/');
+                if (slash) *slash = 0; else folder[0] = 0;
+                char in[PATH_MAX_LEN];
+                if (folder[0]) path_join(in, sizeof in, dir, folder);
+                else str_copy(in, sizeof in, dir);
+                sets_checked = users_set(in, path_ext(name)) ? 2 : 1;
+            }
+            if (sets_checked == 2) continue;
         }
         if (planned_name(plan, n, full)) continue;
         if (n == MAX_PLAN) {
