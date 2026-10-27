@@ -217,8 +217,10 @@ int console_toast(const char *message) {
     }
     cJSON_AddStringToObject(cJSON_AddObjectToObject(view, "message"), "body", text);
     if (sub && *sub) cJSON_AddStringToObject(cJSON_AddObjectToObject(view, "subMessage"), "body", sub);
-    /* RommPS installed (its icon is there): a button that opens it. */
-    if (icon) {
+    /* RommPS installed (its icon is there): a button that opens it, unless
+     * it's the app open now. */
+    char running[16] = "";
+    if (icon && !(plat_running_title(running, sizeof running) == 1 && !strcmp(running, ROMMPS_ID))) {
         cJSON *open = cJSON_CreateObject();
         cJSON_AddStringToObject(open, "actionName", "Open RommPS");
         cJSON_AddStringToObject(open, "actionType", "DeepLink");
