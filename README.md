@@ -14,6 +14,8 @@ A [RomM](https://romm.app) companion client for jailbroken PS5 consoles (etaHEN 
   - Settings > Diagnostic bundle saves the logs for a bug report, with your server, names and addresses left out.
 - **Interactive library**
   - Browse your RomM library from the RommPS app (or some other device via the Web UI), download games and BIOS files into the right emulator folders, and resolve save conflicts.
+- **BIOS and System File Sync**
+  - Get the BIOS files and system data you need to run your emulators properly.
 - **Pluggable emulator profiles and multiple emulators per platform**
   - Fully customizable sync destinations, but includes frequently updated preset profiles for existing homebrew emulators. 
   - Can sync games and saves and states for multiple emulators per platform (PS2 on RetroArch and PS5SX2 as an example) using hardlinks.
