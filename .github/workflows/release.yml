@@ -195,10 +195,16 @@ jobs:
         with:
           ref: ${{ needs.payloads.outputs.sha }}
 
+      # Only what's published: the Docker builds upload records of their own,
+      # and one failing to come down shouldn't hold the release back.
       - uses: actions/download-artifact@v4
         with:
+          name: payloads
           path: dist
-          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: rommps
+          path: dist
 
       - name: Publish release
         run: |
