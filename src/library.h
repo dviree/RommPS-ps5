@@ -38,7 +38,7 @@ cJSON *library_collections(collection_kind only, int *refused, char *err, int en
 typedef struct {
     int platform_id;
     collection_kind collection; /* COLLECTION_NONE for no collection */
-    char collection_id[64];
+    char collection_id[512]; /* a virtual one's is base64 of its name and type */
 } library_scope;
 
 /* 1 for a file RomM lists as a game that isn't one (metadata.txt, artwork...). */

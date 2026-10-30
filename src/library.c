@@ -2438,7 +2438,7 @@ unsigned library_installed_sig(void) {
 #define PAGE_CACHE_SLOTS 32
 #define PAGE_CACHE_SEC   300
 static struct {
-    char key[1100]; /* the request path (up to 1024) and its offset and limit */
+    char key[3200]; /* the request path (up to 3072) and its offset and limit */
     double at;
     cJSON *page;
 } g_pages[PAGE_CACHE_SLOTS];
@@ -2714,7 +2714,7 @@ static int group_versions(int platform_id) {
 }
 
 cJSON *library_roms(const library_scope *scope, const char *search, int offset, int limit, char *err, int en) {
-    char path[1024], filter[256] = "";
+    char path[3072], filter[2048] = "";
     int o = 0;
     /* Platform 0: every platform (a search across the library, or a
      * collection's games). Games whose files RomM's last scan didn't find are
