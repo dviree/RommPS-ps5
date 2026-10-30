@@ -28,9 +28,10 @@ int n64_mupen_name(const char *dir, const char *ini, const char *rom, const char
  * there was nothing to do, -1 on an error. */
 int n64_fold(const char *dir, const char *name, const char *shadow);
 
-/* The shadow newer than the files: what the game uses in it written to them,
- * dated as the shadow. 1 when files were written, 0 when there was nothing
- * to do, -1 on an error. */
-int n64_unfold(const char *dir, const char *name, const char *shadow);
+/* The shadow newer than the files (or, force, whatever the dates: RomM's
+ * save just put there): what the game uses in it written to them, dated as
+ * the shadow. 1 when files were written, 0 when there was nothing to do, -1
+ * on an error. */
+int n64_unfold(const char *dir, const char *name, const char *shadow, int force);
 
 #endif

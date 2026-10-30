@@ -204,9 +204,9 @@ static int put(const char *dir, const char *name, const char *ext, const uint8_t
     return 0;
 }
 
-int n64_unfold(const char *dir, const char *name, const char *shadow) {
+int n64_unfold(const char *dir, const char *name, const char *shadow, int force) {
     const time_t had = file_mtime(shadow);
-    if (!had || files_mtime(dir, name) >= had) return 0;
+    if (!had || (!force && files_mtime(dir, name) >= had)) return 0;
     size_t len = 0;
     char *blob = read_file(shadow, &len);
     n64_save *s = calloc(1, sizeof *s);

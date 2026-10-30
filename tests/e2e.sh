@@ -170,6 +170,18 @@ for _ in $(seq 1 20); do [[ "$(onc 14)$(onc 30)" == TrueTrue ]] && break; sleep 
 qd=$(post /api/download '{"collection_kind":"virtual","collection_id":"genre-Action"}' | python3 -c "import json,sys; j=json.load(sys.stdin); print(j['queued'], j['skipped'])")
 [[ "$qd" == "0 3" ]] || fail "a collection installed again queues nothing: $qd"
 post /api/delete '{"rom_id":14}' >/dev/null && post /api/delete '{"rom_id":30}' >/dev/null || fail "couldn't remove the collection's games"
+# RomM's ids for virtual collections are base64 of their name and type: long, with +, / and = in them. One holds
+# a version RomM's grouping fronts with another (Square USA: Final Fantasy IX's discs, not its .m3u).
+VID=$(python3 -c "import base64,json; print(base64.b64encode(json.dumps({'name': 'Disc Sets ~~~ Square USA >>>? xxxxxxxxxxxxxxx', 'type': 'company'}).encode()).decode())")
+curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/_admin/rom" -d '{"id":964,"platform_id":1,"name":"Disc Two","fs_name":"Disc Two (USA).sfc","grouped_away":true}' >/dev/null
+curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/_admin/virtual" -d "{\"id\":\"$VID\",\"name\":\"Disc Sets\",\"type\":\"company\",\"rom_ids\":[964,10]}" >/dev/null
+listed=$(curl -sf "$API/api/collections?kind=virtual" | python3 -c "import json,sys; print([c['id'] for c in json.load(sys.stdin) if c['name'] == 'Disc Sets'])")
+[[ "$listed" == "['$VID']" ]] || fail "a virtual collection's id must reach the app whole (${#VID} characters): $listed"
+vg=$(curl -sf "$API/api/roms?platform_id=0&collection_kind=virtual&collection_id=$(python3 -c "import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=''))" "$VID")" \
+     | python3 -c "import json,sys; j=json.load(sys.stdin); print(j.get('error') or (j['total'], sorted(g['name'] for g in j['items'])))")
+[[ "$vg" == "(2, ['Chrono Trigger', 'Disc Two'])" ]] || fail "a long-id collection's games, the grouped-away version too: $vg"
+pg=$(curl -sf "$API/api/roms?platform_id=1&search=disc" | python3 -c "import json,sys; print(json.load(sys.stdin)['total'])")
+[[ "$pg" == 0 ]] || fail "a platform's list still groups a game's versions: $pg"
 curl -s -o /dev/null -w "%{http_code}" -X POST "$API/api/download" -d '{"collection_kind":"virtual","collection_id":""}' | grep -qx 400 || fail "a collection install with no id must be refused"
 curl -s -o /dev/null -w "%{http_code}" -X POST "$API/api/download" -d '{"collection_kind":"regular","collection_id":"x"}' | grep -qx 400 || fail "a collection install with a bad id must be refused"
 colls=$(curl -sf "$API/api/collections?kind=smart" | python3 -c "import json,sys; print([(c['name'], c['description']) for c in json.load(sys.stdin)])")
@@ -2127,5 +2139,52 @@ publish_presets 2099.01.01.1; check_presets
 publish_presets 2099.01.01.2 tamper; check_presets
 [[ "$(presets version)" == 2099.01.01.1 && "$(presets error)" == *signature* ]] \
   || fail "tampered presets must be refused, the last good ones kept: $(curl -sf "$API/api/presets")"
+
+echo "32. A conflict settled with RomM's save stays settled, though Mupen64Plus wrote its save as the game started"
+B6="$T/bootn64"; M7="$T/bootm64"; mkdir -p "$B6/games" "$B6/saves" "$M7/saves" "$M7/data"
+m64b=$(python3 - "$B6/games/Boot Kart (U).z64" "$M7/data/mupen64plus.ini" <<'PY'
+import hashlib, sys
+z = bytearray(b"\xff" * 0x1000)
+z[0:4] = b"\x80\x37\x12\x40"; z[0x20:0x34] = b"BOOT KART".ljust(20)
+open(sys.argv[1], "wb").write(z)
+md5 = hashlib.md5(bytes(z)).hexdigest().upper()
+open(sys.argv[2], "w").write("[%s]\nGoodName=Boot Kart (U)\n" % md5)
+print("Boot Kart (U)-%.8s" % md5)
+PY
+)
+curl -skf -X POST "$SV/_admin/rom" -d '{"id":966,"platform_id":6,"name":"Boot Kart","fs_name":"Boot Kart (U).z64"}' >/dev/null
+srm_with() { python3 -c "import base64,sys; b=bytearray(b'\xff'*0x48800); b[0:4]=sys.argv[1].encode(); print(base64.b64encode(bytes(b)).decode())" "$1"; }
+romm_save() { printf '{"rom_id":966,"slot":"autosave","file_name":"Boot Kart (U).srm","content_b64":"%s"}' "$(srm_with "$1")" > "$T/boot.json"
+              curl -skf -X POST "$SV/_admin/save" -d @"$T/boot.json" >/dev/null; }
+python3 - "$API" "$B6" "$M7" <<'PY' >/dev/null
+import json, sys, urllib.request
+api, b6, m7 = sys.argv[1:4]
+cfg = json.load(urllib.request.urlopen(api + "/api/config"))
+profiles = [dict(p, enabled=False) if any("n64" in e.get("romm", []) for e in p.get("platforms", [])) else p
+            for p in cfg["profiles"] if p.get("id") not in ("bootn64", "bootm64")]
+plat = [{"romm": ["n64"], "dir": "n64", "save_format": "n64-srm"}]
+profiles += [{"id": "bootn64", "name": "Boot-N64", "enabled": True, "root": b6, "rom_dir": "{root}/games",
+              "save_dir": "{root}/saves", "save_exts": ".srm", "sync_saves": True, "platforms": plat},
+             {"id": "bootm64", "name": "Boot-M64", "enabled": True, "root": m7, "rom_dir": b6 + "/games", "sync_saves": True,
+              "save_dir": "{data}/n64/bootm64", "save_exts": ".srm", "n64_split_dir": "{root}/saves",
+              "n64_ini": "{root}/data/mupen64plus.ini", "extra": ["n64"], "platforms": plat}]
+req = urllib.request.Request(api + "/api/config", json.dumps({"profiles": profiles}).encode(), {"Content-Type": "application/json"})
+urllib.request.urlopen(req)
+PY
+romm_save S1AA
+syncnow
+eep() { head -c 4 "$M7/saves/$m64b.eep" 2>/dev/null; }
+[[ "$(head -c 4 "$B6/saves/Boot Kart (U).srm")$(eep)" == S1AAS1AA ]] || fail "RomM's save must reach both N64 emulators: $(head -c 4 "$B6/saves/Boot Kart (U).srm") $(eep)"
+# Another device saves; then the game, started in Mupen64Plus, writes its old save again as it boots.
+sleep 1.1; romm_save S2BB
+sleep 1.1; python3 -c "import sys; open(sys.argv[1], 'wb').write(b'JUNK' + b'\xff' * 0x7fc)" "$M7/saves/$m64b.eep"
+syncnow
+cpath=$(python3 -c "import json,sys; print(next(iter(json.load(open(sys.argv[1])).get('conflicts', {})), ''))" "$T/data/state.json")
+[[ -n "$cpath" ]] || fail "a save changed here and on RomM must be a conflict"
+post /api/conflicts/resolve "{\"path\":\"$cpath\",\"keep\":\"server\"}" >/dev/null || fail "resolve failed"
+[[ "$(head -c 4 "$B6/saves/Boot Kart (U).srm")$(eep)" == S2BBS2BB ]] || fail "RomM's save, kept, must reach every N64 emulator at once: $(head -c 4 "$B6/saves/Boot Kart (U).srm") $(eep)"
+syncnow
+[[ "$(last conflicts)" == 0 && "$(last uploaded)" == 0 ]] || fail "the conflict came back: $(last conflicts) conflicts, $(last uploaded) up"
+[[ "$(head -c 4 "$B6/saves/Boot Kart (U).srm")$(eep)" == S2BBS2BB ]] || fail "RomM's save must stay: $(head -c 4 "$B6/saves/Boot Kart (U).srm") $(eep)"
 
 echo "PASS"

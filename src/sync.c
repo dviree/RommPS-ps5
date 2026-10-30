@@ -91,6 +91,25 @@ typedef struct {
 } scan_ctx;
 
 static pthread_mutex_t g_run_lock = PTHREAD_MUTEX_INITIALIZER; /* one sync at a time */
+
+/* Saves this pass put in place from RomM, or kept in a conflict: the ones
+ * sharing gives the others, whatever the dates say. A game that writes its
+ * save as it starts leaves an older copy with a newer date (PS5N64's, beside
+ * the RomM save just chosen for RetroArch). Under g_run_lock. */
+static char g_fresh[16][PATH_MAX_LEN];
+static int g_nfresh;
+
+static void mark_fresh(const char *path) {
+    for (int i = 0; i < g_nfresh; i++)
+        if (!strcmp(g_fresh[i], path)) return;
+    if (g_nfresh < (int)(sizeof g_fresh / sizeof *g_fresh)) str_copy(g_fresh[g_nfresh++], sizeof g_fresh[0], path);
+}
+
+static int is_fresh(const char *path) {
+    for (int i = 0; i < g_nfresh; i++)
+        if (!strcmp(g_fresh[i], path)) return 1;
+    return 0;
+}
 static pthread_mutex_t g_req_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_req_cond = PTHREAD_COND_INITIALIZER;
 static char g_req_reason[64];
@@ -1004,6 +1023,7 @@ static void scan_saves(scan_ctx *c) {
 
 static int scan_prepare(scan_ctx *c) {
     memset(c, 0, sizeof *c);
+    g_nfresh = 0;
     config_lock();
     c->nmaps = profiles_expand(g_cfg.profiles, &c->maps);
     str_copy(c->slot, sizeof c->slot, g_cfg.slot);
@@ -2343,6 +2363,7 @@ static int do_download(const scan_ctx *c, int save_id, const char *dest, const l
     }
     time_t t = iso8601_parse(server_updated_at);
     if (t > 0) set_file_mtime(dest, t);
+    mark_fresh(dest);
 
     local_file rec;
     memset(&rec, 0, sizeof rec);
@@ -3214,7 +3235,7 @@ static int share_saves(scan_ctx *c) {
         if (!first) continue;
         char paths[8][PATH_MAX_LEN];
         const local_rom *whose[8];
-        int n = 0, newest = -1, newest_blank = 0;
+        int n = 0, newest = -1, newest_blank = 0, newest_fresh = 0;
         time_t newest_t = 0;
         for (int k = i; k < c->nroms && n < 8; k++) {
             const local_rom *r = &c->roms[k];
@@ -3223,10 +3244,12 @@ static int share_saves(scan_ctx *c) {
                 continue;
             download_target(r, "", c->slot, c, paths[n], sizeof paths[n]);
             time_t t = file_mtime(paths[n]);
-            /* A blank card (an emulator made a fresh one) never beats one with saves. */
-            const int blank = psx_card_saves(r->map, paths[n]) == 0;
-            if (t > 0 && (newest < 0 || (newest_blank && !blank) || (blank == newest_blank && t > newest_t)))
-                newest_t = t, newest = n, newest_blank = blank;
+            /* A blank card (an emulator made a fresh one) never beats one with
+             * saves; then the save RomM just gave beats the others. */
+            const int blank = psx_card_saves(r->map, paths[n]) == 0, fresh = is_fresh(paths[n]);
+            if (t > 0 && (newest < 0 || (newest_blank && !blank) ||
+                          (blank == newest_blank && (fresh != newest_fresh ? fresh : t > newest_t))))
+                newest_t = t, newest = n, newest_blank = blank, newest_fresh = fresh;
             whose[n] = r;
             n++;
         }
@@ -3247,6 +3270,7 @@ static int share_saves(scan_ctx *c) {
             mkdir_parent(paths[k]);
             if (move_file(tmp, paths[k]) == 0) {
                 set_file_mtime(paths[k], newest_t);
+                if (newest_fresh) mark_fresh(paths[k]); /* RomM's, there too */
                 LOGI("shared save: %s -> %s", paths[newest], paths[k]);
                 note_shared(whose[k]->map, 0);
                 drop_resume(c, whose[k]);
@@ -3373,9 +3397,9 @@ static void n64_split_pass(const scan_ctx *c) {
             continue;
         }
         download_target(r, "", c->slot, c, shadow, sizeof shadow);
-        if (emulator_closed(m) && n64_unfold(m->n64_split_dir, name, shadow) > 0)
+        if (emulator_closed(m) && n64_unfold(m->n64_split_dir, name, shadow, is_fresh(shadow)) > 0)
             LOGI("%s's save is in %s's files now (%s)", path_basename(file), emu_name(m), name);
-        if (n64_fold(m->n64_split_dir, name, shadow) > 0) LOGD("%s: %s's files joined into %s", name, emu_name(m), shadow);
+        if (!is_fresh(shadow) && n64_fold(m->n64_split_dir, name, shadow) > 0) LOGD("%s: %s's files joined into %s", name, emu_name(m), shadow);
     }
 }
 
@@ -4004,6 +4028,13 @@ int sync_resolve_conflict(const char *path, const char *keep, char *err, int en)
         state_entry_remove("conflicts", path);
         state_save();
         state_unlock();
+        /* The save kept reaches the other emulators of the game now, before
+         * an older copy of theirs comes back as a new conflict. */
+        if (!f->is_bundle) {
+            mark_fresh(path);
+            share_saves(&c);
+            n64_split_pass(&c);
+        }
         events_set_sync("conflict resolved");
         events_add("save", "resolved", f->rom_id, path, emu_name(f->map), local ? "Kept this console's" : "Kept RomM's");
         events_save();

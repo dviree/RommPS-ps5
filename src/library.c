@@ -1522,7 +1522,7 @@ static int collections_of(collection_kind kind, const char *me, cJSON ***all, in
         const cJSON *id = cJSON_GetObjectItemCaseSensitive(c, "id");
         int count = (int)jget_num(c, "rom_count", 0);
         if (count <= 0) continue;
-        char id_text[64];
+        char id_text[512]; /* a virtual one's: base64 of its name and type */
         if (cJSON_IsString(id)) str_copy(id_text, sizeof id_text, id->valuestring);
         else if (cJSON_IsNumber(id)) snprintf(id_text, sizeof id_text, "%d", id->valueint);
         else continue;
@@ -2438,7 +2438,7 @@ unsigned library_installed_sig(void) {
 #define PAGE_CACHE_SLOTS 32
 #define PAGE_CACHE_SEC   300
 static struct {
-    char key[1100]; /* the request path (up to 1024) and its offset and limit */
+    char key[3200]; /* the request path (up to 3072) and its offset and limit */
     double at;
     cJSON *page;
 } g_pages[PAGE_CACHE_SLOTS];
@@ -2714,7 +2714,7 @@ static int group_versions(int platform_id) {
 }
 
 cJSON *library_roms(const library_scope *scope, const char *search, int offset, int limit, char *err, int en) {
-    char path[1024], filter[256] = "";
+    char path[3072], filter[2048] = "";
     int o = 0;
     /* Platform 0: every platform (a search across the library, or a
      * collection's games). Games whose files RomM's last scan didn't find are
@@ -2729,7 +2729,11 @@ cJSON *library_roms(const library_scope *scope, const char *search, int offset, 
         o += snprintf(filter + o, sizeof filter - (size_t)o, "&%s=%s", g_collection_kinds[scope->collection].rom_param, id);
         free(id);
     }
-    if (group_versions(scope->platform_id)) snprintf(filter + o, sizeof filter - (size_t)o, "&group_by_meta_id=true");
+    /* Not in a collection: RomM fronts a game's group with one version, and a
+     * collection holding others (Square USA: Final Fantasy IX's discs, not
+     * its .m3u) would lose the game. A collection lists what's in it. */
+    if (group_versions(scope->platform_id) && scope->collection == COLLECTION_NONE)
+        snprintf(filter + o, sizeof filter - (size_t)o, "&group_by_meta_id=true");
     char *q = http_escape(search ? search : "");
     snprintf(path, sizeof path, "/api/roms?search_term=%s%s&order_by=name&order_dir=asc&missing=false" ROMS_LEAN, q, filter);
     free(q);
