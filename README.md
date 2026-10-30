@@ -105,12 +105,19 @@ Note: RommPS relies on your emulator **NOT** being sandboxed. Some emulators req
 | PSSwanStation | PS1 | Full Support | One memory card per game, and states | Its states only load in PSSwanStation |
 | [PS5SX2](https://github.com/Swordpdf/PS5SX2) | PS2 | Full Support | One memory card per game (the default), or its two shared cards backed up to RomM (5.3 or newer) | No save states yet |
 | [Crux2](https://github.com/Press5elect/Crux2) | PS2 | Full Support | One memory card per game, the one Crux2 picks (games that share saves share a card), or its two shared cards; states | Uses `/data/crux2` when that folder exists. Its states only load in Crux2 |
+| PSP5 | PSP | Full Support | Saves | - |
 | [PS5N64](https://github.com/Globaleliteee/PS5N64) | N64 | Full Support | Full Support | - |
+| [Mupen64Plus PS5](https://github.com/TheRealRetro/mupen64plus-ps5) | N64 | Full Support | Saves and states | - |
 | [PS5NES](https://github.com/Globaleliteee/PS5NES) | NES | Untested | Untested | Preset uses `/data/PS5NES/games` and `/data/PS5NES/saves`. GH page gone |
+| [Snes9x PS5](https://github.com/MisterTemaki/snes9xPS5) | SNES | Full Support | Saves and states | - |
+| [Genesis Plus GX PS5](https://github.com/MisterTemaki/genplusgxPS5) | Genesis/Mega Drive, Master System, Sega CD | Full Support | Saves and states | Sega CD saves don't sync yet |
+| [Beetle PCE PS5](https://github.com/MisterTemaki/beetlepcePS5) | PC Engine, PC Engine CD, SuperGrafx | Full Support | Saves and states | - |
+| [GBCXY](https://github.com/Yahballon/PS5GBCX) | Game Boy, Game Boy Color | Full Support | Saves and states | - |
+| [FBNeo PS5](https://github.com/MisterTemaki/FBNeo-PS5) | Arcade | Full Support | Saves and states | - |
 | PSFlyCast | Dreamcast | Full Support | Each game's own VMU; the shared VMUs are backed up as RomM memory cards | Save states don't sync yet |
 | PS64 | Commodore 64 | Full Support | Save disks | Games save into their own disk images. No save states |
 | PS5-ECAM | Wii U, 3DS, DS, Switch | Full Support | Wii U, 3DS, DS and Switch saves, 3DS and DS states | 3DS and DS states only load in PS5-ECAM. Switch saves are one player's, the same save as ProsperoEden's on RomM |
-| [Porpoise](https://github.com/elripalda/Porpoise-Dolphin-Emulator-for-PS5) | Wii/GameCube | Full Support | N/A | Couldn't exit sandbox w/o crash. [Issue](https://github.com/elripalda/Porpoise-Dolphin-Emulator-for-PS5/issues/18) reported. Downloading games should work if the emulator is actually working for you.|
+| [Porpoise](https://github.com/elripalda/Porpoise-Dolphin-Emulator-for-PS5) | Wii/GameCube | Full Support | GameCube and Wii saves, and states | - |
 | XPSemu | Xbox | Full Support | Saves | Read from and written into its hard disk image, only while it's closed |
 | [PS5X360](https://github.com/BrinooTk/PS5X360) | Xbox 360 | Full Support | Saves | The first signed-in player's saves; games go in `/data/xbox360`, a folder each |
 | Seedee5 | Philips CD-i | Full Support | Saves and states | Each game's NVRAM is its save |
