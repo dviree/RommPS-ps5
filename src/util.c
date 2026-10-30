@@ -396,13 +396,20 @@ int ext_in_list(const char *file_name, const char *list) {
     if (!list) return 0;
     if (!strcmp(list, "*")) return 1; /* any file */
     const char *ext = path_ext(file_name);
-    if (!*ext) return 0;
     char buf[512];
     str_copy(buf, sizeof buf, list);
     char *save = NULL;
     for (char *tok = strtok_r(buf, ", ", &save); tok; tok = strtok_r(NULL, ", ", &save)) {
         size_t lt = strlen(tok);
-        if (lt && tok[lt - 1] == '*') {
+        if (tok[0] != '.' && tok[0] != '*') { /* a whole name: Seedee5's NVRAM is "mk48t08" */
+            if (strcasecmp(path_basename(file_name), tok) == 0) return 1;
+        } else if (tok[0] == '.' && strchr(tok + 1, '.')) { /* the name's end: PCSX2's ".01.p2s" */
+            const char *base = path_basename(file_name);
+            size_t lb = strlen(base);
+            if (lb > lt && strcasecmp(base + lb - lt, tok) == 0) return 1;
+        } else if (!*ext) {
+            continue;
+        } else if (lt && tok[lt - 1] == '*') {
             if (strncasecmp(ext, tok, lt - 1) == 0) return 1;
         } else if (strcasecmp(ext, tok) == 0) {
             return 1;

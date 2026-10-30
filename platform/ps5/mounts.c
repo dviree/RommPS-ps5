@@ -7,7 +7,12 @@
  * there, so ours go on the sandbox's view: "app0/games" is the app's
  * /app0/games. An app that leaves its sandbox to read its files (PSXS5
  * "unlocks storage") reads the real folder: it gets the mount there
- * ("/data/PSXS5/games"), for as long as it runs. They go on as soon as the
+ * ("/data/PSXS5/games"), for as long as it runs, and the same mount on the
+ * sandbox's view of that folder: one that tries to leave and can't (PS5SX2
+ * while its helper payload isn't running) reads /data through the HEN's
+ * mount of it in the sandbox, which doesn't show a mount on the real folder.
+ * That one waits for the HEN's /data to be on the sandbox: under it, ours
+ * would be buried and couldn't come off at the exit. They go on as soon as the
  * sandbox and the app's process appear, before its first look at its
  * folders, and come off the moment one of its processes exits: the system
  * takes app0 down 40-240 ms after the exit, and a mount of ours still on it
@@ -66,6 +71,7 @@ typedef struct {
     int np;
     held_t held[MAX_HELD];
     int nh;
+    int data_waiting; /* mounts for the sandbox's /data, waiting for the HEN's /data */
 } launch_t;
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -287,13 +293,48 @@ static launch_t *run_of_sandbox(const char *sandbox) {
     return NULL;
 }
 
-/* A nullfs mount below the sandbox's app0: only we put those there (the
- * HEN's /data and fonts go on the sandbox itself, the system's app0 isn't
- * below itself). */
+/* A nullfs mount below the sandbox's app0 or /data: only we put those there
+ * (the HEN's /data and fonts go on the sandbox itself, the system's app0
+ * isn't below itself). */
 static int ours_left(const struct statfs *m, const char *sandbox) {
-    char app0[300];
+    char app0[300], data[300];
     snprintf(app0, sizeof app0, "%s/app0/", sandbox);
-    return !strncmp(m->f_mntonname, app0, strlen(app0)) && !strcmp(m->f_fstypename, "nullfs");
+    snprintf(data, sizeof data, "%s/data/", sandbox);
+    return (!strncmp(m->f_mntonname, app0, strlen(app0)) || !strncmp(m->f_mntonname, data, strlen(data))) &&
+           !strcmp(m->f_fstypename, "nullfs");
+}
+
+/* A real folder's mounts on the sandbox's view of it too ("/data/PCSX2/games"
+ * on <sandbox>/data/PCSX2/games), once the HEN's /data is on the sandbox. */
+static void mount_data_views(launch_t *r, const struct statfs *mnt, int nmnt) {
+    char data[300];
+    snprintf(data, sizeof data, "%s/data", r->sandbox);
+    int ready = 0;
+    for (int k = 0; k < nmnt && !ready; k++) ready = !strcmp(mnt[k].f_mntonname, data);
+    r->data_waiting = 0;
+    pthread_mutex_lock(&g_lock);
+    for (int k = 0; k < g_nwant && r->nh < MAX_HELD; k++) {
+        const plat_mount *m = &g_want[k];
+        if (strcmp(m->title, r->title) != 0 || strncmp(m->into, "/data/", 6) != 0) continue;
+        if (!ready) {
+            r->data_waiting = 1;
+            continue;
+        }
+        char target[1300];
+        snprintf(target, sizeof target, "%s%s", r->sandbox, m->into);
+        int have = 0;
+        for (int h = 0; h < r->nh; h++) have |= !strcmp(r->held[h].target, target);
+        if (have) continue;
+        held_t *h = &r->held[r->nh++];
+        memset(h, 0, sizeof *h);
+        snprintf(h->target, sizeof h->target, "%s", target);
+        snprintf(h->from, sizeof h->from, "%s", m->from);
+        snprintf(h->name, sizeof h->name, "%s", m->name);
+        h->owner = (uid_t)-1;
+        if (put_on(h) == 0) LOGI("mounts: %s gets its sandbox's view too", r->title);
+        else r->nh--; /* the real folder's may still be the one it reads */
+    }
+    pthread_mutex_unlock(&g_lock);
 }
 
 /* A new sandbox of an app with mounts, with its process running. */
@@ -362,12 +403,13 @@ static void start_run(const char *title, const char *sandbox, const pid_t *pids,
             /* The app runs without the games: say so, as RommPS. */
             events_add("emulator", "failed", 0, h->target, m->name, "Its games couldn't be shown to it this time");
             events_save();
-            plat_notify("RommPS: %s can't see its games this time. Close it and open it again.", m->name);
+            plat_notify("RommPS: %s can't see its games this time\nClose it and open it again", m->name);
         }
     }
     pthread_mutex_unlock(&g_lock);
     LOGI("mounts: %s started (%s, %d process%s): %d on in %.1f ms%s", title, sandbox, np, np == 1 ? "" : "es", on,
          now_ms() - t, failed ? ", some failed" : "");
+    mount_data_views(r, mnt, nmnt);
     watch_pids(r);
 }
 
@@ -406,12 +448,33 @@ static void scan_sandboxes(void) {
         snprintf(app0, sizeof app0, "%s/app0", r->sandbox);
         int there = 0;
         for (int k = 0; k < nmnt && !there; k++) there = !strcmp(mnt[k].f_mntonname, app0);
+        if (there && !r->over && r->data_waiting) mount_data_views(r, mnt, nmnt);
         if (!there) {
             if (!r->over) { /* the exit went unseen: shouldn't happen, but don't leave ours behind */
                 LOGW("mounts: %s's sandbox went before its exit was seen", r->title);
                 take_off_all(r);
             }
             r->used = 0;
+        } else if (r->over) {
+            /* The app carries on in a new process in the same sandbox
+             * (RetroArch starts itself again to load a core): its mounts go
+             * back on, and come off at that one's exit as at any other. */
+            pid_t pids[MAX_PIDS];
+            const int np = find_pids(r->title, pids, MAX_PIDS);
+            int fresh = 0;
+            for (int k = 0; k < np && !fresh; k++) {
+                int old = 0;
+                for (int j = 0; j < r->np; j++) old |= pids[k] == r->pids[j];
+                fresh = !old;
+            }
+            if (fresh) {
+                char title[16], sandbox[256];
+                snprintf(title, sizeof title, "%s", r->title);
+                snprintf(sandbox, sizeof sandbox, "%s", r->sandbox);
+                LOGI("mounts: %s goes on in a new process", title);
+                r->used = 0;
+                start_run(title, sandbox, pids, np, mnt, nmnt);
+            }
         }
     }
     for (int k = 0; k < nmnt; k++) {

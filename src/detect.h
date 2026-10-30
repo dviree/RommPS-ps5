@@ -10,6 +10,10 @@ cJSON *detect_emulators(void);
 /* Rebuilds profiles an older version of setup generated, so they pick up new
  * features. Profiles written by hand are left alone. Returns how many changed. */
 int detect_refresh_profiles(cJSON *profiles);
+/* The RetroArch core rule's keys (platform/retroarch_cores.json) for a
+ * platform entry: all, or (missing_only) the missing ones and those the rule
+ * alone decides. How many changed. */
+int detect_apply_core_rules(cJSON *e, const char *system, const char *corename, int missing_only);
 
 /* The built-in emulator catalog entry with this id (emulators.json), or NULL.
  * Parsed once; don't free. */

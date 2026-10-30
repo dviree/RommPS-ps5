@@ -7,7 +7,10 @@
 #include "platform.h"
 #include "emulators_json.h" /* generated from platform/ps5/emulators.json */
 
+#include <dlfcn.h>
 #include <pthread.h>
+#include <stdbool.h>
+#include <time.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -19,6 +22,7 @@
 
 #include <ps5/kernel.h>
 
+#include "cJSON.h"
 #include "console.h"
 #include "ps5.h"
 #include "util.h" /* APP_VERSION */
@@ -144,6 +148,117 @@ static int appid_cb(pid_t pid, const char *tdname, void *vctx) {
     (void)tdname;
     if (ps5_proc_app(pid, c->title_id, &app_id) || (int)app_id != c->app_id) return 0;
     return 1;
+}
+
+/* ---- Toasts in the PS5's own style ----
+ * sceNotificationSend takes the toast as JSON (the SDK's samples/notify): an
+ * icon, a line in bold and one under it. Apps can't load its library (PS5SX2
+ * found it refused on 11.40 and 12.00), but a payload from the ELF loader runs
+ * in a system process, where it loads. Loaded when first needed, so a console
+ * without it still gets the plain notification. */
+#define TOAST_USER_SYSTEM 0xFE
+/* A notice of one line has a template of its own: the two-line one keeps room
+ * for the small line above it, which leaves a lone line sitting low. */
+#define TOAST_ONE_LINE_TEMPLATE "InteractiveToastTemplateA"
+#define TOAST_ICON "/user/appmeta/" ROMMPS_ID "/icon0.png"
+typedef int (*notification_send_fn)(int user_id, bool logged, const char *json);
+static notification_send_fn g_toast_send;
+static pthread_once_t g_toast_once = PTHREAD_ONCE_INIT;
+
+static void toast_load(void) {
+    void *lib = dlopen("libSceNotification.sprx", RTLD_LAZY);
+    g_toast_send = lib ? (notification_send_fn)dlsym(lib, "sceNotificationSend") : NULL;
+    if (!g_toast_send) LOGW("notifications: libSceNotification isn't there (%s), the plain ones it is", lib ? "no sceNotificationSend" : "dlopen failed");
+}
+
+/* RommPS's icon, from the app's home screen copy: the shell reads that one. */
+static const char *toast_icon(void) {
+    struct stat st;
+    return stat(TOAST_ICON, &st) == 0 ? TOAST_ICON : NULL;
+}
+
+int console_toast(const char *message) {
+    pthread_once(&g_toast_once, toast_load);
+    if (!g_toast_send) return -1;
+    /* "RommPS: couldn't sync\nCheck your connection": the first line is the
+     * point, in bold, without the name the icon already gives; the second is
+     * the context, which the toast draws small above it. */
+    char text[1024], *sub;
+    const char *start = strncmp(message, "RommPS: ", 8) ? message : message + 8;
+    str_copy(text, sizeof text, start);
+    if ((sub = strchr(text, '\n'))) *sub++ = 0;
+    if (text[0] >= 'a' && text[0] <= 'z') text[0] -= 32;
+    static unsigned serial;
+    char created[32], id[24];
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    struct tm tm;
+    gmtime_r(&ts.tv_sec, &tm);
+    snprintf(created, sizeof created, "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+             tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec / 1000000);
+    snprintf(id, sizeof id, "%u", (unsigned)(ts.tv_sec % 100000000) * 10 + (serial++ % 10));
+
+    cJSON *root = cJSON_CreateObject(), *raw = cJSON_AddObjectToObject(root, "rawData");
+    cJSON_AddStringToObject(raw, "viewTemplateType", sub && *sub ? "InteractiveToastTemplateB" : TOAST_ONE_LINE_TEMPLATE);
+    cJSON_AddStringToObject(raw, "channelType", "Downloads");
+    cJSON_AddStringToObject(raw, "useCaseId", "IDC");
+    cJSON_AddStringToObject(raw, "toastOverwriteType", "No");
+    cJSON_AddBoolToObject(raw, "isImmediate", 1);
+    cJSON_AddNumberToObject(raw, "priority", 100);
+    cJSON *view = cJSON_AddObjectToObject(raw, "viewData");
+    const char *icon = toast_icon();
+    cJSON *i = cJSON_AddObjectToObject(view, "icon");
+    if (icon) {
+        cJSON_AddStringToObject(i, "type", "Url");
+        cJSON_AddStringToObject(cJSON_AddObjectToObject(i, "parameters"), "url", icon);
+    } else {
+        cJSON_AddStringToObject(i, "type", "Predefined");
+        cJSON_AddStringToObject(cJSON_AddObjectToObject(i, "parameters"), "icon", "download");
+    }
+    cJSON_AddStringToObject(cJSON_AddObjectToObject(view, "message"), "body", text);
+    if (sub && *sub) cJSON_AddStringToObject(cJSON_AddObjectToObject(view, "subMessage"), "body", sub);
+    /* RommPS installed (its icon is there): a button that opens it, unless
+     * it's the app open now. */
+    char running[16] = "";
+    if (icon && !(plat_running_title(running, sizeof running) == 1 && !strcmp(running, ROMMPS_ID))) {
+        cJSON *open = cJSON_CreateObject();
+        cJSON_AddStringToObject(open, "actionName", "Open RommPS");
+        cJSON_AddStringToObject(open, "actionType", "DeepLink");
+        cJSON_AddBoolToObject(open, "defaultFocus", 1);
+        cJSON_AddStringToObject(cJSON_AddObjectToObject(open, "parameters"), "actionUrl", "psgm:play?id=" ROMMPS_ID);
+        cJSON_AddItemToArray(cJSON_AddArrayToObject(view, "actions"), open);
+    }
+    /* The view the shell uses when notification previews are off (the SDK's notify sample sends one). */
+    cJSON *plain = cJSON_AddObjectToObject(cJSON_AddObjectToObject(cJSON_AddObjectToObject(raw, "platformViews"), "previewDisabled"), "viewData");
+    cJSON *plain_icon = cJSON_AddObjectToObject(plain, "icon");
+    cJSON_AddStringToObject(plain_icon, "type", "Predefined");
+    cJSON_AddStringToObject(cJSON_AddObjectToObject(plain_icon, "parameters"), "icon", "download");
+    cJSON_AddStringToObject(cJSON_AddObjectToObject(plain, "message"), "body", text);
+    cJSON_AddStringToObject(root, "createdDateTime", created);
+    cJSON_AddStringToObject(root, "localNotificationId", id);
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    const int rc = json ? g_toast_send(TOAST_USER_SYSTEM, true, json) : -1;
+    free(json);
+    if (rc < 0) LOGW("notifications: sceNotificationSend said 0x%08x", (unsigned)rc);
+    return rc < 0 ? -1 : 0;
+}
+
+struct alive_ctx { const char *title; int found; };
+
+static int alive_cb(pid_t pid, const char *tdname, void *vctx) {
+    struct alive_ctx *c = vctx;
+    char title[16];
+    (void)tdname;
+    if (!ps5_proc_app(pid, title, NULL) && !strncmp(title, c->title, 9)) c->found = 1;
+    return c->found;
+}
+
+int plat_app_alive(const char *title_id) {
+    struct alive_ctx c = {title_id, 0};
+    if (!title_id || strlen(title_id) != 9) return -1;
+    if (console_for_each_proc(alive_cb, &c) < 0) return -1;
+    return c.found;
 }
 
 int plat_running_title(char *title_id, size_t n) {

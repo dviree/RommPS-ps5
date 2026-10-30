@@ -86,7 +86,7 @@ for d in "$ETA" "$ONION"; do expect "$d" "$(ver "$d/romm-sync.elf")/$(on "$d")" 
 
 echo "9. on the PS5 the payload doesn't update itself: RommPS brings the new one"
 stop; SELF_UPDATE=0 start
-r=$(curl -s -X POST "$API/api/update/install"); [[ "$r" == *"update RommPS from ProsperoStore"* ]] || fail "install with self-update off: $r"
+r=$(curl -s -X POST "$API/api/update/install"); [[ "$r" == *"update RommPS from your homebrew store"* ]] || fail "install with self-update off: $r"
 r=$(curl -sf "$API/api/update"); [[ "$r" == *'"self_update":false'* ]] || fail "update status: $r"
 
 echo "10. a page on another website can't change anything; our own page and apps can"
@@ -107,6 +107,6 @@ stop; : > "$T/daemon.log"; SELF_UPDATE=0 APP_INSTALLED=1 start; sleep 1
 stop; : > "$T/daemon.log"; SELF_UPDATE=0 APP_INSTALLED=1 APP_VERSION=1.1.0 start; sleep 1
 grep -q "NOTIFY.*RommPS 1.1.0 is out of date" "$T/daemon.log" || fail "no hint to update an older RommPS: $(grep NOTIFY "$T/daemon.log")"
 stop; : > "$T/daemon.log"; SELF_UPDATE=0 start; sleep 1
-grep -q "NOTIFY.*Install the RommPS app from ProsperoStore" "$T/daemon.log" || fail "no hint to install RommPS: $(grep NOTIFY "$T/daemon.log")"
+grep -q "^Install the RommPS app from your homebrew store" "$T/daemon.log" || fail "no hint to install RommPS: $(grep -A1 NOTIFY "$T/daemon.log")"
 
 echo PASS

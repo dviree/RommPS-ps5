@@ -72,6 +72,29 @@ DB = {
         60: {"id": 60, "platform_id": 6, "name": "Test Racer", "fs_name": "Test Racer (U).z64"},
         61: {"id": 61, "platform_id": 6, "name": "Other Racer", "fs_name": "Other Racer (U).z64"},
     },
+    # The user's collections: one across platforms, one empty (hidden by
+    # RommPS); and another user's public one, which RomM lists too.
+    "collections": [
+        {"id": 7, "name": "Favourites", "description": "The best ones", "rom_ids": [11, 20, 12],
+         "user_id": 1, "owner_username": "tester", "is_public": False,
+         "path_cover_small": "", "path_covers_small": ["/assets/romm/resources/roms/1/11/cover/small.png"]},
+        {"id": 8, "name": "Empty", "description": None, "rom_ids": [],
+         "user_id": 1, "owner_username": "tester", "is_public": False},
+        {"id": 9, "name": "Arcade Nights", "description": "", "rom_ids": [11],
+         "user_id": 2, "owner_username": "anna", "is_public": True},
+    ],
+    # A smart one (a saved filter): no description, its filter says what it holds.
+    "smart_collections": [
+        {"id": 3, "name": "SNES picks", "description": "", "filter_summary": "Platform: SNES", "rom_ids": [11, 12],
+         "user_id": 1, "owner_username": "tester", "is_public": False},
+    ],
+    # Virtual ones, which RomM makes from metadata: string ids, grouped by type.
+    "virtual_collections": [
+        {"id": "genre-Action", "name": "Action", "type": "genre", "description": "", "rom_ids": [10, 14, 30],
+         "is_virtual": True},
+        {"id": "franchise-Metroid", "name": "Metroid", "type": "franchise", "description": "", "rom_ids": [11],
+         "is_virtual": True},
+    ],
     "firmware": [{"id": 1, "platform_id": 1, "file_name": "bsx.bin", "content": b"BSXBIOS"}],
     "saves": {},    # id -> save dict (+ "content")
     "states": {},
@@ -99,17 +122,20 @@ def rom_public(r):
     stem = r["fs_name"].rsplit(".", 1)[0] if "." in r["fs_name"] else r["fs_name"]
     cover = "/assets/romm/resources/roms/%d/%d/cover/small.png?ts=%s" % (
         r["platform_id"], r["id"], DB["cover_ts"].get(r["id"], "2026-01-01 00:00:00"))
+    fs_path = r.get("fs_path", p["fs_slug"])
     if r.get("files"):
+        # file_path is the file's folder: the game's own, or one inside it ("sub").
         files = [{"id": f["id"], "file_name": f["file_name"], "file_size_bytes": len(f["content"]),
+                  "file_path": "/".join(x for x in (fs_path, r["fs_name"], f.get("sub", "")) if x),
                   "category": f.get("category", "content")} for f in r["files"]]
-        return {**{k: v for k, v in r.items() if k != "files"}, "fs_name_no_ext": stem,
+        return {**{k: v for k, v in r.items() if k != "files"}, "fs_name_no_ext": stem, "fs_path": fs_path,
                 "fs_size_bytes": sum(f["file_size_bytes"] for f in files),
                 "platform_slug": p["slug"], "platform_fs_slug": p["fs_slug"], "platform_display_name": p["name"],
                 "has_multiple_files": len(files) > 1, "files": files,
                 "md5_hash": hashlib.md5(b"".join(f["content"] for f in r["files"])).hexdigest(),
                 "path_cover_small": cover}
     content = ("ROM:" + r["fs_name"]).encode()
-    return {**r, "fs_name_no_ext": stem, "fs_size_bytes": len(content), "platform_slug": p["slug"],
+    return {**r, "fs_name_no_ext": stem, "fs_path": fs_path, "fs_size_bytes": len(content), "platform_slug": p["slug"],
             "platform_fs_slug": p["fs_slug"], "platform_display_name": p["name"], "has_multiple_files": False, "files": [],
             "md5_hash": hashlib.md5(content).hexdigest(),
             # Like RomM's: the cover's path carries a stamp that changes with it.
@@ -310,6 +336,12 @@ class H(BaseHTTPRequestHandler):
                     f["content"] = f["content"].encode()
                 DB["roms"][b["id"]] = b
                 return self.reply(200, rom_public(b))
+            if p == "/_admin/renumber" and method == "POST":  # a rescan gives a game a new id
+                b = self.json_body()
+                rom = DB["roms"].pop(b["from"])
+                rom["id"] = b["to"]
+                DB["roms"][b["to"]] = rom
+                return self.reply(200, rom_public(rom))
             if p == "/_admin/platform" and method == "POST":
                 b = self.json_body()
                 DB["platforms"].append({"id": b["id"], "slug": b["slug"], "fs_slug": b["slug"], "name": b["name"],
@@ -342,6 +374,10 @@ class H(BaseHTTPRequestHandler):
                 return self.reply(200, {"ok": True})
             if p == "/_admin/cut" and method == "POST":
                 DB["cut_next"] = int(self.json_body()["bytes"])
+                return self.reply(200, {"ok": True})
+            if p == "/_admin/collections_scope" and method == "POST":
+                # A token from a pairing that didn't ask for collections.read.
+                DB["no_collections"] = not self.json_body().get("granted", True)
                 return self.reply(200, {"ok": True})
             if p == "/_admin/offline" and method == "POST":
                 # RomM stopped for a while: connections are refused, then it's back as it was.
@@ -389,11 +425,27 @@ class H(BaseHTTPRequestHandler):
                 return self.reply(200, [x for x in DB["play_sessions"] if not rid or x["rom_id"] == rid])
             if len(parts) == 3 and parts[:2] == ["api", "platforms"]:
                 return self.reply(200, platform_public(next(x for x in DB["platforms"] if x["id"] == int(parts[2]))))
+            if p.startswith("/api/collections") and DB.get("no_collections"):
+                return self.reply(403, {"detail": "Forbidden"})
+            if p == "/api/collections":
+                return self.reply(200, [c | {"rom_count": len(c["rom_ids"])} for c in DB["collections"]])
+            if p == "/api/collections/smart":
+                return self.reply(200, [c | {"rom_count": len(c["rom_ids"])} for c in DB["smart_collections"]])
+            if p == "/api/collections/virtual":
+                return self.reply(200, [c | {"rom_count": len(c["rom_ids"])} for c in DB["virtual_collections"]
+                                        if qs("type") in ("all", c["type"])])
             if p == "/api/roms":
                 ids = [int(x) for x in q.get("platform_ids", [])]
                 term = (qs("search_term") or "").lower()
+                coll, smart, virtual = qs("collection_id"), qs("smart_collection_id"), qs("virtual_collection_id")
+                in_coll = next((c["rom_ids"] for c in DB["collections"] if str(c["id"]) == coll), []) if coll else None
+                if smart:
+                    in_coll = next((c["rom_ids"] for c in DB["smart_collections"] if str(c["id"]) == smart), [])
+                if virtual:
+                    in_coll = next((c["rom_ids"] for c in DB["virtual_collections"] if c["id"] == virtual), [])
                 items = sorted((rom_public(r) for r in DB["roms"].values()
-                                if (not ids or r["platform_id"] in ids) and term in r["name"].lower() + r["fs_name"].lower()),
+                                if (not ids or r["platform_id"] in ids) and (in_coll is None or r["id"] in in_coll)
+                                and term in r["name"].lower() + r["fs_name"].lower()),
                                key=lambda r: r["name"].lower())
                 char_index = {}
                 for i, r in enumerate(items):
@@ -403,6 +455,8 @@ class H(BaseHTTPRequestHandler):
                 return self.reply(200, {"items": items[off:off + lim], "total": len(items), "limit": lim, "offset": off,
                                         "char_index": char_index})
             if len(parts) == 3 and parts[:2] == ["api", "roms"]:
+                if int(parts[2]) not in DB["roms"]:  # as RomM says it
+                    return self.reply(404, {"detail": "Rom with id '%s' not found" % parts[2]})
                 return self.reply(200, rom_public(DB["roms"][int(parts[2])]))
             if len(parts) == 5 and parts[:2] == ["api", "roms"] and parts[3] == "content":
                 r = DB["roms"][int(parts[2])]

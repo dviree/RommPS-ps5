@@ -129,6 +129,30 @@ static int appid_cb(pid_t pid, const char *tdname, void *vctx) {
 }
 
 /* The big app's id, then the process that carries it (sdk samples/ps). */
+/* The PS4 has no toasts of its own style: the plain notification it is. */
+int console_toast(const char *message) {
+    (void)message;
+    return -1;
+}
+
+struct alive_ctx { const char *title; int found; };
+
+static int alive_cb(pid_t pid, const char *tdname, void *vctx) {
+    struct alive_ctx *c = vctx;
+    app_info_t info;
+    (void)tdname;
+    memset(&info, 0, sizeof info);
+    if (!sceKernelGetAppInfo(pid, &info) && !strncmp(info.title_id, c->title, 9)) c->found = 1;
+    return c->found;
+}
+
+int plat_app_alive(const char *title_id) {
+    struct alive_ctx c = {title_id, 0};
+    if (!title_id || strlen(title_id) != 9) return -1;
+    if (console_for_each_proc(alive_cb, &c) < 0) return -1;
+    return c.found;
+}
+
 int plat_running_title(char *title_id, size_t n) {
     struct appid_ctx c;
 

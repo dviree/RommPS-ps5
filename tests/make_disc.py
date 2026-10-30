@@ -7,6 +7,8 @@
     make_disc.py gc <out.iso> <GAMEID>
     make_disc.py psx <out.iso> <BOOT EXE>     a PS1 ISO whose SYSTEM.CNF boots it ("SLUS_123.45")
     make_disc.py psxbin <out.bin> <BOOT EXE>  the same as raw 2352-byte mode 2 sectors
+    make_disc.py ps2 <out.iso> <BOOT ELF> [DIR]  a PS2 ISO whose SYSTEM.CNF BOOT2 is the ELF (in DIR when given);
+                                                 prints PCSX2's CRC of it
 """
 import struct
 import sys
@@ -84,6 +86,39 @@ def psx_iso(boot):
     return bytes(img)
 
 
+def ps2_elf():
+    """A boot program over two sectors, its length not a multiple of 4 (PCSX2 skips the tail)."""
+    return bytes((i * 7 + (i >> 8)) & 0xFF for i in range(SECTOR * 2 + 6))
+
+
+def ps2_iso(boot, folder=None):
+    elf = ps2_elf()
+    path = f"\\{folder}\\{boot};1" if folder else f"\\{boot};1"
+    cnf = f"BOOT2 = cdrom0:{path}\r\nVER = 1.00\r\nVMODE = NTSC\r\n".encode()
+    img = bytearray(SECTOR * 26)
+    pvd = bytearray(SECTOR)
+    pvd[0] = 1
+    pvd[1:6] = b"CD001"
+    pvd[6] = 1
+    pvd[156:156 + 34] = record(b"\0", 18, SECTOR, True)
+    img[16 * SECTOR:17 * SECTOR] = pvd
+    img[17 * SECTOR:17 * SECTOR + 7] = b"\xffCD001\x01"
+    root = record(b"\0", 18, SECTOR, True) + record(b"\1", 18, SECTOR, True) + record(b"SYSTEM.CNF;1", 19, len(cnf), False)
+    if folder:
+        root += record(folder.encode(), 20, SECTOR, True)
+        sub = record(b"\0", 20, SECTOR, True) + record(b"\1", 18, SECTOR, True) + record(f"{boot};1".encode(), 21, len(elf), False)
+        img[20 * SECTOR:20 * SECTOR + len(sub)] = sub
+    else:
+        root += record(f"{boot};1".encode(), 21, len(elf), False)
+    img[18 * SECTOR:18 * SECTOR + len(root)] = root
+    img[19 * SECTOR:19 * SECTOR + len(cnf)] = cnf
+    img[21 * SECTOR:21 * SECTOR + len(elf)] = elf
+    crc = 0
+    for (w,) in struct.iter_unpack("<I", elf[:len(elf) // 4 * 4]):
+        crc ^= w
+    return bytes(img), crc
+
+
 def raw_mode2(iso):
     """2048-byte sectors as 2352-byte mode 2 form 1 ones (sync, header, subheader, data, no EDC/ECC)."""
     out = bytearray()
@@ -110,6 +145,45 @@ def cso(iso, block=2048):
     return header + b"".join(struct.pack("<I", x) for x in index) + body
 
 
+def xbe(title_id):
+    """A default.xbe down to what matters: a certificate holding the title id."""
+    base = 0x10000
+    head = bytearray(0x200)
+    head[0:4] = b"XBEH"
+    struct.pack_into("<I", head, 0x104, base)
+    struct.pack_into("<I", head, 0x118, base + 0x200)
+    cert = struct.pack("<III", 0x1D0, 0, title_id) + bytes(0x1D0 - 12)
+    return bytes(head) + cert
+
+
+def xex(title_id):
+    """A default.xex down to its optional headers: one to skip, then the
+    execution info holding the title id."""
+    head = b"XEX2" + struct.pack(">IIIII", 0, 0x1000, 0, 0x100, 2)
+    head += struct.pack(">II", 0x000183FF, 0) + struct.pack(">II", 0x00040006, 0x40)
+    head += bytes(0x40 - len(head))
+    return head + struct.pack(">IIII", 0x12345678, 0, 0, title_id) + bytes(8 + 0x100)
+
+
+def xiso(title_id, boot=b"default.xbe", exe=None):
+    """A trimmed Xbox (or 360) disc: XDVDFS with the boot file a right child
+    of the root entry, so finding it walks the tree."""
+    def entry(left, right, sector, size, attr, name):
+        e = struct.pack("<HHIIBB", left, right, sector, size, attr, len(name)) + name
+        return e + b"\xff" * (-len(e) % 4)
+    exe = exe or xbe(title_id)
+    first = entry(0, 0, 40, 4, 0, b"AUDIO.BIN")
+    table = entry(0, len(first) // 4, 40, 4, 0, b"AUDIO.BIN")
+    table += entry(0, 0, 41, len(exe), 0, boot)
+    vd = bytearray(SECTOR)
+    vd[0:20] = vd[0x7EC:0x800] = b"MICROSOFT*XBOX*MEDIA"
+    struct.pack_into("<II", vd, 0x14, 33, len(table))
+    disc = bytearray(41 * SECTOR)
+    disc[0x10000:0x10800] = vd
+    disc[33 * SECTOR:33 * SECTOR + len(table)] = table
+    return bytes(disc) + exe
+
+
 if __name__ == "__main__":
     kind, out = sys.argv[1], sys.argv[2]
     if kind == "psp":
@@ -122,8 +196,25 @@ if __name__ == "__main__":
         data = psx_iso(sys.argv[3])
     elif kind == "psxbin":
         data = raw_mode2(psx_iso(sys.argv[3]))
+    elif kind == "ps2":
+        data, crc = ps2_iso(sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else None)
+        print("%08X" % crc)
     elif kind == "gc":
         data = sys.argv[3].encode()[:6] + bytes(0x20) + b"\xc2\x33\x9f\x3d" + bytes(64)
+    elif kind == "xiso":
+        data = xiso(int(sys.argv[3], 16))
+    elif kind == "xbe":
+        data = xbe(int(sys.argv[3], 16))
+    elif kind == "x360iso":
+        data = xiso(0, b"default.xex", xex(int(sys.argv[3], 16)))
+    elif kind == "god":  # a GOD package's header file: the title id at 0x360
+        h = bytearray(0xB000)
+        h[0:4] = b"LIVE"
+        struct.pack_into(">I", h, 0x344, 0x7000)
+        struct.pack_into(">I", h, 0x360, int(sys.argv[3], 16))
+        data = bytes(h)
+    elif kind == "xex":
+        data = xex(int(sys.argv[3], 16))
     else:
         sys.exit("unknown kind")
     open(out, "wb").write(data)

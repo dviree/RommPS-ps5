@@ -65,7 +65,12 @@ static int load_dirs(watch_dir **out) {
         const profile_map *m = &maps[i];
         if (!m->sync_saves) continue;
         for (int k = 0; k < (states ? 2 : 1); k++) {
-            const char *d = m->in_content[k] ? m->rom_dir : (k ? m->state_dir : m->save_dir);
+            /* A folder per game ("states/{game_id}", "nvram/{rom_stem}/cdimono1")
+             * is watched from above it. */
+            char d[PATH_MAX_LEN];
+            str_copy(d, sizeof d, m->in_content[k] ? m->rom_dir : (k ? m->state_dir : m->save_dir));
+            char *var = strstr(d, "/{");
+            if (var) *var = 0;
             const char *e = k ? m->state_exts : m->save_exts;
             if (!d[0]) continue;
             watch_dir *w = NULL;
@@ -96,7 +101,7 @@ static int load_dirs(watch_dir **out) {
             strncat(all_exts, e[k], sizeof all_exts - strlen(all_exts) - 1);
         }
     }
-    free(maps);
+    profiles_free(maps);
     static char scanned[64][1024];
     static int any_file[64];
     int ns = sync_scanned_dirs(scanned, any_file, 64);
@@ -202,14 +207,32 @@ static void *watch_thread(void *arg) {
             sleep(POLL_SEC);
             continue;
         }
+        /* A folder new to the list (an emulator set up, a sync that found
+         * another save folder): what's in it is where things stand, not a
+         * change. */
+        char (*fresh)[1024] = NULL;
+        int nfresh = 0;
         if (!dirs || now - dirs_loaded >= RELOAD_DIRS_SEC) {
-            free(dirs);
+            watch_dir *had = dirs;
+            const int nhad = ndirs;
             ndirs = load_dirs(&dirs);
             dirs_loaded = now;
+            fresh = calloc((size_t)(ndirs > 0 ? ndirs : 1), sizeof *fresh);
+            for (int i = 0; fresh && i < ndirs; i++) {
+                int known = 0;
+                for (int k = 0; k < nhad && !known; k++) known = !strcmp(had[k].dir, dirs[i].dir);
+                if (!known && had) str_copy(fresh[nfresh++], sizeof fresh[0], dirs[i].dir);
+            }
+            free(had);
         }
 
         for (int i = 0; i < g_nfiles; i++) g_files[i].seen = 0;
-        for (int i = 0; i < ndirs; i++) scan(dirs[i].dir, dirs[i].exts, 0, baseline, now);
+        for (int i = 0; i < ndirs; i++) {
+            int is_fresh = 0;
+            for (int k = 0; k < nfresh && !is_fresh; k++) is_fresh = !strcmp(fresh[k], dirs[i].dir);
+            scan(dirs[i].dir, dirs[i].exts, 0, baseline || is_fresh, now);
+        }
+        free(fresh);
         baseline = 0;
 
         for (int i = 0; i < g_nfiles;) {

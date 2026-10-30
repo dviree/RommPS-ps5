@@ -40,13 +40,15 @@ def cards_cell(c):
     setting = cards.get("setting") or {}
     if setting.get("file"):
         text += " (read from %s, `%s`)" % (code(setting["file"]), setting.get("key", ""))
+    if c.get("pcsx2_cards", {}).get("own_card"):
+        text += ". One per game: RomM Sync gives each game its own"
     if c.get("memcards"):
         text += ". Shared cards (synced whole, while the system uses shared cards): " + ", ".join(code(p) for p in c["memcards"].split(","))
     return text
 
 
 def section(console, path):
-    cat = json.load(open(os.path.join(ROOT, path)))
+    cat = json.load(open(os.path.join(ROOT, path)))["emulators"]
     lines = ["## %s" % console, ""]
     for e in cat:
         profile = e.get("profile", {})
@@ -54,6 +56,14 @@ def section(console, path):
         lines.append("")
         if e.get("note"):
             lines.append(e["note"])
+            lines.append("")
+        # {user_dir}: the emulator's, or a system's own (PS5-ECAM keeps one folder per system)
+        homes = [("", profile)] if "user_dir" in profile else []
+        homes += [(" for " + ", ".join(p["romm"]), p) for p in profile.get("platforms", []) if "user_dir" in p]
+        if homes:
+            lines.append("; ".join("`{user_dir}`%s: %s, the first %s" % (
+                who, ", else ".join(code(x) for x in o["user_dir"].split(",")),
+                "with %s in it, else the first that's there" % code(o["user_dir_has"]) if o.get("user_dir_has") else "that's there") for who, o in homes) + ".")
             lines.append("")
         lines.append("| System | Games | Saves | Save files | Saved as | States | State files | Memory cards |")
         lines.append("|---|---|---|---|---|---|---|---|")
@@ -63,8 +73,14 @@ def section(console, path):
             layout = c.get("save_layout")
             saves = code(c["save_dir"]) if sync else "not synced"
             files = ("a zip per game (%s), from %s" % (layout, code(c.get("bundle_dirs", "")))) if layout else code(c["save_exts"])
-            stems = [x for x in c.get("save_stems", "").split(",") if x and x + "{ext}" != c["save_name"]]
-            name = "" if layout or not sync else code(c["save_name"]) + (" (also %s)" % ", ".join(code(x) for x in stems) if stems else "")
+            if layout == "ps2":  # src/ps2card.c: each game's own card, synced as sigil's one-game card
+                pc = c.get("pcsx2_cards", {})
+                saves = code(pc.get("dir", "")) if sync else "not synced"
+                files = "its own card, %s, named in %s, synced as one 8 MB card of the game's saves" % (
+                    code(pc.get("own_card", "")), code(pc.get("game_ini", "")))
+            names = c["save_name"].split(",")
+            stems = [x for x in c.get("save_stems", "").split(",") if x and x + "{ext}" not in names]
+            name = "" if layout or not sync else ", else ".join(code(x) for x in names) + (" (also %s)" % ", ".join(code(x) for x in stems) if stems else "")
             states = code(c["state_dir"]) if sync and c.get("state_exts", ".state*") else "not synced"
             lines.append("| %s | %s | %s | %s | %s | %s | %s | %s |" % (
                 ", ".join(p["romm"]), code(c["rom_dir"]), saves, files if sync else "", name, states,
@@ -92,6 +108,8 @@ def main():
         e = r.get("entry", {})
         core = ", ".join(r.get("names", []) + ["*%s*" % n for n in r.get("contains", [])]) or "any"
         files = ("a zip per game (%s)" % e["save_layout"]) if e.get("save_layout") else code(e.get("save_exts", ""))
+        if e.get("save_layout") == "ps2":
+            files = "each game's own card, synced as one 8 MB card of its saves"
         lines.append("| %s | %s | %s | %s | %s | %s |" % (core, ", ".join(r.get("systems", [])) or "any", files,
                                                           code(e.get("save_name", "")), cards_cell(e), r.get("note", "")))
     open(os.path.join(ROOT, "docs/emulators.md"), "w").write("\n".join(lines) + "\n")

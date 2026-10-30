@@ -449,6 +449,26 @@ App::App() : api_("127.0.0.1", payload_port())
 
 void App::say(const std::string &message)
 {
+    // The console's own notification, through RomM Sync (an app can't send
+    // one): "Couldn't cancel: <why>" shows "Couldn't cancel" in bold with the
+    // reason above it. Drawn in the app when RomM Sync can't be reached.
+    if (status_.reachable)
+    {
+        std::string text = message;
+        if (const std::size_t colon = text.find(": "); colon != std::string::npos)
+            text.replace(colon, 2, "\n");
+        std::unique_ptr<cJSON, void (*)(cJSON *)> body(cJSON_CreateObject(), cJSON_Delete);
+        cJSON_AddStringToObject(body.get(), "message", text.c_str());
+        char *json = cJSON_PrintUnformatted(body.get());
+        api_.post("/api/notify", json ? json : "{}", [this, message](const Response &r) {
+            if (r.ok())
+                return;
+            toast_ = plain(message.c_str()); // an older RomM Sync, or it just stopped
+            toast_age_ = 0;
+        });
+        cJSON_free(json);
+        return;
+    }
     toast_ = plain(message.c_str()); // the service's errors carry names and paths
     toast_age_ = 0;
 }
@@ -549,7 +569,11 @@ void App::tick(float dt, hui::gfx::Renderer *renderer)
         if (shapes_[job.path].aspect != cover.aspect)
             shapes_[job.path] = {cover.aspect, clock_};
         if (renderer)
+        {
+            if (cover.texture)
+                renderer->destroy_texture(cover.texture); // asked for twice: the first one goes
             cover.texture = renderer->create_texture(w, h, rgba);
+        }
         stbi_image_free(rgba);
     }
 }
@@ -735,6 +759,11 @@ void App::refresh_status()
             repaired_ = true;
             repair_autostart();
         }
+
+        if (!presets_checked_ && !payload_too_old()) {
+            presets_checked_ = true;
+            api_.post("/api/presets/check", "{}", [](const Response &) {});
+        }
         status_.ip = str(j.get(), "ip");
         status_.port = static_cast<int>(num(j.get(), "web_port", 8780));
         status_.paired = flag(j.get(), "paired");
@@ -773,7 +802,7 @@ void App::refresh_status()
         const double sig = num(j.get(), "installed_sig", -1);
         if (sig != installed_sig_ && installed_sig_ >= 0 && sig >= 0)
         {
-            lists_.clear();
+            refresh_lists();
             refresh_installed();
         }
         installed_sig_ = sig;
@@ -795,6 +824,14 @@ void App::refresh_status()
         {
             refresh_platforms();
             refresh_installed();
+        }
+        // Paired again (as someone else, perhaps): the collections are asked
+        // for again when next looked at.
+        if (ready && !was_paired_)
+        {
+            collections_.clear();
+            collections_error_.clear();
+            collections_loaded_ = false;
         }
         was_paired_ = ready;
     });
@@ -834,6 +871,42 @@ void App::refresh_platforms()
     });
 }
 
+void App::refresh_collections()
+{
+    if (collections_busy_)
+        return;
+    collections_busy_ = true;
+    // Every kind the payload offers, already in order: by kind and type, in
+    // each the user's own, then other users' public ones.
+    api_.get("/api/collections", [this](const Response &r) {
+        collections_busy_ = false;
+        collections_loaded_ = true;
+        collections_need_pair_ = r.status == 403;
+        if (!r.ok())
+        {
+            collections_error_ = r.message();
+            return;
+        }
+        std::unique_ptr<cJSON, void (*)(cJSON *)> j(r.json(), cJSON_Delete);
+        collections_.clear();
+        collections_error_.clear();
+        const cJSON *c;
+        cJSON_ArrayForEach(c, j.get())
+        {
+            Collection coll;
+            coll.kind = str(c, "kind");
+            coll.id = str(c, "id");
+            coll.name = plain(str(c, "name"));
+            coll.description = plain(str(c, "description"));
+            coll.owner = plain(str(c, "owner"));
+            coll.type = str(c, "type");
+            coll.rom_count = static_cast<int>(num(c, "rom_count"));
+            if (coll.rom_count > 0 && !coll.kind.empty() && !coll.id.empty())
+                collections_.push_back(std::move(coll));
+        }
+    });
+}
+
 const Platform *App::platform_by_id(int id) const
 {
     for (const Platform &p : platforms_)
@@ -842,14 +915,37 @@ const Platform *App::platform_by_id(int id) const
     return nullptr;
 }
 
-GameList &App::games(int platform_id, const std::string &search)
+void App::refresh_lists()
 {
-    const std::string key = std::to_string(platform_id) + "|" + search;
+    for (auto &[key, entry] : lists_)
+        if (entry.list)
+            std::fill(entry.list->pages.begin(), entry.list->pages.end(), 0);
+}
+
+const Collection *App::collection_by_id(const std::string &kind, const std::string &id) const
+{
+    for (const Collection &c : collections_)
+        if (c.kind == kind && c.id == id)
+            return &c;
+    return nullptr;
+}
+
+std::string Scope::query() const
+{
+    std::string q = "platform_id=" + std::to_string(platform_id);
+    if (in_collection())
+        q += "&collection_kind=" + url_escape(collection_kind) + "&collection_id=" + url_escape(collection_id);
+    return q;
+}
+
+GameList &App::games(const Scope &scope, const std::string &search)
+{
+    const std::string key = scope.key() + "|" + search;
     CachedList &entry = lists_[key];
     if (!entry.list)
     {
         entry.list = std::make_unique<GameList>();
-        entry.list->platform_id = platform_id;
+        entry.list->scope = scope;
         entry.list->search = search;
         // Keep a few lists; the oldest goes when there are more.
         if (lists_.size() > kListsKept)
@@ -880,7 +976,7 @@ void App::ensure(GameList &list, int first, int last)
             list.pages.resize(static_cast<std::size_t>(page) + 1, 0);
         if (list.pages[static_cast<std::size_t>(page)])
             continue;
-        const std::string key = std::to_string(list.platform_id) + "|" + list.search;
+        const std::string key = list.scope.key() + "|" + list.search;
         const std::pair<std::string, int> want{key, page};
         if (std::find(wanted_pages_.begin(), wanted_pages_.end(), want) == wanted_pages_.end())
             wanted_pages_.push_back(want);
@@ -898,8 +994,8 @@ void App::send_page(const std::string &key, int page)
     list.pages[static_cast<std::size_t>(page)] = 1;
     ++pages_in_flight_;
     {
-        char path[512];
-        std::snprintf(path, sizeof path, "/api/roms?platform_id=%d&offset=%d&limit=%d&search=%s", list.platform_id,
+        char path[640];
+        std::snprintf(path, sizeof path, "/api/roms?%s&offset=%d&limit=%d&search=%s", list.scope.query().c_str(),
                       page * GameList::kPage, GameList::kPage, url_escape(list.search).c_str());
         pages_api_[next_page_worker_++ % kPageWorkers].get(path, [this, key, page](const Response &r) {
             --pages_in_flight_;
@@ -940,7 +1036,7 @@ void App::send_page(const std::string &key, int page)
                     break;
                 Game &game = l.games[static_cast<std::size_t>(index++)];
                 game.id = static_cast<int>(num(g, "id"));
-                game.platform_id = static_cast<int>(num(g, "platform_id", l.platform_id));
+                game.platform_id = static_cast<int>(num(g, "platform_id", l.scope.platform_id));
                 game.name = plain(str(g, "name"));
                 game.fs_name = str(g, "fs_name");
                 game.cover = str(g, "cover");
@@ -951,6 +1047,10 @@ void App::send_page(const std::string &key, int page)
                 game.archived = flag(g, "archived");
                 game.version = plain(str(g, "version"));
                 game.versions = static_cast<int>(num(g, "versions"));
+                game.siblings.clear();
+                const cJSON *s;
+                cJSON_ArrayForEach(s, cJSON_GetObjectItemCaseSensitive(g, "siblings"))
+                    game.siblings.push_back(s->valueint);
             }
             l.reindex();
             if (page < static_cast<int>(l.pages.size()))
@@ -1009,6 +1109,20 @@ const Details &App::details(int rom_id)
             out.addons.push_back(addon(a));
             out.bundle++;
         }
+        cJSON_ArrayForEach(a, cJSON_GetObjectItemCaseSensitive(j.get(), "version_list"))
+        {
+            Details::Version &v = out.versions.emplace_back();
+            v.id = static_cast<int>(num(a, "id"));
+            v.name = plain(str(a, "name"));
+            v.label = plain(str(a, "label"));
+            v.size = num(a, "size");
+            const cJSON *disc;
+            cJSON_ArrayForEach(disc, cJSON_GetObjectItemCaseSensitive(a, "discs"))
+                v.discs.push_back({static_cast<int>(num(disc, "disc")), num(disc, "size")});
+        }
+        // By name, so a game's discs come in order.
+        std::sort(out.versions.begin(), out.versions.end(),
+                  [](const Details::Version &a, const Details::Version &b) { return a.name < b.name; });
     });
     return d;
 }
@@ -1047,7 +1161,19 @@ void App::check_on_console(int rom_id)
     std::snprintf(path, sizeof path, "/api/roms/%d/on_console", rom_id);
     api_.get(path, [this, rom_id](const Response &r) {
         std::unique_ptr<cJSON, void (*)(cJSON *)> j(r.json(), cJSON_Delete);
-        if (!r.ok() || !j || !installed_known_) // an older payload doesn't know it
+        if (!r.ok() || !j) // an older payload doesn't know it
+            return;
+        const cJSON *discs = cJSON_GetObjectItemCaseSensitive(j.get(), "discs"), *disc;
+        if (cJSON_IsArray(discs))
+        {
+            std::vector<int> &here = discs_here_[rom_id];
+            here.clear();
+            cJSON_ArrayForEach(disc, discs)
+                here.push_back(disc->valueint);
+        }
+        else
+            discs_here_.erase(rom_id);
+        if (!installed_known_)
             return;
         const bool here = flag(j.get(), "installed");
         if (here == (on_console_.count(rom_id) > 0))
@@ -1114,6 +1240,7 @@ void App::refresh_queue()
             Download dl;
             dl.id = static_cast<int>(num(d, "id"));
             dl.rom_id = static_cast<int>(num(d, "rom_id"));
+            dl.disc = static_cast<int>(num(d, "disc"));
             dl.name = plain(str(d, "name"));
             dl.platform = plain(str(d, "platform"));
             dl.status = str(d, "status");
@@ -1137,7 +1264,7 @@ void App::refresh_queue()
         // A game that finished shows as downloaded: the lists load again.
         if (finished_one)
         {
-            lists_.clear();
+            refresh_lists();
             refresh_installed();
         }
     });
@@ -1158,6 +1285,23 @@ std::string Download::saves_note() const
     return got.empty() ? "" : got + " synced";
 }
 
+bool App::disc_downloading(int rom_id, int disc) const
+{
+    for (const Download &d : queue_)
+        if (d.rom_id == rom_id && (d.disc == 0 || d.disc == disc) && d.active())
+            return true;
+    return false;
+}
+
+const Download *App::download_for(int rom_id, int disc) const
+{
+    const Download *found = nullptr;
+    for (const Download &d : queue_)
+        if (d.rom_id == rom_id && d.disc == disc)
+            found = &d; // the newest one wins
+    return found;
+}
+
 const Download *App::download_for(int rom_id) const
 {
     const Download *found = nullptr;
@@ -1167,11 +1311,13 @@ const Download *App::download_for(int rom_id) const
     return found;
 }
 
-void App::download(int rom_id, const std::string &name)
+void App::download(int rom_id, const std::string &name, int disc)
 {
     // The name goes along, so the download shows it from the start.
     std::unique_ptr<cJSON, void (*)(cJSON *)> j(cJSON_CreateObject(), cJSON_Delete);
     cJSON_AddNumberToObject(j.get(), "rom_id", rom_id);
+    if (disc > 0)
+        cJSON_AddNumberToObject(j.get(), "disc", disc);
     cJSON_AddStringToObject(j.get(), "name", name.c_str());
     char *text = cJSON_PrintUnformatted(j.get());
     const std::string body = text ? text : "{}";
@@ -1179,6 +1325,27 @@ void App::download(int rom_id, const std::string &name)
     api_.post("/api/download", body, [this](const Response &r) {
         if (!r.ok())
             say("Couldn't start the download: " + r.message());
+        refresh_queue();
+    });
+}
+
+void App::download_collection(const Collection &c)
+{
+    std::unique_ptr<cJSON, void (*)(cJSON *)> j(cJSON_CreateObject(), cJSON_Delete);
+    cJSON_AddStringToObject(j.get(), "collection_kind", c.kind.c_str());
+    cJSON_AddStringToObject(j.get(), "collection_id", c.id.c_str());
+    char *text = cJSON_PrintUnformatted(j.get());
+    const std::string body = text ? text : "{}";
+    cJSON_free(text);
+    api_.post("/api/download", body, [this, name = c.name](const Response &r) {
+        std::unique_ptr<cJSON, void (*)(cJSON *)> res(r.ok() ? r.json() : nullptr, cJSON_Delete);
+        const int queued = static_cast<int>(num(res.get(), "queued"));
+        if (!r.ok())
+            say("Couldn't download " + name + ": " + r.message());
+        else if (queued == 0)
+            say("Everything in " + name + " that can play here is on this console");
+        else
+            say("Downloading " + std::to_string(queued) + (queued == 1 ? " game from " : " games from ") + name);
         refresh_queue();
     });
 }
@@ -1214,18 +1381,20 @@ void App::retry_download(int job_id)
     });
 }
 
-void App::remove_game(int rom_id)
+void App::remove_game(int rom_id, bool quiet, int disc)
 {
     char body[64];
-    std::snprintf(body, sizeof body, "{\"rom_id\":%d}", rom_id);
-    api_.post("/api/delete", body, [this](const Response &r) {
+    std::snprintf(body, sizeof body, "{\"rom_id\":%d,\"disc\":%d}", rom_id, disc);
+    api_.post("/api/delete", body, [this, quiet, rom_id](const Response &r) {
         if (!r.ok())
         {
             say("Couldn't remove the game: " + r.message());
             return;
         }
-        say("Game removed. Its saves are kept.");
-        lists_.clear();
+        if (!quiet)
+            say("Game removed. Its saves are kept.");
+        check_on_console(rom_id); // its discs, for the versions list
+        refresh_lists();
         refresh_installed();
         refresh_queue();
     });

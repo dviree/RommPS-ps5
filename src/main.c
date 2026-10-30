@@ -19,12 +19,14 @@
 #include "platform.h"
 #include "ra2.h"
 #include "romm.h"
+#include "memcard.h"
 #include "state.h"
 #include "sync.h"
 #include "update.h"
 #include "util.h"
 #include "watch.h"
 #include "web.h"
+#include "presets.h"
 
 #define MONITOR_INTERVAL_SEC 3
 /* Failed foreground reads in a row before game detection is given up. */
@@ -108,9 +110,8 @@ static void announce_new_emulators(void) {
     if (!fresh) return;
     events_save();
     LOGI("new emulators found: %s%s", names, fresh > 3 ? " and more" : "");
-    if (fresh > 3) plat_notify("RommPS found new emulators: %s and %d more. Turn them on in Emulator Settings.", names, fresh - 3);
-    else plat_notify("RommPS found %s: %s. Turn %s on in Emulator Settings.", fresh == 1 ? "a new emulator" : "new emulators",
-                     names, fresh == 1 ? "it" : "them");
+    if (fresh > 3) plat_notify("RommPS: found %s and %d more\nTurn them on in Emulator Settings", names, fresh - 3);
+    else plat_notify("RommPS: found %s\nTurn %s on in Emulator Settings", names, fresh == 1 ? "it" : "them");
 }
 
 static void *app_main(void *arg) {
@@ -141,12 +142,15 @@ static void *app_main(void *arg) {
      * breaks HTTPS certificate checks and save timestamps. */
     if (time(NULL) < 1577836800) { /* 2020-01-01 */
         LOGW("the console clock isn't set; HTTPS and save times will be wrong");
-        plat_notify("RommPS: the console's date and time aren't set. Set them in the console's Settings for syncing to work.");
+        plat_notify("RommPS: the console's date and time aren't set\nSet them in Settings to sync");
     }
 
+    presets_init();
     config_load();
     if (g_cfg.profiles_custom && detect_refresh_profiles(g_cfg.profiles) > 0) config_save();
     state_load();
+    /* PS2: consoles syncing shared cards keep them, now one per game is the default. */
+    memcard_keep_shared();
     /* RetroArch 2.0 keeps games in new folders. */
     ra2_check(1);
     events_load();
@@ -178,12 +182,12 @@ static void *app_main(void *arg) {
     plat_app_version(app_version, sizeof app_version);
     if (quiet && app_version[0] && version_cmp(app_version, APP_VERSION) < 0) {
         LOGI("RommPS %s is older than RomM Sync %s", app_version, APP_VERSION);
-        plat_notify("RommPS %s is out of date. Update it from ProsperoStore.", app_version);
+        plat_notify("RommPS %s is out of date\nUpdate it from your homebrew store", app_version);
     } else if (quiet) {
     } else if (!plat_info()->self_update) {
-        plat_notify("RommPS is running. Install the RommPS app from ProsperoStore to use it on the console.");
+        plat_notify("RommPS is running\nInstall the RommPS app from your homebrew store");
     } else if (config_is_paired()) {
-        plat_notify("RommPS running - http://%s:%d", ip[0] ? ip : "127.0.0.1", port);
+        plat_notify("RommPS is running\nhttp://%s:%d", ip[0] ? ip : "127.0.0.1", port);
     } else {
         plat_notify("RommPS: open http://%s:%d to pair with RomM", ip[0] ? ip : "127.0.0.1", port);
     }
@@ -194,6 +198,8 @@ static void *app_main(void *arg) {
     library_link_extras();
 
     sleep(5); /* wait for the network after boot */
+    presets_check();
+
     if (config_is_paired()) {
         char base[512], version[32] = "";
         config_lock();
@@ -228,7 +234,7 @@ static void *app_main(void *arg) {
             if (ip[0] || --resume_ticks == 0) {
                 resume_ticks = 0;
                 resume_notified = now;
-                if (!quiet) plat_notify("RommPS resumed - http://%s:%d", ip[0] ? ip : "127.0.0.1", port);
+                if (!quiet) plat_notify("RommPS resumed\nhttp://%s:%d", ip[0] ? ip : "127.0.0.1", port);
             }
         }
 
@@ -248,6 +254,11 @@ static void *app_main(void *arg) {
             thread_start(tile_thread, NULL);
         }
         if (fg <= 0 || !is_game_title(title)) title[0] = 0;
+        /* Resting with a game open: nothing in front, but the game's
+         * processes are all there. It hasn't closed: no "game exited" sync as
+         * the console sleeps, no "game started" one as it wakes, and downloads
+         * keep waiting for it. */
+        if (!title[0] && current[0] && plat_app_alive(current) == 1) str_copy(title, sizeof title, current);
         web_set_foreground(title);
         sync_set_game_running(title[0] != 0);
 
