@@ -1329,9 +1329,10 @@ static void route(request *r) {
             send_error(fd, 400, "unknown kind of collection");
             return;
         }
-        cJSON *j = library_collections(k, err, sizeof err);
+        int refused = 0;
+        cJSON *j = library_collections(k, &refused, err, sizeof err);
         if (j) send_json(fd, 200, j);
-        else send_error(fd, 502, err);
+        else send_error(fd, refused ? 403 : 502, err); /* 403: pair again */
         return;
     }
     if (is_get && !strcmp(r->path, "/api/roms")) {
@@ -1400,6 +1401,28 @@ static void route(request *r) {
     if (is_post && !strcmp(r->path, "/api/download")) {
         cJSON *j = body_json(r);
         int rc;
+        if (cJSON_GetObjectItemCaseSensitive(j, "collection_id")) {
+            /* A whole collection: every game of it not here yet. */
+            library_scope scope = {.collection = library_collection_kind(jget_str(j, "collection_kind", "regular"))};
+            str_copy(scope.collection_id, sizeof scope.collection_id, jget_str(j, "collection_id", ""));
+            int queued = 0, skipped = 0;
+            if (!library_collection_id_ok(scope.collection, scope.collection_id)) {
+                snprintf(err, sizeof err, "no such collection");
+                rc = -1;
+            } else {
+                rc = library_queue_scope(&scope, &queued, &skipped, err, sizeof err);
+            }
+            cJSON_Delete(j);
+            if (rc) {
+                send_error(fd, 400, err);
+            } else {
+                cJSON *o = cJSON_CreateObject();
+                cJSON_AddNumberToObject(o, "queued", queued);
+                cJSON_AddNumberToObject(o, "skipped", skipped);
+                send_json(fd, 200, o);
+            }
+            return;
+        }
         if (cJSON_GetObjectItemCaseSensitive(j, "rom_id"))
             rc = library_queue_rom((int)jget_num(j, "rom_id", 0), (int)jget_num(j, "disc", 0), jget_str(j, "name", ""),
                                    jget_str(j, "cover", ""), err, sizeof err);
@@ -1427,6 +1450,7 @@ static void route(request *r) {
         config_unlock();
         cJSON *arr = cJSON_CreateArray();
         for (int i = 0; i < n; i++) {
+            if (maps[i].twin) continue; /* (its entry's core's saves, shown with it) */
             cJSON *o = cJSON_CreateObject();
             cJSON_AddStringToObject(o, "profile", maps[i].profile_name);
             cJSON_AddStringToObject(o, "platforms", maps[i].romm_slugs);

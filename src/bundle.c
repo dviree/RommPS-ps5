@@ -59,8 +59,33 @@ static void add_tree(bundle *b, const char *dir, const char *prefix, int depth) 
 
 /* PPSSPP dumps game data installs into SAVEDATA too, because why not. Those
  * have a PARAM.SFO without save fields, so skip them like the other RomM clients do. */
+/* A PSP save is a few KB to a couple of MB. Games also keep what they install
+ * to the memory stick (Peace Walker: 848 MB of "Installed Data") and their
+ * downloaded content in SAVEDATA, made the same way: that's game data, and
+ * RomM wouldn't take it anyway. */
+#define PSP_SAVE_MAX (16 << 20)
+
+static int64_t tree_size(const char *dir, int64_t stop) {
+    DIR *d = opendir(dir);
+    struct dirent *de;
+    int64_t total = 0;
+    while (d && total <= stop && (de = readdir(d))) {
+        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+        char p[PATH_MAX_LEN];
+        path_join(p, sizeof p, dir, de->d_name);
+        const int64_t n = dir_exists(p) ? tree_size(p, stop - total) : file_size(p);
+        if (n > 0) total += n;
+    }
+    if (d) closedir(d);
+    return total;
+}
+
 static int is_psp_save(const char *folder) {
     char sfo[PATH_MAX_LEN], v[64];
+    if (tree_size(folder, PSP_SAVE_MAX) > PSP_SAVE_MAX) {
+        LOGD("%s: game data, not a save (over %d MB)", folder, PSP_SAVE_MAX >> 20);
+        return 0;
+    }
     path_join(sfo, sizeof sfo, folder, "PARAM.SFO");
     if (!file_exists(sfo)) return 1;
     return sfo_file_get(sfo, "SAVEDATA_PARAMS", v, sizeof v) == 0 || sfo_file_get(sfo, "SAVEDATA_FILE_LIST", v, sizeof v) == 0;
@@ -441,20 +466,23 @@ int bundle_replace(bundle *b, const char *zip_path, const char *tmp_dir) {
     }
     int rc;
     if (!strcmp(b->layout, "psp") || !strcmp(b->layout, "gci")) {
-        remove_tree(tmp_dir);
         if (!strcmp(b->layout, "psp")) {
-            /* Remove whole save folders; the zip holds them as top-level folders. */
-            for (int i = 0; i < b->n; i++) {
-                char folder[PATH_MAX_LEN], *slash;
-                str_copy(folder, sizeof folder, b->files[i].name);
-                slash = strchr(folder, '/');
-                if (!slash) continue;
-                *slash = 0;
-                char path[PATH_MAX_LEN];
-                path_join(path, sizeof path, b->dir, folder);
+            /* The save folders the zip brings replace theirs, whole. The
+             * game's others stay: its downloaded content (which may not be
+             * there to download again), what it installed, another slot. */
+            DIR *d = opendir(tmp_dir);
+            struct dirent *de;
+            while (d && (de = readdir(d))) {
+                char in[PATH_MAX_LEN], path[PATH_MAX_LEN];
+                path_join(in, sizeof in, tmp_dir, de->d_name);
+                if (de->d_name[0] == '.' || !dir_exists(in)) continue;
+                path_join(path, sizeof path, b->dir, de->d_name);
                 remove_tree(path);
             }
+            if (d) closedir(d);
+            remove_tree(tmp_dir);
         } else {
+            remove_tree(tmp_dir);
             for (int i = 0; i < b->n; i++) unlink(b->files[i].path);
         }
         mkdir_p(b->dir);

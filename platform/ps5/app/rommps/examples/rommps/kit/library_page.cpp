@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 
@@ -32,6 +33,8 @@ constexpr float kPlatformTop = 196.0f;
 // Platform tiles
 constexpr int kTileCols = 4;
 constexpr float kTileW = 408.0f, kTileH = 220.0f, kTileGap = 32.0f, kTilePitch = kTileH + kTileGap;
+constexpr float kHeadH = 64.0f; // a section's heading, above its first row
+constexpr float kInstallArmed = 4.0f; // seconds the second Square of "Install all" has
 // A grid of games: its columns and cards follow the shape of its covers
 constexpr int kMinCols = 4, kMaxCols = 8;
 constexpr float kGridTop = 400.0f, kGridW = 1620.0f, kCardTallest = 235.0f, kColGap = 24.0f, kRowGap = 25.0f;
@@ -43,6 +46,29 @@ constexpr int kSlots = 27;
 constexpr float kSearchDelay = 0.35f; // seconds after the last key before searching
 
 using Slots = std::array<int, kSlots>; // each slot's first game, -1 for none
+
+// The heading of a collection's section: its kind, or a virtual one's type.
+std::string section_of(const Collection &c)
+{
+    if (c.kind == "regular")
+        return "Collections";
+    if (c.kind == "smart")
+        return "Smart collections";
+    static const struct
+    {
+        const char *type, *heading;
+    } named[] = {{"franchise", "Franchises"}, {"collection", "Series"}, {"genre", "Genres"},
+                 {"company", "Companies"},    {"mode", "Game modes"}};
+    for (const auto &n : named)
+        if (c.type == n.type)
+            return n.heading;
+    if (c.type.empty())
+        return "More collections";
+    std::string t = c.type;
+    std::replace(t.begin(), t.end(), '_', ' ');
+    t[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(t[0])));
+    return t;
+}
 
 int slot_of(const std::string &key)
 {
@@ -319,10 +345,55 @@ std::vector<LibraryPage::Tile> LibraryPage::tiles(App &app) const
         for (const Collection &c : app.collections())
             out.push_back({Scope::collection(c), c.name, "",
                            !c.owner.empty()         ? "by " + c.owner
-                           : c.description.empty() ? std::string("Collection")
+                           : c.description.empty() ? std::string(c.kind == "virtual" ? "" : "Collection")
                                                    : c.description,
-                           false, c.rom_count});
+                           false, c.rom_count, section_of(c)});
     return out;
+}
+
+LibraryPage::Placement LibraryPage::place(const std::vector<Tile> &all)
+{
+    Placement p;
+    int row = -1, col = kTileCols;
+    for (std::size_t i = 0; i < all.size(); ++i)
+    {
+        const bool starts = i == 0 || all[i].section != all[i - 1].section;
+        if (starts || col == kTileCols)
+        {
+            ++row;
+            col = 0;
+            if (starts && !all[i].section.empty())
+                p.heads.emplace_back(row, all[i].section);
+        }
+        p.row.push_back(row);
+        p.col.push_back(col++);
+    }
+    return p;
+}
+
+float LibraryPage::Placement::top(int r) const
+{
+    int heads_on = 0;
+    for (const auto &h : heads)
+        heads_on += h.first <= r;
+    return static_cast<float>(r) * kTilePitch + static_cast<float>(heads_on) * kHeadH;
+}
+
+int LibraryPage::Placement::first_of(int r) const
+{
+    for (std::size_t i = 0; i < row.size(); ++i)
+        if (row[i] == r)
+            return static_cast<int>(i);
+    return -1;
+}
+
+int LibraryPage::Placement::last_of(int r) const
+{
+    int last = -1;
+    for (std::size_t i = 0; i < row.size(); ++i)
+        if (row[i] == r)
+            last = static_cast<int>(i);
+    return last;
 }
 
 std::string LibraryPage::scope_name(App &app, const Scope &scope)
@@ -340,6 +411,7 @@ bool LibraryPage::update(App &app, const hui::InputFrame &input, float dt, hui::
 {
     mode_age_ += dt;
     shown_age_ += dt;
+    install_armed_ = std::max(0.0f, install_armed_ - dt);
     nudge_.update(dt, 9.0f);
     bool details = false;
     switch (mode_)
@@ -354,13 +426,28 @@ bool LibraryPage::update(App &app, const hui::InputFrame &input, float dt, hui::
         update_search(app, input, dt, feedback);
         break;
     }
-    // Scrolling.
-    const int tile_rows = std::max(1, static_cast<int>((1000.0f - kPlatformTop - 24.0f) / kTilePitch));
-    const int tile_row = tile_ / kTileCols;
-    if (tile_row < tiles_scroll_.target)
-        tiles_scroll_.target = static_cast<float>(tile_row);
-    if (tile_row > tiles_scroll_.target + static_cast<float>(tile_rows - 1))
-        tiles_scroll_.target = static_cast<float>(tile_row - tile_rows + 1);
+    // Scrolling: the focused tile's row in view, with its section's heading
+    // when the row is the section's first.
+    if (mode_ == kPlatforms)
+    {
+        const Placement at = place(tiles(app));
+        if (tile_ >= 0 && tile_ < static_cast<int>(at.row.size()))
+        {
+            const float view = std::max(1.0f, std::floor((1000.0f - kPlatformTop - 24.0f) / kTilePitch)) * kTilePitch;
+            const int r = at.row[static_cast<std::size_t>(tile_)];
+            float top = at.top(r);
+            const float bottom = top + kTileH;
+            for (const auto &h : at.heads)
+                if (h.first == r)
+                    top -= kHeadH;
+            if (r == 0)
+                top = 0.0f;
+            if (top < tiles_scroll_.target)
+                tiles_scroll_.target = top;
+            if (bottom > tiles_scroll_.target + view)
+                tiles_scroll_.target = bottom - view;
+        }
+    }
     tiles_scroll_.update(dt, 14.0f);
     if (mode_ == kGrid)
         grid_scroll_.target = static_cast<float>(std::max(0, index_ / grid_layout(grid(app)).cols - 1));
@@ -384,21 +471,32 @@ void LibraryPage::update_platforms(App &app, const hui::InputFrame &input, hui::
     const std::vector<Tile> all = tiles(app);
     const int ntiles = static_cast<int>(all.size());
     tile_ = std::clamp(tile_, 0, std::max(0, ntiles - 1));
+    const Placement at = place(all);
 
     // The covers of the tiles in view.
-    const int first_row = static_cast<int>(tiles_scroll_.value);
-    for (int i = first_row * kTileCols; i < std::min(ntiles, (first_row + 3) * kTileCols); ++i)
-        app.ensure(app.games(all[static_cast<std::size_t>(i)].scope, ""), 0, 0);
+    for (int i = 0; i < ntiles; ++i)
+    {
+        const float y = at.top(at.row[static_cast<std::size_t>(i)]) - tiles_scroll_.value;
+        if (y > -kTilePitch && y < 3 * kTilePitch)
+            app.ensure(app.games(all[static_cast<std::size_t>(i)].scope, ""), 0, 0);
+    }
 
     const bool repeat = input.nav_repeat;
+    const int row = ntiles ? at.row[static_cast<std::size_t>(tile_)] : 0;
+    const int col = ntiles ? at.col[static_cast<std::size_t>(tile_)] : 0;
+    // The tile on another row under (or over) this one: the same column, or
+    // that row's last when it's shorter.
+    auto on_row = [&](int r) {
+        const int first = at.first_of(r);
+        return first < 0 ? -1 : std::min(first + col, at.last_of(r));
+    };
     switch (input.nav)
     {
     case Direction::left:
     case Direction::right:
     {
-        const int col = tile_ % kTileCols;
         const int next = tile_ + (input.nav == Direction::right ? 1 : -1);
-        if ((input.nav == Direction::right ? col < kTileCols - 1 : col > 0) && next >= 0 && next < ntiles)
+        if (next >= 0 && next < ntiles && at.row[static_cast<std::size_t>(next)] == row)
         {
             tile_ = next;
             feedback.play(Cue::focus);
@@ -408,30 +506,39 @@ void LibraryPage::update_platforms(App &app, const hui::InputFrame &input, hui::
         break;
     }
     case Direction::up:
-        if (tile_ - kTileCols >= 0)
-        {
-            tile_ -= kTileCols;
-            feedback.play(Cue::focus);
-        }
-        else if (!repeat)
-            refuse(feedback);
-        break;
     case Direction::down:
-        if (tile_ + kTileCols < ntiles)
+    {
+        const int next = ntiles ? on_row(row + (input.nav == Direction::down ? 1 : -1)) : -1;
+        if (next >= 0)
         {
-            tile_ += kTileCols;
-            feedback.play(Cue::focus);
-        }
-        else if (tile_ / kTileCols < (ntiles - 1) / kTileCols)
-        {
-            tile_ = ntiles - 1;
+            tile_ = next;
             feedback.play(Cue::focus);
         }
         else if (!repeat)
             refuse(feedback);
         break;
+    }
     case Direction::none:
         break;
+    }
+    // L2 / R2: the section before or after (back to the start of this one
+    // first, when the focus is past it).
+    if (ntiles > 0 && !at.heads.empty() && (input.is_pressed(Action::jump_prev) || input.is_pressed(Action::jump_next)))
+    {
+        int here = 0; // this section, an index into at.heads
+        for (std::size_t h = 0; h < at.heads.size(); ++h)
+            if (at.heads[h].first <= row)
+                here = static_cast<int>(h);
+        int to = here + (input.is_pressed(Action::jump_next) ? 1 : -1);
+        if (input.is_pressed(Action::jump_prev) && tile_ != at.first_of(at.heads[static_cast<std::size_t>(here)].first))
+            to = here;
+        if (to >= 0 && to < static_cast<int>(at.heads.size()))
+        {
+            tile_ = at.first_of(at.heads[static_cast<std::size_t>(to)].first);
+            feedback.play(Cue::focus);
+        }
+        else
+            refuse(feedback);
     }
     if (input.is_pressed(Action::confirm) && ntiles > 0)
     {
@@ -443,6 +550,7 @@ void LibraryPage::update_platforms(App &app, const hui::InputFrame &input, hui::
         browse_ = browse_ == kByPlatform ? kByCollection : kByPlatform;
         tile_ = 0;
         tiles_scroll_.snap(0.0f);
+        tiles_scroll_.target = 0.0f;
         mode_age_ = 0.0f;
         feedback.play(Cue::tab);
         if (browse_ == kByCollection)
@@ -484,12 +592,20 @@ void LibraryPage::draw_platforms(hui::gfx::DrawList &list, const hui::ui::Fonts 
                  failed ? look.danger : look.muted);
     }
     const float grid_top = top + 24;
+    const Placement at = place(all);
     list.push_clip({0, grid_top - 20, 1920, 1080 - grid_top + 20});
+    for (const auto &[row, heading] : at.heads)
+    {
+        const float y = grid_top + at.top(row) - kHeadH - tiles_scroll_.value;
+        if (y > 1080 || y + kHeadH < grid_top - 20)
+            continue;
+        ui::text(list, fonts.semibold, heading, kMargin, y + 40, 22, look.muted);
+    }
     for (int i = 0; i < static_cast<int>(all.size()); ++i)
     {
         const Tile &p = all[static_cast<std::size_t>(i)];
-        const int row = i / kTileCols, col = i % kTileCols;
-        const float y = grid_top + (static_cast<float>(row) - tiles_scroll_.value) * kTilePitch;
+        const int row = at.row[static_cast<std::size_t>(i)], col = at.col[static_cast<std::size_t>(i)];
+        const float y = grid_top + at.top(row) - tiles_scroll_.value;
         if (y > 1080 || y + kTileH < grid_top - 20)
             continue;
         const bool on = i == tile_;
@@ -542,6 +658,7 @@ void LibraryPage::open_grid(App &app, const Scope &scope, const std::string &sea
 {
     grid_scope_ = scope;
     grid_search_ = search;
+    install_armed_ = 0.0f;
     mode_ = kGrid;
     mode_age_ = 0.0f;
     index_ = 0;
@@ -644,6 +761,27 @@ void LibraryPage::move_in_grid(App &app, const hui::InputFrame &input, hui::ui::
     {
         feedback.play(Cue::modal_open);
         open_search(grid_scope_);
+        return;
+    }
+    // A collection: Square, then Square again, downloads every game of it
+    // that isn't here yet. Not from a search in it: that's a few of its games.
+    if (input.is_pressed(Action::west) && grid_scope_.in_collection() && grid_search_.empty() && !on_letters_)
+    {
+        const Collection *c = app.collection_by_id(grid_scope_.collection_kind, grid_scope_.collection_id);
+        if (!c)
+            refuse(feedback);
+        else if (install_armed_ <= 0.0f)
+        {
+            install_armed_ = kInstallArmed;
+            feedback.play(Cue::toggle);
+        }
+        else
+        {
+            install_armed_ = 0.0f;
+            app.download_collection(*c);
+            feedback.play(Cue::launch);
+            feedback.rumble(0.7f, 0.18f);
+        }
         return;
     }
     if (on_letters_)
@@ -1045,13 +1183,25 @@ std::vector<hui::ui::Hint> LibraryPage::hints() const
     switch (mode_)
     {
     case kPlatforms:
+        if (browse_ == kByCollection)
+            return {{Button::l1, "Pages", Button::r1},
+                    {Button::l2, "Sections", Button::r2},
+                    {Button::square, "Platforms"},
+                    {Button::triangle, "Search"},
+                    {Button::cross, "Open"}};
         return {{Button::l1, "Pages", Button::r1},
-                {Button::square, browse_ == kByPlatform ? "Collections" : "Platforms"},
+                {Button::square, "Collections"},
                 {Button::triangle, "Search"},
                 {Button::cross, "Open"}};
     case kGrid:
         if (on_letters_)
             return {{Button::cross, "Jump"}, {Button::circle, "Back"}};
+        if (grid_scope_.in_collection() && grid_search_.empty())
+            return {{Button::l2, "Letters", Button::r2},
+                    {Button::square, install_armed_ > 0.0f ? "Press again to install all" : "Install all"},
+                    {Button::triangle, "Search"},
+                    {Button::cross, "Details"},
+                    {Button::circle, "Back"}};
         return {{Button::l2, "Letters", Button::r2},
                 {Button::triangle, "Search"},
                 {Button::cross, "Details"},

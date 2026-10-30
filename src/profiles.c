@@ -3,6 +3,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -376,6 +377,43 @@ const char *profiles_system_key(const cJSON *entry) {
     return cJSON_IsString(first) ? first->valuestring : "";
 }
 
+const char *profiles_save_family(const char *format) {
+    return !strcmp(format, "nds-dsv") ? "nds-raw" : format;
+}
+
+/* A profile's platform entries, with a twin for each of RetroArch's other
+ * cores per system ("cores") whose rule names a save format: RetroArch picks
+ * the core as a game starts, and a core reads its save before anyone can
+ * react, so each one's save is kept. Only cores keeping it in the entry's
+ * own core's format (or a form of it): the others would each need a slot. */
+static cJSON *with_core_twins(const cJSON *p) {
+    static const char *const keep[] = {"romm", "dir", "db", "rom_dir", "update_dir", "dlc_dir", "bios_dir", "sync"};
+    cJSON *plats = cJSON_Duplicate(cJSON_GetObjectItemCaseSensitive(p, "platforms"), 1);
+    if (!plats) plats = cJSON_CreateArray();
+    const int n = cJSON_GetArraySize(plats);
+    for (int i = 0; i < n; i++) {
+        const cJSON *e = cJSON_GetArrayItem(plats, i), *c;
+        cJSON_ArrayForEach(c, cJSON_GetObjectItemCaseSensitive(e, "cores")) {
+            const char *core = jget_str(c, "core_name", "");
+            if (!core[0] || str_ieq(core, jstr(e, NULL, "core_name", ""))) continue;
+            cJSON *t = cJSON_CreateObject();
+            for (size_t k = 0; k < sizeof keep / sizeof *keep; k++) {
+                const cJSON *v = cJSON_GetObjectItemCaseSensitive(e, keep[k]);
+                if (v) cJSON_AddItemToObject(t, keep[k], cJSON_Duplicate(v, 1));
+            }
+            cJSON_AddStringToObject(t, "emulator", jget_str(c, "emulator", core));
+            cJSON_AddStringToObject(t, "core_name", core);
+            cJSON_AddBoolToObject(t, "twin", 1);
+            detect_apply_core_rules(t, profiles_system_key(e), core, 0);
+            /* One save between them: the same family as the entry's own core. */
+            const char *mine = jstr(e, NULL, "save_format", ""), *its = jstr(t, NULL, "save_format", "");
+            if (mine[0] && its[0] && !strcmp(profiles_save_family(mine), profiles_save_family(its))) cJSON_AddItemToArray(plats, t);
+            else cJSON_Delete(t);
+        }
+    }
+    return plats;
+}
+
 /* Whether a profile's list ("exclude", "extra") names a system. */
 static int profile_lists(const cJSON *profile, const char *list, const char *key) {
     const cJSON *x;
@@ -459,7 +497,7 @@ static void mount_main_saves(const profile_map *m, profile_map *x) {
 }
 
 static void mount_main_games(profile_map *maps, int n, profile_map *x) {
-    if (!x->extra || !x->mount_games || !plat_info()->can_mount) return;
+    if (!x->extra || x->twin || !x->mount_games || !plat_info()->can_mount) return;
     char sys[64], title[16], into[256];
     str_copy(sys, sizeof sys, x->romm_slugs);
     sys[strcspn(sys, ",")] = 0;
@@ -491,11 +529,22 @@ static void mount_main_games(profile_map *maps, int n, profile_map *x) {
         }
     }
     for (int k = 0; k < n; k++)
-        if (&maps[k] != m && !strcmp(maps[k].rom_dir, m->rom_dir) && strcmp(maps[k].profile_id, m->profile_id) == 0) {
+        if (&maps[k] != m && !maps[k].twin && !strcmp(maps[k].rom_dir, m->rom_dir) && strcmp(maps[k].profile_id, m->profile_id) == 0) {
             snprintf(x->mount_note, sizeof x->mount_note, "%s keeps other systems' games in the same folder",
                      m->profile_name);
             return;
         }
+    /* The extra's own folder holding its other systems' games too (Beetle PCE
+     * PS5: HuCards, CDs and SuperGrafx in one): one mount there would hide
+     * the others' games, and each system can't have its own. */
+    for (int k = 0; k < n; k++) {
+        const char *theirs = maps[k].own_rom_dir[0] ? maps[k].own_rom_dir : maps[k].rom_dir;
+        if (&maps[k] != x && !maps[k].twin && !strcmp(maps[k].profile_id, x->profile_id) && !strcmp(theirs, x->rom_dir)) {
+            snprintf(x->mount_note, sizeof x->mount_note, "%s keeps other systems' games in the same folder",
+                     x->profile_name);
+            return;
+        }
+    }
     /* With our mount on it (the app runs), what's there is the main one's. */
     DIR *d = plat_is_mount(x->rom_dir) ? NULL : opendir(x->rom_dir);
     struct dirent *de;
@@ -537,7 +586,7 @@ static void card_methods(profile_map *maps, int cnt) {
             char sk[64];
             str_copy(sk, sizeof sk, maps[k].romm_slugs);
             sk[strcspn(sk, ",")] = 0;
-            if (!maps[k].extra && maps[k].cards_mode[0] && !strcmp(sk, sys)) {
+            if (!maps[k].extra && !maps[k].twin && maps[k].cards_mode[0] && !strcmp(sk, sys)) {
                 main = &maps[k];
                 break;
             }
@@ -599,7 +648,7 @@ static profile_map *maps_grow(profile_map *old, size_t used, size_t count) {
 }
 
 /* A Switch emulator's user whose saves sync: the one the profile names
- * ("switch_user"), else its first (ProsperoEden, and PS5CEMU-HAR's Eden, keep
+ * ("switch_user"), else its first (ProsperoEden, and PS5-ECAM's Eden, keep
  * profiles.first in their config: "switch_users"). That user's saves are left
  * alone when the emulator syncs them itself ("switch_sync": ProsperoEden's
  * save-sync.json gives the user a server). Never another user's. */
@@ -661,6 +710,136 @@ static void x360_user_for(profile_map *m, const cJSON *p, const cJSON *e, const 
     }
 }
 
+/* Where an emulator (or one of its systems) keeps its own files: the folder
+ * of "user_dir" with "user_dir_has" in it, else the first that exists, else
+ * the last. PS5-ECAM 5.1 marks each system it moved out of /data/ps5cemu
+ * (when the user says yes, and not for one that couldn't move), and leaves
+ * empty folders behind for others. 1 when the mark picked it. */
+static int pick_user_dir(char *out, size_t n, const cJSON *o, const char *root) {
+    const char *uvars[] = {"root", root, NULL};
+    const char *has = jstr(o, NULL, "user_dir_has", "");
+    char list[PATH_MAX_LEN], probe[PATH_MAX_LEN], there[PATH_MAX_LEN] = "", *save = NULL;
+    str_template(list, sizeof list, jstr(o, NULL, "user_dir", "{root}"), uvars);
+    out[0] = 0;
+    for (char *t = strtok_r(list, ",", &save); t; t = strtok_r(NULL, ",", &save)) {
+        str_copy(out, n, t);
+        if (has[0]) {
+            path_join(probe, sizeof probe, t, has);
+            if (dir_exists(probe) || file_size(probe) >= 0) return 1;
+        }
+        if (!there[0] && dir_exists(t)) str_copy(there, sizeof there, t);
+    }
+    if (there[0]) str_copy(out, n, there);
+    return 0;
+}
+
+/* The same file or folder under two names (a "//", a mount showing one in
+ * the other): never a copy of itself to delete. */
+static int same_node(const char *a, const char *b) {
+    struct stat x, y;
+    return stat(a, &x) == 0 && stat(b, &y) == 0 && x.st_dev == y.st_dev && x.st_ino == y.st_ino;
+}
+
+/* Each file of old that now has the same of goes, then the folders left
+ * empty. Anything only old has stays, and counts in kept. */
+static void clear_left_in(const char *old, const char *now, int *gone, int64_t *bytes, int *kept) {
+    DIR *d = opendir(old);
+    if (!d) return;
+    struct dirent *de;
+    while ((de = readdir(d))) {
+        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+        char a[PATH_MAX_LEN], b[PATH_MAX_LEN], ma[33], mb[33];
+        path_join(a, sizeof a, old, de->d_name);
+        path_join(b, sizeof b, now, de->d_name);
+        if (same_node(a, b)) {
+            (*kept)++;
+            continue;
+        }
+        if (dir_exists(a)) {
+            if (plat_is_mount(a)) (*kept)++;
+            else {
+                clear_left_in(a, b, gone, bytes, kept);
+                rmdir(a); /* (not when something stayed) */
+            }
+            continue;
+        }
+        const int64_t size = file_size(a);
+        if (size >= 0 && size == file_size(b) && md5_file_hex(a, ma) == 0 && md5_file_hex(b, mb) == 0 && !strcmp(ma, mb) &&
+            unlink(a) == 0) {
+            (*gone)++;
+            *bytes += size;
+        } else {
+            (*kept)++;
+        }
+    }
+    closedir(d);
+}
+
+static int path_under(const char *path, const char *dir) {
+    const size_t n = strlen(dir);
+    return !strncmp(path, dir, n) && path[n] == '/';
+}
+
+void profiles_follow_moves(const cJSON *profiles) {
+    const cJSON *p, *e;
+    cJSON_ArrayForEach(p, profiles) {
+        if (!jbool(p, NULL, "enabled", 1)) continue;
+        const char *root = jstr(p, NULL, "root", ""), *name = jstr(p, NULL, "name", "");
+        cJSON_ArrayForEach(e, cJSON_GetObjectItemCaseSensitive(p, "platforms")) {
+            if (!cJSON_IsString(cJSON_GetObjectItemCaseSensitive(e, "user_dir"))) continue;
+            char now[PATH_MAX_LEN], list[PATH_MAX_LEN], *save = NULL;
+            /* Only once the emulator's mark says the system moved: a move
+             * put off, undone or failed leaves its folders where they were. */
+            if (!pick_user_dir(now, sizeof now, e, root)) continue;
+            const char *uvars[] = {"root", root, NULL};
+            str_template(list, sizeof list, jstr(e, NULL, "user_dir", ""), uvars);
+            for (char *t = strtok_r(list, ",", &save); t; t = strtok_r(NULL, ",", &save)) {
+                if (!strcmp(t, now) || path_under(t, now) || path_under(now, t) || same_node(t, now)) continue;
+                /* Its games', saves' and states' records go along, or they'd
+                 * look new to RomM: gone through the emulator's own move too.
+                 * By the system's own folders, so a move out of the
+                 * emulator's root (Wii U's) takes only that system's. */
+                int moved = 0;
+                static const char *const keys[] = {"rom_dir", "save_dir", "state_dir", "bundle_dirs"};
+                for (size_t k = 0; k < sizeof keys / sizeof *keys; k++) {
+                    const char *tpl = jstr(e, NULL, keys[k], jstr(p, NULL, keys[k], ""));
+                    if (!strstr(tpl, "{user_dir}")) continue;
+                    char from[PATH_MAX_LEN], to[PATH_MAX_LEN];
+                    const char *fv[] = {"root", root, "user_dir", t, "platform", jstr(e, NULL, "dir", ""), NULL};
+                    const char *tv[] = {"root", root, "user_dir", now, "platform", jstr(e, NULL, "dir", ""), NULL};
+                    str_template(from, sizeof from, tpl, fv);
+                    str_template(to, sizeof to, tpl, tv);
+                    from[strcspn(from, "{")] = to[strcspn(to, "{")] = 0; /* up to {switch_user}... */
+                    char *fs = strrchr(from, '/'), *ts = strrchr(to, '/');
+                    if (strchr(tpl, '{') != strstr(tpl, "{user_dir}") || !fs || !ts) continue;
+                    if (strstr(tpl + strlen("{user_dir}"), "{")) *fs = *ts = 0; /* the part before a variable */
+                    if (!from[0] || !strcmp(from, to)) continue;
+                    state_lock();
+                    moved += state_rekey_moved(from, to);
+                    state_unlock();
+                }
+                if (moved) {
+                    state_lock();
+                    state_save();
+                    state_unlock();
+                    LOGI("%s: %d record%s of %s follow it to %s", name, moved, moved == 1 ? "" : "s", t, now);
+                }
+                /* The emulator's own folder (its settings stay there) is never cleared. */
+                if (!strcmp(t, root) || same_node(t, root)) continue;
+                if (!dir_exists(t) || plat_is_mount(t)) continue;
+                int gone = 0, kept = 0;
+                int64_t bytes = 0;
+                clear_left_in(t, now, &gone, &bytes, &kept);
+                if (rmdir(t) == 0)
+                    LOGI("removed %s: %s keeps it in %s now (%d copies, %lld MB)", t, name, now, gone, (long long)(bytes >> 20));
+                else if (kept)
+                    LOGW("%s keeps %s in %s now; %d file%s only in %s stayed", name, profiles_system_key(e), now, kept,
+                         kept == 1 ? "" : "s", t);
+            }
+        }
+    }
+}
+
 int profiles_expand(const cJSON *profiles, profile_map **out) {
     int cap = 0, cnt = 0;
     profile_map *maps = NULL;
@@ -669,18 +848,7 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
         if (!jbool(p, NULL, "enabled", 1)) continue;
         char root[PATH_MAX_LEN], user_dir[PATH_MAX_LEN];
         str_copy(root, sizeof root, jstr(p, NULL, "root", ""));
-        {
-            /* The first folder that exists (else the last): where the emulator
-             * keeps its own files. */
-            const char *uvars[] = {"root", root, NULL};
-            char list[PATH_MAX_LEN], *save = NULL;
-            str_template(list, sizeof list, jstr(p, NULL, "user_dir", "{root}"), uvars);
-            user_dir[0] = 0;
-            for (char *t = strtok_r(list, ",", &save); t; t = strtok_r(NULL, ",", &save)) {
-                str_copy(user_dir, sizeof user_dir, t);
-                if (dir_exists(t)) break;
-            }
-        }
+        pick_user_dir(user_dir, sizeof user_dir, p, root);
 
         char ra_save[PATH_MAX_LEN] = "", ra_state[PATH_MAX_LEN] = "", ra_sys[PATH_MAX_LEN] = "";
         int ra_in_content[2] = {0, 0}, ra_by_content[2] = {0, 0}, ra_by_core[2] = {0, 0};
@@ -705,7 +873,7 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
             }
         }
 
-        const cJSON *plats = cJSON_GetObjectItemCaseSensitive(p, "platforms");
+        cJSON *plats = with_core_twins(p);
         const cJSON *e;
         cJSON_ArrayForEach(e, plats) {
             if (profiles_excludes(p, profiles_system_key(e))) continue; /* another emulator plays it */
@@ -731,6 +899,7 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
                 if (!grown) {
                     LOGE("no memory for %d emulator platforms (largest free block %d MB)", want, mem_largest_mb());
                     profiles_free(maps);
+                    cJSON_Delete(plats);
                     *out = NULL;
                     return 0;
                 }
@@ -751,7 +920,11 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
             if (comma) *comma = 0;
             str_copy(m->platform_dir, sizeof m->platform_dir, jstr(p, e, "dir", first));
 
-            const char *vars[] = {"root", root, "user_dir", user_dir, "platform", m->platform_dir, "data",
+            /* A system kept in a folder of its own (PS5-ECAM's: /data/melonds). */
+            char sys_dir[PATH_MAX_LEN];
+            if (cJSON_IsString(cJSON_GetObjectItemCaseSensitive(e, "user_dir"))) pick_user_dir(sys_dir, sizeof sys_dir, e, root);
+            else str_copy(sys_dir, sizeof sys_dir, user_dir);
+            const char *vars[] = {"root", root, "user_dir", sys_dir, "platform", m->platform_dir, "data",
                                   plat_data_dir(), "rom_dir", NULL, NULL};
             str_template(m->rom_dir, sizeof m->rom_dir, jstr(p, e, "rom_dir", "{root}/roms/{platform}"), vars);
             vars[9] = m->rom_dir;
@@ -760,6 +933,8 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
             str_template(m->save_dir, sizeof m->save_dir, jstr(p, e, "save_dir", "{rom_dir}"), vars);
             str_template(m->state_dir, sizeof m->state_dir, jstr(p, e, "state_dir", "{rom_dir}"), vars);
             str_template(m->bios_dir, sizeof m->bios_dir, jstr(p, e, "bios_dir", "{root}/bios"), vars);
+            str_template(m->n64_split_dir, sizeof m->n64_split_dir, jstr(p, e, "n64_split_dir", ""), vars);
+            str_template(m->n64_ini, sizeof m->n64_ini, jstr(p, e, "n64_ini", ""), vars);
             /* The emulator's config wins unless the platform entry sets a folder. */
             if (ra_save[0] && !cJSON_GetObjectItemCaseSensitive(e, "save_dir"))
                 str_copy(m->save_dir, sizeof m->save_dir, ra_save);
@@ -781,7 +956,9 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
             }
             str_copy(m->core_name, sizeof m->core_name, jstr(p, e, "core_name", ""));
             str_copy(m->save_layout, sizeof m->save_layout, card_str(p, e, "save_layout", ""));
-            str_copy(m->bundle_dirs, sizeof m->bundle_dirs, jstr(p, e, "bundle_dirs", ""));
+            /* The rest of its variables ({switch_user}, {save_path}...) are filled in at sync. */
+            const char *bvars[] = {"user_dir", sys_dir, NULL};
+            str_template(m->bundle_dirs, sizeof m->bundle_dirs, jstr(p, e, "bundle_dirs", ""), bvars);
 
             str_copy(m->save_exts, sizeof m->save_exts, jstr(p, e, "save_exts", ".srm,.sav"));
             str_copy(m->state_exts, sizeof m->state_exts, jstr(p, e, "state_exts", ".state*"));
@@ -797,6 +974,7 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
             str_copy(m->state_cores, sizeof m->state_cores, state_str(p, e, "state_cores", m->emulator));
             str_copy(m->state_format, sizeof m->state_format, state_str(p, e, "state_format", "retroarch"));
             str_copy(m->state_slot0, sizeof m->state_slot0, state_str(p, e, "state_slot0", ".state"));
+            str_copy(m->resume_states, sizeof m->resume_states, state_str(p, e, "resume_states", ""));
             const cJSON *nbc = state_setting(p, e, "save_name_by_core"), *nv;
             size_t no = 0;
             cJSON_ArrayForEach(nv, nbc) {
@@ -833,7 +1011,7 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
             }
             /* Shared cards can sit in the BIOS folder RetroArch's config names
              * (Flycast's <system>/dc): {bios}. */
-            const char *cvars[] = {"root", root, "user_dir", user_dir, "bios", m->bios_dir, "data", plat_data_dir(),
+            const char *cvars[] = {"root", root, "user_dir", sys_dir, "bios", m->bios_dir, "data", plat_data_dir(),
                                    "card_dir", NULL, NULL};
             const cJSON *pc = card_setting(p, e, "pcsx2_cards");
             if (cJSON_IsObject(pc)) {
@@ -852,6 +1030,7 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
             str_template(m->game_ids, sizeof m->game_ids, jstr(p, e, "game_ids", ""), vars);
             str_copy(m->disc_id, sizeof m->disc_id, jstr(p, e, "disc_id", ""));
             m->extra = profile_lists(p, "extra", profiles_system_key(e));
+            m->twin = jbool(e, NULL, "twin", 0);
             /* How it reads its games was checked on the console: the preset's
              * call, as its cards are, never a saved copy's. */
             const cJSON *mg = card_setting(p, e, "mount_games");
@@ -922,9 +1101,12 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
             if (m->sync_off) str_copy(m->sync_note, sizeof m->sync_note, "Save sync is off for this platform.");
             cnt++;
         }
+        cJSON_Delete(plats);
     }
     /* An extra shares the main emulator's save only when both keep it in the
-     * same known format; otherwise it syncs under a slot of its own. */
+     * same known format (a PS1 card's "save_format", or one save layout: PS2
+     * cards, Switch, PSP... folders); otherwise it syncs under a slot of its
+     * own. GameCube's layout shares through its own mount (mount_main_saves). */
     for (int i = 0; i < cnt; i++) {
         if (!maps[i].extra) continue;
         maps[i].own_slot = 1;
@@ -937,12 +1119,23 @@ int profiles_expand(const cJSON *profiles, profile_map **out) {
             char sys_k[64];
             str_copy(sys_k, sizeof sys_k, maps[k].romm_slugs);
             sys_k[strcspn(sys_k, ",")] = 0;
-            if (!maps[k].extra && !strcmp(sys_k, sys_i) && maps[i].save_format[0] &&
-                !strcmp(maps[k].save_format, maps[i].save_format))
-                maps[i].own_slot = 0;
+            const int format = maps[i].save_format[0] && !strcmp(profiles_save_family(maps[k].save_format), profiles_save_family(maps[i].save_format));
+            const int layout = maps[i].save_layout[0] && strcmp(maps[i].save_layout, "gci") != 0 &&
+                               strcmp(maps[i].save_layout, "wii") != 0 && !strcmp(maps[k].save_layout, maps[i].save_layout);
+            if (!maps[k].extra && !strcmp(sys_k, sys_i) && (format || layout)) maps[i].own_slot = 0;
         }
     }
     for (int i = 0; i < cnt; i++) mount_main_games(maps, cnt, &maps[i]);
+    /* A core twin plays its entry's games, wherever the mount put them. */
+    for (int i = 0; i < cnt; i++) {
+        if (!maps[i].twin) continue;
+        for (int k = 0; k < cnt; k++)
+            if (!maps[k].twin && !strcmp(maps[k].profile_id, maps[i].profile_id) && !strcmp(maps[k].romm_slugs, maps[i].romm_slugs)) {
+                str_copy(maps[i].rom_dir, sizeof maps[i].rom_dir, maps[k].rom_dir);
+                str_copy(maps[i].own_rom_dir, sizeof maps[i].own_rom_dir, maps[k].own_rom_dir);
+                break;
+            }
+    }
     card_methods(maps, cnt);
     *out = maps;
     return cnt;
@@ -983,6 +1176,6 @@ const profile_map *profile_find_for_platform(const profile_map *maps, int n, con
     /* The main emulator first; an extra only when the system has no main one. */
     for (int pass = 0; pass < 2; pass++)
         for (int i = 0; i < n; i++)
-            if (maps[i].extra == pass && profile_map_handles(&maps[i], slug, fs_slug)) return &maps[i];
+            if (maps[i].extra == pass && !maps[i].twin && profile_map_handles(&maps[i], slug, fs_slug)) return &maps[i];
     return NULL;
 }

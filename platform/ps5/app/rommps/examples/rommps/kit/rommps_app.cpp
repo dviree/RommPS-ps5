@@ -876,11 +876,12 @@ void App::refresh_collections()
     if (collections_busy_)
         return;
     collections_busy_ = true;
-    // Every kind the payload offers, already in order: the user's own, then
-    // other users' public ones.
+    // Every kind the payload offers, already in order: by kind and type, in
+    // each the user's own, then other users' public ones.
     api_.get("/api/collections", [this](const Response &r) {
         collections_busy_ = false;
         collections_loaded_ = true;
+        collections_need_pair_ = r.status == 403;
         if (!r.ok())
         {
             collections_error_ = r.message();
@@ -898,6 +899,7 @@ void App::refresh_collections()
             coll.name = plain(str(c, "name"));
             coll.description = plain(str(c, "description"));
             coll.owner = plain(str(c, "owner"));
+            coll.type = str(c, "type");
             coll.rom_count = static_cast<int>(num(c, "rom_count"));
             if (coll.rom_count > 0 && !coll.kind.empty() && !coll.id.empty())
                 collections_.push_back(std::move(coll));
@@ -1089,7 +1091,6 @@ const Details &App::details(int rom_id)
         out.completion = static_cast<int>(num(j.get(), "completion"));
         out.my_rating = static_cast<int>(num(j.get(), "my_rating"));
         out.archived = plain(str(j.get(), "archived"));
-        out.saves_off = plain(str(j.get(), "saves_off"));
         out.updates = static_cast<int>(num(j.get(), "updates"));
         out.dlc = static_cast<int>(num(j.get(), "dlc"));
         out.title_id = str(j.get(), "title_id");
@@ -1324,6 +1325,27 @@ void App::download(int rom_id, const std::string &name, int disc)
     api_.post("/api/download", body, [this](const Response &r) {
         if (!r.ok())
             say("Couldn't start the download: " + r.message());
+        refresh_queue();
+    });
+}
+
+void App::download_collection(const Collection &c)
+{
+    std::unique_ptr<cJSON, void (*)(cJSON *)> j(cJSON_CreateObject(), cJSON_Delete);
+    cJSON_AddStringToObject(j.get(), "collection_kind", c.kind.c_str());
+    cJSON_AddStringToObject(j.get(), "collection_id", c.id.c_str());
+    char *text = cJSON_PrintUnformatted(j.get());
+    const std::string body = text ? text : "{}";
+    cJSON_free(text);
+    api_.post("/api/download", body, [this, name = c.name](const Response &r) {
+        std::unique_ptr<cJSON, void (*)(cJSON *)> res(r.ok() ? r.json() : nullptr, cJSON_Delete);
+        const int queued = static_cast<int>(num(res.get(), "queued"));
+        if (!r.ok())
+            say("Couldn't download " + name + ": " + r.message());
+        else if (queued == 0)
+            say("Everything in " + name + " that can play here is on this console");
+        else
+            say("Downloading " + std::to_string(queued) + (queued == 1 ? " game from " : " games from ") + name);
         refresh_queue();
     });
 }

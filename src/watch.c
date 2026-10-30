@@ -207,14 +207,32 @@ static void *watch_thread(void *arg) {
             sleep(POLL_SEC);
             continue;
         }
+        /* A folder new to the list (an emulator set up, a sync that found
+         * another save folder): what's in it is where things stand, not a
+         * change. */
+        char (*fresh)[1024] = NULL;
+        int nfresh = 0;
         if (!dirs || now - dirs_loaded >= RELOAD_DIRS_SEC) {
-            free(dirs);
+            watch_dir *had = dirs;
+            const int nhad = ndirs;
             ndirs = load_dirs(&dirs);
             dirs_loaded = now;
+            fresh = calloc((size_t)(ndirs > 0 ? ndirs : 1), sizeof *fresh);
+            for (int i = 0; fresh && i < ndirs; i++) {
+                int known = 0;
+                for (int k = 0; k < nhad && !known; k++) known = !strcmp(had[k].dir, dirs[i].dir);
+                if (!known && had) str_copy(fresh[nfresh++], sizeof fresh[0], dirs[i].dir);
+            }
+            free(had);
         }
 
         for (int i = 0; i < g_nfiles; i++) g_files[i].seen = 0;
-        for (int i = 0; i < ndirs; i++) scan(dirs[i].dir, dirs[i].exts, 0, baseline, now);
+        for (int i = 0; i < ndirs; i++) {
+            int is_fresh = 0;
+            for (int k = 0; k < nfresh && !is_fresh; k++) is_fresh = !strcmp(fresh[k], dirs[i].dir);
+            scan(dirs[i].dir, dirs[i].exts, 0, baseline || is_fresh, now);
+        }
+        free(fresh);
         baseline = 0;
 
         for (int i = 0; i < g_nfiles;) {

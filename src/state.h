@@ -21,6 +21,12 @@ cJSON *state_section(const char *name);           /* object, created on demand *
 cJSON *state_entry(const char *section, const char *key); /* NULL if missing */
 cJSON *state_entry_ensure(const char *section, const char *key);
 void state_entry_remove(const char *section, const char *key);
+/* Records under from (games, saves, states, conflicts) follow it to to: a
+ * folder that moved. How many moved; take state_lock around it. */
+int state_rekey(const char *from, const char *to);
+/* The same, for an emulator that moved its own folder: a record already at
+ * the new name, or one whose file stayed at the old name, isn't moved. */
+int state_rekey_moved(const char *from, const char *to);
 
 /* Get and set values on an entry. */
 void jset_num(cJSON *o, const char *k, double v);

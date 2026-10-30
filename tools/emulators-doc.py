@@ -57,6 +57,14 @@ def section(console, path):
         if e.get("note"):
             lines.append(e["note"])
             lines.append("")
+        # {user_dir}: the emulator's, or a system's own (PS5-ECAM keeps one folder per system)
+        homes = [("", profile)] if "user_dir" in profile else []
+        homes += [(" for " + ", ".join(p["romm"]), p) for p in profile.get("platforms", []) if "user_dir" in p]
+        if homes:
+            lines.append("; ".join("`{user_dir}`%s: %s, the first %s" % (
+                who, ", else ".join(code(x) for x in o["user_dir"].split(",")),
+                "with %s in it, else the first that's there" % code(o["user_dir_has"]) if o.get("user_dir_has") else "that's there") for who, o in homes) + ".")
+            lines.append("")
         lines.append("| System | Games | Saves | Save files | Saved as | States | State files | Memory cards |")
         lines.append("|---|---|---|---|---|---|---|---|")
         for p in profile.get("platforms", []):
@@ -70,8 +78,9 @@ def section(console, path):
                 saves = code(pc.get("dir", "")) if sync else "not synced"
                 files = "its own card, %s, named in %s, synced as one 8 MB card of the game's saves" % (
                     code(pc.get("own_card", "")), code(pc.get("game_ini", "")))
-            stems = [x for x in c.get("save_stems", "").split(",") if x and x + "{ext}" != c["save_name"]]
-            name = "" if layout or not sync else code(c["save_name"]) + (" (also %s)" % ", ".join(code(x) for x in stems) if stems else "")
+            names = c["save_name"].split(",")
+            stems = [x for x in c.get("save_stems", "").split(",") if x and x + "{ext}" not in names]
+            name = "" if layout or not sync else ", else ".join(code(x) for x in names) + (" (also %s)" % ", ".join(code(x) for x in stems) if stems else "")
             states = code(c["state_dir"]) if sync and c.get("state_exts", ".state*") else "not synced"
             lines.append("| %s | %s | %s | %s | %s | %s | %s | %s |" % (
                 ", ".join(p["romm"]), code(c["rom_dir"]), saves, files if sync else "", name, states,

@@ -174,6 +174,24 @@ class RommPS final : public app::Concept
             update_move(input, dt, feedback);
             return;
         }
+        // Collections, new in 1.4.0, need a pairing that asked for them: said
+        // once a launch while RomM won't show them.
+        if (ready && !collections_checked_)
+        {
+            collections_checked_ = true;
+            app_.want_collections();
+        }
+        if (ready && !pair_asked_ && app_.collections_need_pair() && !calling && !setup_.editing())
+        {
+            pair_asked_ = pair_open_ = true;
+            pair_list_.set_focus(0);
+            feedback.play(audio::Cue::modal_open);
+        }
+        if (pair_open_)
+        {
+            update_pair(input, dt, feedback);
+            return;
+        }
         // Settings' Emulators opens that setup step on its own.
         if (settings_.take_emulators_request())
             setup_.edit_emulators();
@@ -310,11 +328,14 @@ class RommPS final : public app::Concept
         }
         if (move_open_)
             draw_move(frame.overlay);
+        if (pair_open_)
+            draw_pair(frame.overlay);
         // The hints first: the toast keeps clear of them.
         hints_left_ = 1920.0f;
-        if (!move_open_)
+        const bool asking = move_open_ || pair_open_;
+        if (!asking)
             draw_hints(back > 0.5f ? frame.overlay : frame.scene);
-        draw_toast(back > 0.5f || move_open_ ? frame.overlay : frame.scene);
+        draw_toast(back > 0.5f || asking ? frame.overlay : frame.scene);
     }
 
   private:
@@ -985,6 +1006,51 @@ class RommPS final : public app::Concept
                         clock_);
     }
 
+    // ---------------------------------------------------------------- collections need pairing again
+
+    static std::vector<rommps::Row> pair_rows()
+    {
+        return {{rommps::RowKind::action, "Open Settings"}, {rommps::RowKind::action, "Not now"}};
+    }
+
+    void update_pair(const InputFrame &input, float dt, app::Feedback &feedback)
+    {
+        const std::vector<rommps::Row> rows = pair_rows();
+        const rommps::RowEvent pick = pair_list_.handle(rows, input, feedback);
+        pair_list_.update(dt, static_cast<int>(rows.size()), 2 * rommps::RowList::kRowHeight);
+        if (input.is_pressed(Action::back) || pick.row == 1)
+        {
+            feedback.play(audio::Cue::back);
+            pair_open_ = false;
+        }
+        else if (pick.row == 0)
+        {
+            feedback.play(audio::Cue::select);
+            pair_open_ = false;
+            tab_ = kSettings;
+            tab_age_ = 0.0f;
+            settings_.enter(app_);
+        }
+    }
+
+    void draw_pair(gfx::DrawList &list) const
+    {
+        const rommps::Look &L = look();
+        list.rounded_rect({0, 0, gfx::kVirtualWidth, gfx::kVirtualHeight}, 0, Color::rgb(0x000000, 0.55f));
+        const Rect box{460, 280, 1000, 520};
+        Color solid = L.page; // nothing shows through the panel
+        solid.a = 1.0f;
+        list.rounded_rect(box, L.radius, solid);
+        draw_panel(list, box);
+        ui::text(list, context_.fonts.display, "Collections are here", box.x + 48, box.y + 84, 40, L.panel_text);
+        ui::paragraph(list, context_.fonts.regular,
+                      "RomM's collections now show in the Library. To see them, pair with RomM again: in Settings, "
+                      "Unpair from RomM, then pair. Your games and saves stay.",
+                      box.x + 48, box.y + 146, 26, box.w - 96, 36, L.muted, 4);
+        pair_list_.draw(list, context_.fonts, L, pair_rows(), {box.x + 16, box.y + 300, box.w - 32, 2 * rommps::RowList::kRowHeight},
+                        clock_);
+    }
+
     // The transfer tab: what's queued and running.
     void update_queue(const InputFrame &input, float dt, app::Feedback &feedback)
     {
@@ -1562,8 +1628,6 @@ class RommPS final : public app::Concept
             facts.push_back("Main story ~" + std::to_string(static_cast<int>(info.main_story_s / 3600.0 + 0.5)) + " h");
         if (!info.players.empty())
             facts.push_back(info.players + (info.players == "1" ? " player" : " players"));
-        if (!info.saves_off.empty())
-            facts.push_back(info.saves_off);
         std::string line;
         for (const std::string &f : facts)
             line += (line.empty() ? "" : "  \xC2\xB7  ") + f;
@@ -1800,6 +1864,10 @@ class RommPS final : public app::Concept
     bool move_asked_ = false; // this launch
     bool move_open_ = false;  // asking whether to move games to RetroArch 2.0's folders
     rommps::RowList move_list_;
+    bool collections_checked_ = false; // asked RomM for them, this launch
+    bool pair_asked_ = false;          // this launch
+    bool pair_open_ = false;           // saying collections need pairing again
+    rommps::RowList pair_list_;
 };
 
 } // namespace

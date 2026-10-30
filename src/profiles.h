@@ -47,7 +47,9 @@
  * option has that value. Paths can use {root}, {platform}, {rom_dir} and {data},
  * and {user_dir}: the first folder of "user_dir" that exists (else its last),
  * for an emulator that keeps its files elsewhere when a folder is there
- * (Crux2: "/data/crux2,{root}").
+ * (Crux2: "/data/crux2,{root}"). With "user_dir_has", the one with that in it
+ * comes first (PS5-ECAM's ".ecam-separated-v2", in each system folder it moved
+ * to). A platform entry's own "user_dir" is that system's.
  *
  * A system is named by the first slug of its platform entry ("psx", "genesis";
  * the first slugs of detect.c's DB_MAP). When several emulators play one, the
@@ -103,6 +105,10 @@ typedef struct {
     char save_stems[256];
     char state_stems[256];
     char state_name[128];
+    /* The states an emulator resumes a game from on its own when it starts
+     * (quick resume), as names in the state folder: set aside when the game's
+     * save is replaced, so the save that came in is the one the game loads. */
+    char resume_states[256];
     /* Save states from elsewhere come down only when the emulator can load
      * them: state_cores lists the cores whose states it takes (RomM
      * "emulator" names, default the platform's emulator). An emulator that
@@ -135,6 +141,15 @@ typedef struct {
      * share its save on RomM; the others keep their own slot (own_slot). */
     int extra;
     int own_slot;
+    /* Another RetroArch core for a system its platform entry already plays
+     * ("cores"): only its saves, in that core's folder and format. Never a
+     * target for games, mounts or copies. */
+    int twin;
+    /* Mupen64Plus standalone's own N64 save files ("n64_split_dir"), and its
+     * game database ("n64_ini"), for the names it gives them: the save the
+     * sync sees is the .srm RommPS keeps for it in save_dir (n64.h). */
+    char n64_split_dir[256];
+    char n64_ini[256];
     /* Lists each game as a folder of its own ("game_folders": PS5X360): a
      * download of one file goes in <rom_dir>/<its name>/. */
     int game_folders;
@@ -238,6 +253,9 @@ cJSON *profiles_default(void);
 /* The system a platform entry plays (its first RomM slug), and whether a
  * profile hands that system to another emulator ("exclude"). */
 const char *profiles_system_key(const cJSON *entry);
+/* The save format a "save_format" is a form of ("nds-dsv": DeSmuME's
+ * footer on an "nds-raw" save): those share one save. */
+const char *profiles_save_family(const char *format);
 int profiles_excludes(const cJSON *profile, const char *key);
 
 /* One entry per enabled profile and platform, with paths resolved.
@@ -245,6 +263,10 @@ int profiles_excludes(const cJSON *profile, const char *key);
 int profiles_expand(const cJSON *profiles, profile_map **out);
 /* Frees what profiles_expand made. */
 void profiles_free(profile_map *maps);
+/* A system its emulator marked as moved ("user_dir_has"): the records of its
+ * other folders follow to the one in use, and those folders lose the copies
+ * of what that one has, and go once empty. */
+void profiles_follow_moves(const cJSON *profiles);
 
 /* The map's "firmware" rules (see firmware.h), from its platform entry or
  * profile, else the built-in catalog's; NULL if none. A custom profile with

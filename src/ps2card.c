@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include "sigil.h"
+#include "util.h"
 #include "card.h"     /* third_party/sigil/src: sigil_card_sony_owner */
 #include "card_ps2.h" /* sigil_ps2_card_format */
 
@@ -251,14 +252,78 @@ int ps2card_folder_is_game(const char *name, const char *serial) {
     return owner[0] && !strcmp(owner, serial);
 }
 
+/* Whose saves each card file holds, kept while the file stays as it is:
+ * listing an 8 MB card takes a third of a second, and every sync asks it of
+ * every game, in every emulator, more than once. */
+#define OWNERS_CACHED 64
+static struct {
+    char path[1024];
+    int64_t mtime_ns, size;
+    char *owners; /* "\n<id>\n<id>\n" */
+} g_owners[OWNERS_CACHED];
+static int g_owners_next;
+static pthread_mutex_t g_owners_lock = PTHREAD_MUTEX_INITIALIZER;
+
 int ps2card_file_has(const char *path, const char *serial) {
+    const int64_t mt = file_mtime_ns(path), sz = file_size(path);
+    char want[64];
+    snprintf(want, sizeof want, "\n%s\n", serial);
+    pthread_mutex_lock(&g_owners_lock);
+    for (int i = 0; i < OWNERS_CACHED; i++)
+        if (g_owners[i].owners && !strcmp(g_owners[i].path, path) && g_owners[i].mtime_ns == mt && g_owners[i].size == sz) {
+            const int has = strstr(g_owners[i].owners, want) != NULL;
+            pthread_mutex_unlock(&g_owners_lock);
+            return has;
+        }
+    pthread_mutex_unlock(&g_owners_lock);
+
     sigil_io *io = sigil_io_open_file(path);
     sigil_card_listing *l = NULL;
-    int has = 0;
-    if (io && sigil_card_list(io, &l) == SIGIL_OK)
-        for (size_t i = 0; i < l->entry_count && !has; i++) has = !strcmp(l->entries[i].owner_id, serial);
+    size_t cap = 2, len = 1;
+    char *owners = malloc(cap);
+    int listed = 0;
+    if (owners) strcpy(owners, "\n");
+    if (owners && io && sigil_card_list(io, &l) == SIGIL_OK) {
+        listed = 1;
+        for (size_t i = 0; i < l->entry_count && owners; i++) {
+            const size_t add = strlen(l->entries[i].owner_id) + 1;
+            if (len + add + 1 > cap) {
+                cap = (len + add + 1) * 2;
+                char *grown = realloc(owners, cap);
+                if (!grown) {
+                    free(owners);
+                    owners = NULL;
+                    break;
+                }
+                owners = grown;
+            }
+            memcpy(owners + len, l->entries[i].owner_id, add - 1);
+            owners[len + add - 1] = '\n';
+            len += add;
+            owners[len] = 0;
+        }
+    }
     sigil_card_listing_free(l);
     if (io) sigil_io_close(io);
+    const int has = owners && strstr(owners, want) != NULL;
+    /* Not one written a moment ago: the emulator may not be done with it,
+     * and a write in the same second could leave the same time and size. */
+    const int settled = time(NULL) - (time_t)(mt / 1000000000LL) > 3;
+    if (owners && listed && settled && strlen(path) < sizeof g_owners[0].path) {
+        pthread_mutex_lock(&g_owners_lock);
+        int at = -1;
+        for (int i = 0; i < OWNERS_CACHED && at < 0; i++)
+            if (g_owners[i].owners && !strcmp(g_owners[i].path, path)) at = i;
+        if (at < 0) at = g_owners_next++ % OWNERS_CACHED;
+        free(g_owners[at].owners);
+        snprintf(g_owners[at].path, sizeof g_owners[at].path, "%s", path);
+        g_owners[at].mtime_ns = mt;
+        g_owners[at].size = sz;
+        g_owners[at].owners = owners;
+        owners = NULL;
+        pthread_mutex_unlock(&g_owners_lock);
+    }
+    free(owners);
     return has;
 }
 

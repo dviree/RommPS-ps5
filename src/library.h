@@ -26,10 +26,12 @@ collection_kind library_collection_kind(const char *name);
 /* 1 when id can name one of kind's collections (regular and smart ones' are numbers). */
 int library_collection_id_ok(collection_kind kind, const char *id);
 /* The collections that hold games, of every kind offered (only's, unless it's
- * COLLECTION_NONE): [{kind, id, name, description, rom_count, cover, owner}].
- * The user's own come first, then other users' public ones, each by name;
- * owner is "" for the user's own. Ids are strings, as virtual collections' are. */
-cJSON *library_collections(collection_kind only, char *err, int en);
+ * COLLECTION_NONE): [{kind, id, name, description, rom_count, cover, owner}],
+ * and a virtual one's type ("genre", "franchise"...). By kind, then type; in
+ * each the user's own first, then other users' public ones, each by name.
+ * owner is "" for the user's own. Ids are strings, as virtual collections' are.
+ * refused: RomM didn't let this pairing read them (paired before 1.4.0). */
+cJSON *library_collections(collection_kind only, int *refused, char *err, int en);
 
 /* Which games a list holds: a platform's (0 for every platform), narrowed to
  * a collection's when collection is set. */
@@ -63,6 +65,10 @@ int library_delete_disc(int rom_id, int disc, char *err, int en);
 /* disc: one disc of a game kept as a folder of discs, 0 for all of it.
  * name: the name the client shows; cover: its copy of RomM's path_cover_small. */
 int library_queue_rom(int rom_id, int disc, const char *name, const char *cover, char *err, int en);
+/* Every game of a collection (or platform) not on the console yet, queued.
+ * Games already here, archived or of a platform no emulator plays count as
+ * skipped. 0, or -1 with err set. */
+int library_queue_scope(const library_scope *scope, int *queued, int *skipped, char *err, int en);
 int library_queue_firmware(int platform_id, char *err, int en);
 int library_cancel(int id, char *err, int en);
 /* A failed or cancelled download, queued again. 0, or -1 with err set. */

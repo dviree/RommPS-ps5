@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "version": "2026.10.27.2",
+  "version": "2026.10.29.9",
   "console": "ps5",
   "emulators": [
   {
@@ -15,6 +15,7 @@
         "state_exts": ".state*", "state_stems": "{rom_stem_safe}", "state_name": "{rom_stem_safe}{ext}",
         "save_name_by_core": {"mednafen_psx_hw": "{rom_stem}_1{ext}"},
         "state_format": "raw", "state_slot0": ".state0", "state_cores": "pcsx_rearmed,mednafen_psx_hw",
+        "resume_states": "{rom_stem_safe}.resume,{rom_stem_safe}.resume.thumb",
         "state_core_setting": {"file": "{root}/psxs5.ini", "key": "emulator",
                               "values": {"0": "mednafen_psx_hw", "1": "pcsx_rearmed", "2": "mednafen_psx_hw"},
                               "auto": "0", "log": "{root}/logs/psxs5.log", "log_line": "host: emulator ",
@@ -28,13 +29,14 @@
       "id": "swanstationps5", "name": "SwanStationPS5",
       "title_ids": ["PPSA98510"],
       "detect": ["/data/SwanStationPS5", "/data/homebrew/PPSA98510"],
-      "note": "Plays the games in PSXS5's folder. One memory card per game, named after the game file. Its save states load only in SwanStationPS5.",
+      "note": "Plays the games in PSXS5's folder. One memory card per game, named after the disc serial (or the game file, when it can't find one). Its save states load only in SwanStationPS5.",
       "profile": {
         "root": "/data/SwanStationPS5", "mount_games": "data", "rom_dir": "/data/PSXS5/games", "save_dir": "{root}/saves", "state_dir": "{root}/states",
         "bios_dir": "{root}/bios",
-        "save_exts": ".mcd", "save_name": "{rom_stem}_1{ext}", "save_stems": "{rom_stem}_1",
-        "state_exts": ".state*", "state_stems": "{rom_stem_safe}", "state_name": "{rom_stem_safe}{ext}",
+        "save_exts": ".mcd", "save_name": "{serial}_1{ext},{rom_stem}_1{ext}", "save_stems": "{serial}_1,{rom_stem}_1",
+        "state_exts": ".state*", "state_stems": "{serial},{rom_stem_safe}", "state_name": "{serial}{ext},{rom_stem_safe}{ext}",
         "state_format": "raw", "state_slot0": ".state0", "state_cores": "swanstation",
+        "resume_states": "{serial}.resume,{serial}.resume.thumb,{rom_stem_safe}.resume,{rom_stem_safe}.resume.thumb",
         "platforms": [{"romm": ["psx", "ps1", "playstation"], "dir": "psx", "save_format": "psx-card", "cards": {"default": "per_game", "modes": "per_game"}}]
       }
     },
@@ -72,7 +74,7 @@
       "detect": ["/data/PCSX2", "/data/homebrew/PPSA99203"],
       "note": "One memory card per game, set in each game's settings, or its two shared cards, backed up to RomM (5.3 or newer). No save states yet.",
       "profile": {
-        "root": "/data/PCSX2", "rom_dir": "{root}/games", "bios_dir": "{root}",
+        "root": "/data/PCSX2", "mount_games": "data", "rom_dir": "{root}/games", "bios_dir": "{root}/bios",
         "memcards": "{card_dir}/Mcd001.ps2,{card_dir}/Mcd002.ps2", "save_layout": "ps2", "state_exts": "",
         "pcsx2_cards": {"dir": "{root}/memcards,{root}", "game_ini": "{root}/settings/{rom_stem}.ini", "global_ini": "{root}/gs.ini",
                         "format": "flat", "own_card": "{rom_stem}.ps2"},
@@ -130,6 +132,110 @@
       }
     },
     {
+      "id": "beetlepce", "name": "Beetle PCE PS5",
+      "title_ids": ["PPSA99925"],
+      "detect": ["/data/pce", "/data/homebrew/PPSA99925"],
+      "note": "PC Engine, CD and SuperGrafx games and the System Card. Saves are shared with RetroArch's Beetle PCE; its states load only in Beetle PCE PS5.",
+      "profile": {
+        "root": "/data/pce", "rom_dir": "{root}/roms", "bios_dir": "{root}/bios", "mount_games": "data",
+        "save_exts": ".srm", "save_format": "pce-sram",
+        "state_exts": ".state1,.state2,.state3,.state4,.state5,.state6,.state7,.state8,.state9,.state10", "state_format": "raw", "state_cores": "beetlepceps5",
+        "platforms": [
+          {"romm": ["tg16", "turbografx16--1", "pce", "pcengine"], "dir": "tg16",
+           "save_dir": "{root}/saves/PCEngine", "state_dir": "{root}/states/PCEngine"},
+          {"romm": ["turbografx-cd", "pcecd"], "dir": "turbografx-cd",
+           "save_dir": "{root}/saves/PCEngineCD", "state_dir": "{root}/states/PCEngineCD"},
+          {"romm": ["supergrafx"], "dir": "supergrafx",
+           "save_dir": "{root}/saves/SuperGrafx", "state_dir": "{root}/states/SuperGrafx"}
+        ]
+      }
+    },
+    {
+      "id": "genplusgx", "name": "Genesis Plus GX PS5",
+      "title_ids": ["PPSA99921"],
+      "detect": ["/data/genplus", "/data/homebrew/PPSA99921"],
+      "note": "Mega Drive, Master System and Mega CD games. Cartridge saves are shared with RetroArch's Genesis Plus GX; Mega CD saves (one backup RAM per region) don't sync. Its states load only in Genesis Plus GX PS5.",
+      "profile": {
+        "root": "/data/genplus", "rom_dir": "{root}/roms", "bios_dir": "{root}/bios", "mount_games": "data",
+        "save_exts": ".srm", "save_format": "md-sram",
+        "state_exts": ".state1,.state2,.state3,.state4,.state5,.state6,.state7,.state8,.state9,.state10", "state_format": "raw", "state_cores": "genplusgxps5",
+        "platforms": [
+          {"romm": ["genesis", "genesis-slash-megadrive", "megadrive"], "dir": "genesis",
+           "save_dir": "{root}/saves/MegaDrive", "state_dir": "{root}/states/MegaDrive"},
+          {"romm": ["sms", "mastersystem"], "dir": "sms",
+           "save_dir": "{root}/saves/MasterSystem", "state_dir": "{root}/states/MasterSystem"},
+          {"romm": ["segacd", "sega-cd", "megacd"], "dir": "segacd",
+           "save_dir": "{root}/saves", "state_dir": "{root}/states/SegaCD", "sync_saves": false,
+           "sync_note": "Mega CD saves are one backup RAM per region, shared by every disc: they don't sync yet."}
+        ]
+      }
+    },
+    {
+      "id": "snes9xps5", "name": "Snes9x PS5",
+      "title_ids": ["PPSA99922"],
+      "detect": ["/data/snes9x", "/data/homebrew/PPSA99922"],
+      "note": "SNES games. Saves are shared with RetroArch's Snes9x; its states load only in Snes9x PS5.",
+      "profile": {
+        "root": "/data/snes9x", "rom_dir": "{root}/roms", "bios_dir": "{root}/bios", "mount_games": "data",
+        "save_dir": "{root}/saves", "save_exts": ".srm", "save_format": "snes-sram",
+        "state_dir": "{root}/states", "state_exts": ".000,.001,.002,.003,.004,.005,.006,.007,.008,.009", "state_format": "raw", "state_cores": "snes9xps5",
+        "platforms": [{"romm": ["snes", "sfam"], "dir": "snes"}]
+      }
+    },
+    {
+      "id": "gbcxy", "name": "GBCXY",
+      "title_ids": ["PPSA99210"],
+      "detect": ["/data/PS5GBC", "/data/homebrew/PPSA99210"],
+      "note": "Game Boy and Game Boy Color (mGBA). Saves are named after a hash of the game file and shared with RetroArch's mGBA and Gambatte; its states only load in GBCXY.",
+      "profile": {
+        "root": "/data/PS5GBC", "rom_dir": "{root}/games/{platform}", "bios_dir": "{root}/bios", "mount_games": "data",
+        "save_dir": "{root}/saves", "save_exts": ".sav", "save_name": "{rom_fnv64}{ext}", "save_stems": "{rom_fnv64}", "save_format": "gb-sram",
+        "state_dir": "{root}/states", "state_exts": ".state", "state_stems": "{rom_fnv64}", "state_name": "{rom_fnv64}{ext}",
+        "state_format": "raw", "state_cores": "gbcxy",
+        "platforms": [{"romm": ["gb"], "dir": "gb"}, {"romm": ["gbc"], "dir": "gbc"}]
+      }
+    },
+    {
+      "id": "mupen64ps5", "name": "Mupen64Plus PS5",
+      "title_ids": ["PPSA99064"],
+      "detect": ["/data/mupen64plus", "/data/homebrew/PPSA99064"],
+      "note": "N64 games. Its saves (.eep, .sra, .fla and .mpk, named from its game database) are shared with PS5N64 and RetroArch as one .srm; its states load only in Mupen64Plus PS5.",
+      "profile": {
+        "root": "/data/mupen64plus", "rom_dir": "{root}/roms", "mount_games": "data",
+        "save_dir": "{data}/n64/mupen64plus", "save_exts": ".srm", "save_format": "n64-srm",
+        "n64_split_dir": "{root}/saves", "n64_ini": "{root}/data/mupen64plus.ini",
+        "state_dir": "{root}/states", "state_exts": ".st0,.st1,.st2,.st3,.st4,.st5,.st6,.st7,.st8,.st9", "state_format": "raw", "state_cores": "mupen64plusps5",
+        "resume_states": "{rom_stem}.resume",
+        "fixed": ["save_dir", "state_dir"],
+        "firmware": {"skip": true},
+        "platforms": [{"romm": ["n64"], "dir": "n64"}]
+      }
+    },
+    {
+      "id": "psp5", "name": "PSP5",
+      "title_ids": ["PPSA99131"],
+      "detect": ["/data/homebrew/PPSA99131"],
+      "note": "PSP games, from its memory stick. Saves are PPSSPP's, shared with RetroArch's PPSSPP.",
+      "profile": {
+        "root": "/data/homebrew/PPSA99131", "rom_dir": "{root}/memstick/PSP/GAME", "mount_games": true,
+        "save_layout": "psp", "bundle_dirs": "{root}/memstick/PSP/SAVEDATA",
+        "firmware": {"skip": true},
+        "platforms": [{"romm": ["psp"], "dir": "psp"}]
+      }
+    },
+    {
+      "id": "fbneops5", "name": "FBNeo PS5",
+      "title_ids": ["PPSA99924"],
+      "detect": ["/data/fbneo", "/data/homebrew/PPSA99924"],
+      "note": "Arcade games, with their BIOS sets beside them. Saves (NVRAM and EEPROM) and states sync in a slot of their own: RetroArch's FBNeo keeps them in other forms.",
+      "profile": {
+        "root": "/data/fbneo", "rom_dir": "{root}/roms", "bios_dir": "{root}/roms", "mount_games": "data",
+        "save_dir": "{root}/saves", "save_exts": ".nvram,.nv",
+        "state_dir": "{root}/states", "state_exts": ".state1,.state2,.state3,.state4,.state5,.state6,.state7,.state8,.state9,.state10", "state_format": "raw", "state_cores": "fbneops5",
+        "platforms": [{"romm": ["arcade", "fbneo", "neogeoaes", "neogeomvs", "cps1", "cps2", "cps3"], "dir": "arcade"}]
+      }
+    },
+    {
       "id": "porpoise", "name": "Porpoise",
       "title_ids": ["PPSA99764"],
       "detect": ["/data/porpoise", "/data/homebrew/PPSA99764"],
@@ -154,7 +260,7 @@
       "detect": ["/data/homebrew/PPSA99247"],
       "note": "Each game's own memory card syncs as its save; the shared ones (Own memory card for each game off) are backed up as RomM memory cards. Save states don't sync yet.",
       "profile": {
-        "root": "/data/homebrew/PPSA99247", "rom_dir": "{root}/games", "save_dir": "{root}/data",
+        "root": "/data/homebrew/PPSA99247", "mount_games": true, "rom_dir": "{root}/games", "save_dir": "{root}/data",
         "state_dir": "{root}/data/savestates", "bios_dir": "{root}/bios",
         "save_exts": ".bin", "state_exts": "", "game_ids": "{root}/data/game-ids.txt", "disc_id": "dreamcast",
         "save_stems": "{game_id}_vmu_save_A1", "save_name": "{game_id}_vmu_save_A1{ext}",
@@ -200,29 +306,32 @@
       }
     },
     {
-      "id": "ps5cemu", "name": "PS5CEMU-HAR",
+      "id": "ps5cemu", "name": "PS5-ECAM",
       "title_ids": ["PPSA99360"],
       "detect": ["/data/ps5cemu", "/data/homebrew/PPSA99360"],
-      "note": "Wii U (Cemu), 3DS (Azahar), DS (melonDS) and Switch (Eden). Saves sync for all four; 3DS and DS save states load only in PS5CEMU-HAR.",
+      "note": "Wii U (Cemu), 3DS (Azahar), DS (melonDS) and Switch (Eden). Saves sync for all four; 3DS and DS save states load only in PS5-ECAM.",
       "profile": {
-        "root": "/data/ps5cemu",
+        "root": "/data/ps5cemu", "mount_games": "data",
         "platforms": [
-          {"romm": ["wiiu"], "dir": "wiiu", "emulator": "cemu", "rom_dir": "{root}/games", "bios_dir": "{root}",
-          "save_layout": "wiiu", "bundle_dirs": "{root}/mlc01/usr/save",
+          {"romm": ["wiiu"], "dir": "wiiu", "emulator": "cemu", "user_dir": "{root},/data/cemu", "user_dir_has": ".ecam-separated-v2",
+          "rom_dir": "{user_dir}/games", "bios_dir": "{user_dir}",
+          "save_layout": "wiiu", "bundle_dirs": "{user_dir}/mlc01/usr/save",
           "firmware": {"only_files": ["keys.txt"]}},
-          {"romm": ["3ds"], "dir": "3ds", "emulator": "azahar", "rom_dir": "{root}/azahar/games", "bios_dir": "{root}/azahar/sysdata",
-          "save_layout": "3ds", "bundle_dirs": "{root}/azahar/sdmc/Nintendo 3DS/00000000000000000000000000000000/00000000000000000000000000000000/title",
-          "state_dir": "{root}/azahar/states", "state_exts": ".cst", "state_stems": "{game_id}", "state_name": "{game_id}.01{ext}",
+          {"romm": ["3ds"], "dir": "3ds", "emulator": "azahar", "user_dir": "{root}/azahar,/data/azahar", "user_dir_has": ".ecam-separated-v2",
+          "rom_dir": "{user_dir}/games", "bios_dir": "{user_dir}/sysdata",
+          "save_layout": "3ds", "bundle_dirs": "{user_dir}/sdmc/Nintendo 3DS/00000000000000000000000000000000/00000000000000000000000000000000/title",
+          "state_dir": "{user_dir}/states", "state_exts": ".cst", "state_stems": "{game_id}", "state_name": "{game_id}.01{ext}",
           "state_format": "raw", "state_cores": "ps5cemu-azahar",
           "firmware": {"only_files": ["aes_keys.txt", "seeddb.bin"]}},
-          {"romm": ["nds"], "dir": "nds", "emulator": "melonds", "rom_dir": "{root}/melonds/games",
-          "save_dir": "{root}/melonds/saves", "save_exts": ".sav", "bios_dir": "{root}/melonds/bios", "sync_saves": true,
-          "state_dir": "{root}/melonds/states", "state_exts": ".ml*", "state_format": "raw", "state_cores": "ps5cemu-melonds",
+          {"romm": ["nds"], "dir": "nds", "emulator": "melonds", "user_dir": "{root}/melonds,/data/melonds", "user_dir_has": ".ecam-separated-v2", "rom_dir": "{user_dir}/games",
+          "save_dir": "{user_dir}/saves", "save_exts": ".sav", "save_format": "nds-raw", "bios_dir": "{user_dir}/bios", "sync_saves": true,
+          "state_dir": "{user_dir}/states", "state_exts": ".ml*", "state_format": "raw", "state_cores": "ps5cemu-melonds",
           "firmware": {"only_files": ["bios7.bin", "bios9.bin", "firmware.bin"]}},
-          {"romm": ["switch"], "dir": "switch", "emulator": "eden", "rom_dir": "{root}/eden/roms", "bios_dir": "{root}/eden",
+          {"romm": ["switch"], "dir": "switch", "emulator": "eden", "user_dir": "{root}/eden,/data/eden", "user_dir_has": ".ecam-separated-v2",
+          "rom_dir": "{user_dir}/roms", "bios_dir": "{user_dir}",
           "firmware": {"by_ext": {".keys": "keys", ".nca": "firmware"}},
-          "save_layout": "switch", "bundle_dirs": "{root}/eden/user/nand/user/save/0000000000000000/{switch_user}",
-          "switch_users": "{root}/eden/config/prosperoeden.json"}
+          "save_layout": "switch", "bundle_dirs": "{user_dir}/user/nand/user/save/0000000000000000/{switch_user}",
+          "switch_users": "{user_dir}/config/prosperoeden.json"}
         ]
       }
     },

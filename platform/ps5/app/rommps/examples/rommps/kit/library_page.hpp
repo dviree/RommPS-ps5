@@ -1,13 +1,14 @@
 // RommPS: the Library tab.
 //
 //   - Platforms: a grid of RomM's platforms, each with a few of its covers.
-//     Square shows RomM's collections there instead (and back). Cross opens
-//     one, Triangle searches every platform.
+//     Square shows RomM's collections there instead (and back), in sections
+//     by kind and type (L2 / R2 skip between them). Cross opens one,
+//     Triangle searches every platform.
 //   - A platform or collection (or a search's results): the focused game's
 //     details above a grid of covers that loads as it scrolls, and an A to Z
 //     bar on the right (Right from the last column to reach it, L2 / R2 to
 //     jump a letter). Triangle searches the platform or collection, Circle
-//     goes back.
+//     goes back. In a collection, Square twice downloads all of it.
 //   - Search: the kit's keyboard, the first results updating as you type;
 //     R2 (or Done) shows them all.
 //
@@ -97,8 +98,20 @@ class LibraryPage
         std::string note; // the emulator; a collection's owner (someone else's) or description
         bool note_on = false; // the note in the accent colour (a platform an emulator plays)
         int count = 0;
+        std::string section; // a collection's kind or type ("Smart collections", "Genres"); "" for platforms
     };
     std::vector<Tile> tiles(App &app) const;
+    // Where the tiles go: rows of kTileCols, each section starting a row of
+    // its own under its heading.
+    struct Placement
+    {
+        std::vector<int> row, col; // each tile's
+        std::vector<std::pair<int, std::string>> heads; // the row a section starts on, and its heading
+        float top(int r) const; // a row's offset from the first's, headings included
+        int first_of(int r) const; // the first tile on a row, -1 past the last
+        int last_of(int r) const;
+    };
+    static Placement place(const std::vector<Tile> &all);
     // What a list is of: a platform's or collection's name ("" for every platform).
     static std::string scope_name(App &app, const Scope &scope);
 
@@ -133,7 +146,7 @@ class LibraryPage
     // platforms: the tiles, of platforms or collections
     Browse browse_ = kByPlatform;
     int tile_ = 0;
-    hui::tween::Spring tiles_scroll_; // in rows
+    hui::tween::Spring tiles_scroll_; // in pixels
 
     // a grid
     Scope grid_scope_;
@@ -145,6 +158,7 @@ class LibraryPage
     int focus_raw_ = 0;
     std::size_t focus_hidden_ = 0;
     bool on_letters_ = false;
+    float install_armed_ = 0.0f; // seconds a second Square installs the whole collection
     int letter_ = 0; // the A to Z bar's focus, an index into the list's letters
     hui::tween::Spring grid_scroll_; // in rows
     hui::tween::Spring focus_x_, focus_y_;

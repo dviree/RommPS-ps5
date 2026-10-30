@@ -109,7 +109,7 @@ Note: RommPS relies on your emulator **NOT** being sandboxed. Some emulators req
 | [PS5NES](https://github.com/Globaleliteee/PS5NES) | NES | Untested | Untested | Preset uses `/data/PS5NES/games` and `/data/PS5NES/saves`. GH page gone |
 | PSFlyCast | Dreamcast | Full Support | Each game's own VMU; the shared VMUs are backed up as RomM memory cards | Save states don't sync yet |
 | PS64 | Commodore 64 | Full Support | Save disks | Games save into their own disk images. No save states |
-| PS5CEMU-HAR | Wii U, 3DS, DS, Switch | Full Support | Wii U, 3DS, DS and Switch saves, 3DS and DS states | 3DS and DS states only load in PS5CEMU-HAR. Switch saves are one player's, the same save as ProsperoEden's on RomM |
+| PS5-ECAM | Wii U, 3DS, DS, Switch | Full Support | Wii U, 3DS, DS and Switch saves, 3DS and DS states | 3DS and DS states only load in PS5-ECAM. Switch saves are one player's, the same save as ProsperoEden's on RomM |
 | [Porpoise](https://github.com/elripalda/Porpoise-Dolphin-Emulator-for-PS5) | Wii/GameCube | Full Support | N/A | Couldn't exit sandbox w/o crash. [Issue](https://github.com/elripalda/Porpoise-Dolphin-Emulator-for-PS5/issues/18) reported. Downloading games should work if the emulator is actually working for you.|
 | XPSemu | Xbox | Full Support | Saves | Read from and written into its hard disk image, only while it's closed |
 | [PS5X360](https://github.com/BrinooTk/PS5X360) | Xbox 360 | Full Support | Saves | The first signed-in player's saves; games go in `/data/xbox360`, a folder each |

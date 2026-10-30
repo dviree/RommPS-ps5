@@ -81,7 +81,6 @@ struct Details
     double play_ms = 0;      // every device's sessions RomM has
     int sessions = 0, completion = 0, my_rating = 0;
     std::string archived;    // why it can't be downloaded: it's an archive
-    std::string saves_off;   // why its saves don't sync here, "" when they do
     int updates = 0, dlc = 0; // a Switch game's, downloaded with it
     std::string title_id;     // a Switch game's ("0100ABF008968000"), "" otherwise
     struct Addon
@@ -121,10 +120,11 @@ struct Platform
 // One of RomM's collections. kind is the payload's name for its sort
 // ("regular" for the user's own; "smart" and "virtual" are RomM's others),
 // id RomM's, as text since virtual collections' ids are. owner is the user
-// who made it, when that's someone else ("" for the user's own).
+// who made it, when that's someone else ("" for the user's own). type is
+// what a virtual one gathers by ("genre", "franchise"...).
 struct Collection
 {
-    std::string kind, id, name, description, owner;
+    std::string kind, id, name, description, owner, type;
     int rom_count = 0;
 };
 
@@ -321,6 +321,10 @@ class App
     const std::vector<Collection> &collections() const { return collections_; }
     // Why the last refresh got none ("" if it did).
     const std::string &collections_error() const { return collections_error_; }
+    // RomM won't show this pairing the collections: it's from before RommPS asked for them.
+    bool collections_need_pair() const { return collections_need_pair_; }
+    // Every game of a collection not on the console yet, downloaded.
+    void download_collection(const Collection &c);
     bool collections_loaded() const { return collections_loaded_; }
     void want_collections()
     {
@@ -470,6 +474,7 @@ class App
     std::vector<Collection> collections_;
     std::string collections_error_;
     bool collections_loaded_ = false;
+    bool collections_need_pair_ = false;
     bool collections_busy_ = false;
     std::vector<Download> queue_;
     std::vector<Game> installed_;

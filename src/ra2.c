@@ -20,7 +20,6 @@
 #define RA_ROM_DIR "{root}/content/{platform}"
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
-static void rekey(const char *from, const char *to);
 static time_t g_checked;
 static cJSON *g_pending;
 
@@ -159,7 +158,7 @@ void ra2_check(int now) {
     const cJSON *mv;
     cJSON_ArrayForEach(mv, moves) {
         state_lock();
-        rekey(jget_str(mv, "from", ""), jget_str(mv, "to", ""));
+        state_rekey(jget_str(mv, "from", ""), jget_str(mv, "to", ""));
         state_save();
         state_unlock();
         LOGI("RetroArch moved %s to %s: the games' records follow", jget_str(mv, "from", ""), jget_str(mv, "to", ""));
@@ -227,28 +226,6 @@ cJSON *ra2_pending(void) {
     return j;
 }
 
-/* Records under from (games, and saves kept beside them) follow it to to. */
-static void rekey(const char *from, const char *to) {
-    static const char *const sections[] = {"roms", "saves", "states", "conflicts"};
-    size_t fl = strlen(from);
-    for (size_t s = 0; s < sizeof sections / sizeof *sections; s++) {
-        cJSON *sec = state_section(sections[s]), *found = cJSON_CreateArray(), *e = sec->child;
-        while (e) {
-            cJSON *next = e->next;
-            if (!strncmp(e->string, from, fl) && (!e->string[fl] || e->string[fl] == '/' || e->string[fl] == '#'))
-                cJSON_AddItemToArray(found, cJSON_DetachItemViaPointer(sec, e));
-            e = next;
-        }
-        while ((e = cJSON_DetachItemFromArray(found, 0))) {
-            char key[PATH_MAX_LEN + 256];
-            snprintf(key, sizeof key, "%s%s", to, e->string + fl);
-            cJSON_DeleteItemFromObjectCaseSensitive(sec, key); /* an old record of something gone */
-            cJSON_AddItemToObject(sec, key, e);
-        }
-        cJSON_Delete(found);
-    }
-}
-
 /* Moves what's in from to to; how many failed. */
 static int move_folder(const char *from, const char *to, int *moved) {
     int failed = 0;
@@ -267,7 +244,7 @@ static int move_folder(const char *from, const char *to, int *moved) {
             continue;
         }
         state_lock();
-        rekey(src, dst);
+        state_rekey(src, dst);
         state_unlock();
         (*moved)++;
     }

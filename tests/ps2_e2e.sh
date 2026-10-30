@@ -95,6 +95,7 @@ sleep 1.1; server_save "$(folders_zip BASLUS-21059/BASLUS-21059=okami-v5 BASLUS-
 syncnow
 has "$OWN" okami-v5 && fail "a save came down onto the card of a running emulator"
 grep -q "comes down once PS5SX2 is closed" "$T/daemon.log" || fail "no word on why it waits"
+grep -q "Its newer save comes down once PS5SX2 is closed" "$T/daemon.log" || fail "no toast saying the newer save waits for the emulator to close"
 rm "$T/data/alive"
 syncnow
 has "$OWN" okami-v5 || fail "the save didn't come down once PS5SX2 closed"
@@ -281,4 +282,38 @@ syncnow
 [[ "$(last uploaded)" == 0 ]] || fail "a save RomM never saw went up and beat the one it has"
 [[ "$(cat "$RC2/Okami.ps2/BASLUS-21059/BASLUS-21059")" == okami-v8 ]] || fail "the emulator just turned on didn't get RomM's save over its own"
 [[ "$(saves)" == "$before" ]] || fail "RomM's saves changed: $before -> $(saves)"
+
+echo "11. a save made while RommPS watched an extra emulator run goes up, though RomM never saw that card, and reaches the others"
+kill "$DAEMON"; wait "$DAEMON" 2>/dev/null || true
+R3="$T/homebrew/PPSA99171"; RC3="$R3/system/pcsx2/memcards"
+mkdir -p "$R3/games" "$RC3/Okami.ps2/BASLUS-21059" "$R3/system/ps5sx2/gamesettings"
+cp "$E/games/Okami.iso" "$R3/games/"
+python3 -c "import sys; b=bytearray(0x2000); b[0x16]=0x6F; open(sys.argv[1],'wb').write(bytes(b))" "$RC3/Okami.ps2/_pcsx2_superblock"
+printf okami-old > "$RC3/Okami.ps2/BASLUS-21059/BASLUS-21059"; printf icon > "$RC3/Okami.ps2/BASLUS-21059/icon.sys"
+touch -d "2 days ago" "$RC3/Okami.ps2/BASLUS-21059/BASLUS-21059" "$RC3/Okami.ps2/BASLUS-21059/icon.sys" "$RC3/Okami.ps2"
+printf '[MemoryCards]\nSlot1_Filename = Okami.ps2\n' > "$R3/system/ps5sx2/gamesettings/SLUS-21059_$(cat "$T/crc").ini"
+python3 - "$ROOT/platform/retroarch_cores.json" "$R3" "$T/data/config.json" <<'PY'
+import json, sys
+rule = next(r for r in json.load(open(sys.argv[1]))["rules"] if r.get("names") == ["PS5SX2"])["entry"]
+c = json.load(open(sys.argv[3]))
+e = dict(rule, romm=["ps2"], dir="ps2", emulator="ps5sx2", core_name="PS5SX2")
+# An extra (another emulator for a system that has its main one), as on a console.
+c["profiles"].append({"id": "pcsx2core3", "name": "A third PS5SX2 core", "enabled": True, "root": sys.argv[2],
+                      "rom_dir": "{root}/games", "bios_dir": "{root}/system", "platforms": [e], "extra": ["ps2"]})
+json.dump(c, open(sys.argv[3], "w"))
+PY
+# It runs from the start, so nothing comes down onto its card; it's played and saved.
+echo PPSA99171 > "$T/data/alive"; echo PPSA99171 > "$T/data/foreground"
+start
+for _ in $(seq 1 40); do grep -q "game PPSA99171 started" "$T/daemon.log" && break; sleep 0.25; done
+grep -q "game PPSA99171 started" "$T/daemon.log" || fail "the run wasn't seen"
+syncnow
+[[ "$(last uploaded)" == 0 ]] || fail "a card RomM never saw went up before anyone played"
+sleep 1.1; printf okami-played > "$RC3/Okami.ps2/BASLUS-21059/BASLUS-21059"
+rm "$T/data/alive" "$T/data/foreground"
+for _ in $(seq 1 40); do grep -q "game PPSA99171 closed" "$T/daemon.log" && break; sleep 0.25; done
+syncnow
+[[ "$(last uploaded)" == 1 ]] || fail "the save made while it ran didn't go up: $(last uploaded) up"
+has "$RC2/Okami.ps2/BASLUS-21059/BASLUS-21059" okami-played || fail "the other emulator didn't get the save made while this one ran"
+grep -q "1 save up, now in .*Another PS5SX2 core" "$T/daemon.log" || fail "the toast must say which emulators got the save"
 echo "ps2 e2e: ok"

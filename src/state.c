@@ -1,6 +1,7 @@
 #include "state.h"
 
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -66,6 +67,48 @@ cJSON *state_entry_ensure(const char *section, const char *key) {
 void state_entry_remove(const char *section, const char *key) {
     cJSON_DeleteItemFromObjectCaseSensitive(state_section(section), key);
 }
+
+/* moved: an emulator's own folder move. A record already at the new name is
+ * newer (written since the move) and stays; one whose file is still at the
+ * old name only stays there, with its file. */
+static int rekey(const char *from, const char *to, int moved) {
+    static const char *const sections[] = {"roms", "saves", "states", "conflicts"};
+    size_t fl = strlen(from);
+    int n = 0;
+    for (size_t s = 0; s < sizeof sections / sizeof *sections; s++) {
+        cJSON *sec = state_section(sections[s]), *found = cJSON_CreateArray(), *e = sec->child;
+        while (e) {
+            cJSON *next = e->next;
+            if (!strncmp(e->string, from, fl) && (!e->string[fl] || e->string[fl] == '/' || e->string[fl] == '#'))
+                cJSON_AddItemToArray(found, cJSON_DetachItemViaPointer(sec, e));
+            e = next;
+        }
+        while ((e = cJSON_DetachItemFromArray(found, 0))) {
+            char key[PATH_MAX_LEN + 256], was[PATH_MAX_LEN + 256], now[PATH_MAX_LEN + 256];
+            snprintf(key, sizeof key, "%s%s", to, e->string + fl);
+            if (moved) {
+                /* A bundle's record is "<folder>#<game>": its folder's what moved. */
+                snprintf(was, sizeof was, "%s", e->string);
+                snprintf(now, sizeof now, "%s", key);
+                was[strcspn(was, "#")] = now[strcspn(now, "#")] = 0;
+                const int there = file_exists(now) || dir_exists(now), left = file_exists(was) || dir_exists(was);
+                if (cJSON_GetObjectItemCaseSensitive(sec, key) || (left && !there)) {
+                    cJSON_AddItemToObject(sec, e->string, e); /* (back where it was) */
+                    continue;
+                }
+            }
+            cJSON_DeleteItemFromObjectCaseSensitive(sec, key); /* an old record of something gone */
+            cJSON_AddItemToObject(sec, key, e);
+            n++;
+        }
+        cJSON_Delete(found);
+    }
+    return n;
+}
+
+int state_rekey(const char *from, const char *to) { return rekey(from, to, 0); }
+
+int state_rekey_moved(const char *from, const char *to) { return rekey(from, to, 1); }
 
 void jset_num(cJSON *o, const char *k, double v) {
     cJSON *n = cJSON_CreateNumber(v);
