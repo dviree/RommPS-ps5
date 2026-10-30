@@ -170,6 +170,18 @@ for _ in $(seq 1 20); do [[ "$(onc 14)$(onc 30)" == TrueTrue ]] && break; sleep 
 qd=$(post /api/download '{"collection_kind":"virtual","collection_id":"genre-Action"}' | python3 -c "import json,sys; j=json.load(sys.stdin); print(j['queued'], j['skipped'])")
 [[ "$qd" == "0 3" ]] || fail "a collection installed again queues nothing: $qd"
 post /api/delete '{"rom_id":14}' >/dev/null && post /api/delete '{"rom_id":30}' >/dev/null || fail "couldn't remove the collection's games"
+# RomM's ids for virtual collections are base64 of their name and type: long, with +, / and = in them. One holds
+# a version RomM's grouping fronts with another (Square USA: Final Fantasy IX's discs, not its .m3u).
+VID=$(python3 -c "import base64,json; print(base64.b64encode(json.dumps({'name': 'Disc Sets ~~~ Square USA >>>? xxxxxxxxxxxxxxx', 'type': 'company'}).encode()).decode())")
+curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/_admin/rom" -d '{"id":964,"platform_id":1,"name":"Disc Two","fs_name":"Disc Two (USA).sfc","grouped_away":true}' >/dev/null
+curl -sf -X POST "http://127.0.0.1:$MOCK_PORT/_admin/virtual" -d "{\"id\":\"$VID\",\"name\":\"Disc Sets\",\"type\":\"company\",\"rom_ids\":[964,10]}" >/dev/null
+listed=$(curl -sf "$API/api/collections?kind=virtual" | python3 -c "import json,sys; print([c['id'] for c in json.load(sys.stdin) if c['name'] == 'Disc Sets'])")
+[[ "$listed" == "['$VID']" ]] || fail "a virtual collection's id must reach the app whole (${#VID} characters): $listed"
+vg=$(curl -sf "$API/api/roms?platform_id=0&collection_kind=virtual&collection_id=$(python3 -c "import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=''))" "$VID")" \
+     | python3 -c "import json,sys; j=json.load(sys.stdin); print(j.get('error') or (j['total'], sorted(g['name'] for g in j['items'])))")
+[[ "$vg" == "(2, ['Chrono Trigger', 'Disc Two'])" ]] || fail "a long-id collection's games, the grouped-away version too: $vg"
+pg=$(curl -sf "$API/api/roms?platform_id=1&search=disc" | python3 -c "import json,sys; print(json.load(sys.stdin)['total'])")
+[[ "$pg" == 0 ]] || fail "a platform's list still groups a game's versions: $pg"
 curl -s -o /dev/null -w "%{http_code}" -X POST "$API/api/download" -d '{"collection_kind":"virtual","collection_id":""}' | grep -qx 400 || fail "a collection install with no id must be refused"
 curl -s -o /dev/null -w "%{http_code}" -X POST "$API/api/download" -d '{"collection_kind":"regular","collection_id":"x"}' | grep -qx 400 || fail "a collection install with a bad id must be refused"
 colls=$(curl -sf "$API/api/collections?kind=smart" | python3 -c "import json,sys; print([(c['name'], c['description']) for c in json.load(sys.stdin)])")

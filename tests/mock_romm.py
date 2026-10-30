@@ -336,6 +336,10 @@ class H(BaseHTTPRequestHandler):
                     f["content"] = f["content"].encode()
                 DB["roms"][b["id"]] = b
                 return self.reply(200, rom_public(b))
+            if p == "/_admin/virtual" and method == "POST":  # one RomM makes from metadata
+                b = self.json_body()
+                DB["virtual_collections"].append(b | {"description": "", "is_virtual": True})
+                return self.reply(200, {})
             if p == "/_admin/renumber" and method == "POST":  # a rescan gives a game a new id
                 b = self.json_body()
                 rom = DB["roms"].pop(b["from"])
@@ -443,9 +447,13 @@ class H(BaseHTTPRequestHandler):
                     in_coll = next((c["rom_ids"] for c in DB["smart_collections"] if str(c["id"]) == smart), [])
                 if virtual:
                     in_coll = next((c["rom_ids"] for c in DB["virtual_collections"] if c["id"] == virtual), [])
+                # group_by_meta_id: a game's versions as one, fronted by one of
+                # them; the others ("grouped_away") drop out, as on RomM.
+                grouped = qs("group_by_meta_id") == "true"
                 items = sorted((rom_public(r) for r in DB["roms"].values()
                                 if (not ids or r["platform_id"] in ids) and (in_coll is None or r["id"] in in_coll)
-                                and term in r["name"].lower() + r["fs_name"].lower()),
+                                and term in r["name"].lower() + r["fs_name"].lower()
+                                and not (grouped and r.get("grouped_away"))),
                                key=lambda r: r["name"].lower())
                 char_index = {}
                 for i, r in enumerate(items):
