@@ -2140,4 +2140,51 @@ publish_presets 2099.01.01.2 tamper; check_presets
 [[ "$(presets version)" == 2099.01.01.1 && "$(presets error)" == *signature* ]] \
   || fail "tampered presets must be refused, the last good ones kept: $(curl -sf "$API/api/presets")"
 
+echo "32. A conflict settled with RomM's save stays settled, though Mupen64Plus wrote its save as the game started"
+B6="$T/bootn64"; M7="$T/bootm64"; mkdir -p "$B6/games" "$B6/saves" "$M7/saves" "$M7/data"
+m64b=$(python3 - "$B6/games/Boot Kart (U).z64" "$M7/data/mupen64plus.ini" <<'PY'
+import hashlib, sys
+z = bytearray(b"\xff" * 0x1000)
+z[0:4] = b"\x80\x37\x12\x40"; z[0x20:0x34] = b"BOOT KART".ljust(20)
+open(sys.argv[1], "wb").write(z)
+md5 = hashlib.md5(bytes(z)).hexdigest().upper()
+open(sys.argv[2], "w").write("[%s]\nGoodName=Boot Kart (U)\n" % md5)
+print("Boot Kart (U)-%.8s" % md5)
+PY
+)
+curl -skf -X POST "$SV/_admin/rom" -d '{"id":966,"platform_id":6,"name":"Boot Kart","fs_name":"Boot Kart (U).z64"}' >/dev/null
+srm_with() { python3 -c "import base64,sys; b=bytearray(b'\xff'*0x48800); b[0:4]=sys.argv[1].encode(); print(base64.b64encode(bytes(b)).decode())" "$1"; }
+romm_save() { printf '{"rom_id":966,"slot":"autosave","file_name":"Boot Kart (U).srm","content_b64":"%s"}' "$(srm_with "$1")" > "$T/boot.json"
+              curl -skf -X POST "$SV/_admin/save" -d @"$T/boot.json" >/dev/null; }
+python3 - "$API" "$B6" "$M7" <<'PY' >/dev/null
+import json, sys, urllib.request
+api, b6, m7 = sys.argv[1:4]
+cfg = json.load(urllib.request.urlopen(api + "/api/config"))
+profiles = [dict(p, enabled=False) if any("n64" in e.get("romm", []) for e in p.get("platforms", [])) else p
+            for p in cfg["profiles"] if p.get("id") not in ("bootn64", "bootm64")]
+plat = [{"romm": ["n64"], "dir": "n64", "save_format": "n64-srm"}]
+profiles += [{"id": "bootn64", "name": "Boot-N64", "enabled": True, "root": b6, "rom_dir": "{root}/games",
+              "save_dir": "{root}/saves", "save_exts": ".srm", "sync_saves": True, "platforms": plat},
+             {"id": "bootm64", "name": "Boot-M64", "enabled": True, "root": m7, "rom_dir": b6 + "/games", "sync_saves": True,
+              "save_dir": "{data}/n64/bootm64", "save_exts": ".srm", "n64_split_dir": "{root}/saves",
+              "n64_ini": "{root}/data/mupen64plus.ini", "extra": ["n64"], "platforms": plat}]
+req = urllib.request.Request(api + "/api/config", json.dumps({"profiles": profiles}).encode(), {"Content-Type": "application/json"})
+urllib.request.urlopen(req)
+PY
+romm_save S1AA
+syncnow
+eep() { head -c 4 "$M7/saves/$m64b.eep" 2>/dev/null; }
+[[ "$(head -c 4 "$B6/saves/Boot Kart (U).srm")$(eep)" == S1AAS1AA ]] || fail "RomM's save must reach both N64 emulators: $(head -c 4 "$B6/saves/Boot Kart (U).srm") $(eep)"
+# Another device saves; then the game, started in Mupen64Plus, writes its old save again as it boots.
+sleep 1.1; romm_save S2BB
+sleep 1.1; python3 -c "import sys; open(sys.argv[1], 'wb').write(b'JUNK' + b'\xff' * 0x7fc)" "$M7/saves/$m64b.eep"
+syncnow
+cpath=$(python3 -c "import json,sys; print(next(iter(json.load(open(sys.argv[1])).get('conflicts', {})), ''))" "$T/data/state.json")
+[[ -n "$cpath" ]] || fail "a save changed here and on RomM must be a conflict"
+post /api/conflicts/resolve "{\"path\":\"$cpath\",\"keep\":\"server\"}" >/dev/null || fail "resolve failed"
+[[ "$(head -c 4 "$B6/saves/Boot Kart (U).srm")$(eep)" == S2BBS2BB ]] || fail "RomM's save, kept, must reach every N64 emulator at once: $(head -c 4 "$B6/saves/Boot Kart (U).srm") $(eep)"
+syncnow
+[[ "$(last conflicts)" == 0 && "$(last uploaded)" == 0 ]] || fail "the conflict came back: $(last conflicts) conflicts, $(last uploaded) up"
+[[ "$(head -c 4 "$B6/saves/Boot Kart (U).srm")$(eep)" == S2BBS2BB ]] || fail "RomM's save must stay: $(head -c 4 "$B6/saves/Boot Kart (U).srm") $(eep)"
+
 echo "PASS"

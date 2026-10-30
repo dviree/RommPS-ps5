@@ -85,6 +85,8 @@ class SyncView
     int generation_ = 0; // answers for an older open() are dropped
     int waiting_ = 0;    // requests still out
     bool busy_ = false;  // a resolve or restore in flight
+    int busy_row_ = -1;  // its row, which says so until it's done
+    std::string busy_text_;
     // A game's view gathers three answers before it shows.
     std::string game_here_, game_history_, game_log_;
     RowList list_;
