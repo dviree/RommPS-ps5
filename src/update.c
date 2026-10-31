@@ -143,7 +143,7 @@ static void *check_thread(void *arg) {
         if (notify && available && strcmp(g_notified, g_latest) != 0) {
             str_copy(g_notified, sizeof g_notified, g_latest);
             if (plat_info()->self_update) auto_install = 1;
-            else plat_notify("RommPS %s is available. Update it from ProsperoStore.", g_latest);
+            else plat_notify("RommPS %s is available\nUpdate it from your homebrew store", g_latest);
         }
     }
     pthread_mutex_unlock(&g_lock);
@@ -288,7 +288,7 @@ static void *install_thread(void *arg) {
         }
         free(elf);
         LOGI("update: %s installed, starts with the next jailbreak", want);
-        plat_notify("RommPS %s is installed and starts with the next jailbreak", want);
+        plat_notify("RommPS %s is installed\nIt starts with the next jailbreak", want);
         pthread_mutex_lock(&g_lock);
         g_state = U_PENDING;
         str_copy(g_pending, sizeof g_pending, want);
@@ -324,7 +324,7 @@ fail:
 int update_install(char *err, int en) {
     pthread_mutex_lock(&g_lock);
     int rc = -1;
-    if (!plat_info()->self_update) snprintf(err, (size_t)en, "update RommPS from ProsperoStore: it brings the new RomM Sync with it");
+    if (!plat_info()->self_update) snprintf(err, (size_t)en, "update RommPS from your homebrew store: it brings the new RomM Sync with it");
     else if (busy(g_state)) snprintf(err, (size_t)en, "an update check or install is already running");
     else if (!g_latest[0] || !newer_than(g_latest, APP_VERSION)) snprintf(err, (size_t)en, "no newer version found, check again first");
     else if (!strcmp(g_pending, g_latest)) snprintf(err, (size_t)en, "%s is already installed and starts with the next jailbreak", g_latest);

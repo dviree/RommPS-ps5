@@ -1,0 +1,76 @@
+# The presets side channel: a new emulator preset reaches every console
+# without waiting for a release. RomM Sync looks for presets-<console>.json
+# and its .sig on this repository's "presets" branch (src/presets.c), checks
+# the signature against the release keys, and takes a file whose version is
+# newer than what it has built in.
+#
+# A change to platform/<console>/emulators.json on main lands there, signed
+# with the release key. Only a version newer than the published one goes
+# out: bump "version" in the file, or nothing happens (on purpose).
+name: Presets
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - platform/ps5/emulators.json
+      - platform/ps4/emulators.json
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency: presets
+
+jobs:
+  publish:
+    # Upstream only: this fork takes s0liton/RommPS's presets and isn't in ProsperoStore.
+    if: github.repository == 's0liton/RommPS'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the signing tool
+        run: make tools
+
+      - name: Sign and publish what's newer
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$RELEASE_SIGNING_KEY" ]; then
+            echo "::error::RELEASE_SIGNING_KEY secret is not set; consoles only take signed presets."
+            exit 1
+          fi
+          if git ls-remote --exit-code --heads origin presets >/dev/null; then
+            git fetch -q origin presets:presets
+            git worktree add -q published presets
+          else
+            git worktree add -q --orphan -b presets published
+          fi
+          sign=""
+          for console in ps5 ps4; do
+            src="platform/$console/emulators.json"
+            jq -e --arg c "$console" '.console == $c and .format >= 1 and (.emulators | type) == "array"' "$src" >/dev/null \
+              || { echo "::error::$src isn't a $console presets file"; exit 1; }
+            new=$(jq -r .version "$src")
+            old=$(jq -r .version "published/presets-$console.json" 2>/dev/null || echo 0)
+            if [ "$new" = "$old" ] || [ "$(printf '%s\n%s\n' "$old" "$new" | sort -V | tail -1)" != "$new" ]; then
+              echo "$console: $new isn't newer than the published $old, left as it is"
+              continue
+            fi
+            cp "$src" "published/presets-$console.json"
+            build/host/release-sign sign "published/presets-$console.json" > "published/presets-$console.sig"
+            build/host/release-sign check "published/presets-$console.json" "published/presets-$console.sig"
+            sign="$sign $console $new"
+          done
+          if [ -z "$sign" ]; then
+            echo "Nothing newer to publish."
+            exit 0
+          fi
+          cd published
+          git add -A
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "Presets:$sign"
+          git push -q origin presets
+          echo "Published:$sign"

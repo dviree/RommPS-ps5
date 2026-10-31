@@ -1,0 +1,3 @@
+argosy-sigil d1316683511da4b3763951d23b40113745fddd16 (Wed Oct 14 2026), https://github.com/rommapp/argosy-sigil
+Only the files RomM Sync builds (Makefile SIGIL_SRCS) and their headers.
+third_party/tiny-AES-c: tiny-AES-c 23856752fbd139da0b8ca6e471a13d5bcc99a08d, https://github.com/kokke/tiny-AES-c

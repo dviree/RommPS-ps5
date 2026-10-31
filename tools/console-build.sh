@@ -7,10 +7,9 @@
 #   tools/console-build.sh ps4 --rebuild         # force (re)build of the image, then make ps4
 #   tools/console-build.sh ps4 --shell           # interactive shell in the container
 #   tools/console-build.sh ps4 --ca [DEST]       # copy the image's ca-bundle.crt (default ./cacert.pem)
-#   tools/console-build.sh ps4 --test            # build platform/<console>/docker/test, if it has one
 set -euo pipefail
 
-CONSOLE="${1:?usage: console-build.sh ps4|ps5 [--rebuild|--shell|--ca|--test] [make args]}"
+CONSOLE="${1:?usage: console-build.sh ps4|ps5 [--rebuild|--shell|--ca] [make args]}"
 shift
 # The image tag follows the SDK version in the Dockerfile, so a new SDK gets a new image.
 case "${CONSOLE}" in
@@ -39,6 +38,5 @@ RUN=(docker run --rm ${TTY[@]+"${TTY[@]}"} -u "$(id -u):$(id -g)" -e HOME=/tmp
 case "${1:-}" in
     --shell) exec "${RUN[@]}" bash ;;
     --ca)    exec "${RUN[@]}" cp /opt/ca-bundle.crt "${2:-cacert.pem}" ;;
-    --test)  exec "${RUN[@]}" make -C "platform/${CONSOLE}/docker/test" clean all ;;
     *)       exec "${RUN[@]}" make "${CONSOLE}" BUILD_ID="$(git -C "${ROOT}" describe --always --dirty 2>/dev/null)" "$@" ;;
 esac

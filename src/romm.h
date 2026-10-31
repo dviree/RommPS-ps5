@@ -15,7 +15,7 @@
 /* Scopes requested when pairing. */
 #define ROMM_SCOPES                                                                           \
     "me.read", "platforms.read", "roms.read", "roms.user.read", "firmware.read", "assets.read", \
-        "assets.write", "devices.read", "devices.write"
+        "assets.write", "devices.read", "devices.write", "collections.read"
 
 typedef struct {
     char device_code[128];
@@ -29,6 +29,10 @@ typedef enum { POLL_OK, POLL_PENDING, POLL_SLOW_DOWN, POLL_DENIED, POLL_EXPIRED,
 
 /* JSON request to the paired server. Returns the parsed body (free it) or NULL. */
 cJSON *romm_call(const char *method, const char *path, const cJSON *body, long *status);
+/* GET from the paired server, leaving out the members named in drop (a NULL
+ * ended list) as the reply arrives, at any depth: for big replies holding
+ * what nothing here reads. */
+cJSON *romm_get_lean(const char *path, const char *const *drop, long *status);
 
 /* Tells RomM the console's name when it changed (or was never sent): the
  * console was renamed, or its name set in the web UI. One request, only then. */

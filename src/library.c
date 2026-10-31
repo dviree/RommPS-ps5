@@ -33,6 +33,7 @@ typedef struct job {
     int id;
     job_type type;
     int target_id; /* rom id or platform id */
+    int disc;      /* one disc of a game kept as a folder of discs; 0: all of it */
     char name[256];
     char cover[160]; /* RomM's path_cover_small, for the queue row */
     char platform[64];
@@ -131,6 +132,97 @@ static int load_maps(profile_map **maps) {
     int n = profiles_expand(g_cfg.profiles, maps);
     config_unlock();
     return n;
+}
+
+/* Consoles by their makers' names ("Sony PlayStation", "Microsoft Xbox"), by
+ * any of the slugs RomM gives them; RomM's own name for the rest. The app's
+ * Emulator Settings (setup_page.cpp) and the web page (ui/index.html) keep
+ * the same names by system. */
+static const struct {
+    const char *slugs, *name;
+} CONSOLE_NAMES[] = {
+    {"psx,ps1,playstation", "Sony PlayStation"},
+    {"ps2", "Sony PlayStation 2"},
+    {"ps3", "Sony PlayStation 3"},
+    {"psp", "Sony PlayStation Portable"},
+    {"psvita", "Sony PlayStation Vita"},
+    {"xbox", "Microsoft Xbox"},
+    {"xbox360", "Microsoft Xbox 360"},
+    {"nes,famicom", "Nintendo Entertainment System"},
+    {"fds", "Nintendo Famicom Disk System"},
+    {"snes,sfam", "Super Nintendo Entertainment System"},
+    {"satellaview", "Nintendo Satellaview"},
+    {"sufami-turbo", "Bandai SuFami Turbo"},
+    {"gb", "Nintendo Game Boy"},
+    {"gbc", "Nintendo Game Boy Color"},
+    {"gba", "Nintendo Game Boy Advance"},
+    {"n64", "Nintendo 64"},
+    {"nds", "Nintendo DS"},
+    {"3ds", "Nintendo 3DS"},
+    {"virtualboy", "Nintendo Virtual Boy"},
+    {"pokemon-mini", "Nintendo Pokémon Mini"},
+    {"ngc,gamecube", "Nintendo GameCube"},
+    {"wii", "Nintendo Wii"},
+    {"wiiu", "Nintendo Wii U"},
+    {"switch", "Nintendo Switch"},
+    {"genesis,genesis-slash-megadrive,megadrive", "Sega Mega Drive / Genesis"},
+    {"sms,mastersystem", "Sega Master System"},
+    {"gamegear,gg", "Sega Game Gear"},
+    {"segacd,sega-cd,megacd", "Sega CD / Mega-CD"},
+    {"sega32,sega-32x", "Sega 32X"},
+    {"sg1000", "Sega SG-1000"},
+    {"sega-pico", "Sega Pico"},
+    {"saturn", "Sega Saturn"},
+    {"dc,dreamcast", "Sega Dreamcast"},
+    {"tg16,turbografx16--1,pce,pcengine", "NEC PC Engine / TurboGrafx-16"},
+    {"turbografx-cd,pcecd", "NEC PC Engine CD / TurboGrafx-CD"},
+    {"supergrafx", "NEC SuperGrafx"},
+    {"pc-fx", "NEC PC-FX"},
+    {"neo-geo-pocket,ngp", "SNK Neo Geo Pocket"},
+    {"neo-geo-pocket-color,ngpc", "SNK Neo Geo Pocket Color"},
+    {"neo-geo-cd", "SNK Neo Geo CD"},
+    {"neogeoaes", "SNK Neo Geo AES"},
+    {"neogeomvs", "SNK Neo Geo MVS"},
+    {"wonderswan,ws", "Bandai WonderSwan"},
+    {"wonderswan-color,wsc", "Bandai WonderSwan Color"},
+    {"atari2600", "Atari 2600"},
+    {"atari5200", "Atari 5200"},
+    {"atari7800", "Atari 7800"},
+    {"lynx", "Atari Lynx"},
+    {"jaguar", "Atari Jaguar"},
+    {"c64", "Commodore 64"},
+    {"amiga", "Commodore Amiga"},
+    {"amiga-cd32", "Commodore Amiga CD32"},
+    {"commodore-cdtv", "Commodore CDTV"},
+    {"3do", "Panasonic 3DO"},
+    {"philips-cd-i", "Philips CD-i"},
+    {"colecovision", "Coleco ColecoVision"},
+    {"channel-f,fairchild-channel-f", "Fairchild Channel F"},
+    {"zxs,zx-spectrum", "Sinclair ZX Spectrum"},
+    {"dos", "MS-DOS"},
+};
+
+static int slug_in(const char *list, const char *slug) {
+    const size_t n = strlen(slug);
+    for (const char *t = list; *t;) {
+        const char *end = strchr(t, ',');
+        const size_t l = end ? (size_t)(end - t) : strlen(t);
+        if (l == n && !strncmp(t, slug, n)) return 1;
+        if (!end) break;
+        t = end + 1;
+    }
+    return 0;
+}
+
+/* A platform by its maker's name when the table knows it, else RomM's
+ * (name_key), else its slug. p is a platform, or a ROM ("platform_slug"...). */
+static const char *console_name(const cJSON *p, const char *slug_key, const char *fs_key, const char *name_key) {
+    const char *slugs[2] = {jget_str(p, slug_key, ""), jget_str(p, fs_key, "")};
+    for (size_t i = 0; i < sizeof CONSOLE_NAMES / sizeof *CONSOLE_NAMES; i++)
+        for (int k = 0; k < 2; k++)
+            if (slugs[k][0] && slug_in(CONSOLE_NAMES[i].slugs, slugs[k])) return CONSOLE_NAMES[i].name;
+    const char *name = jget_str(p, name_key, "");
+    return name[0] ? name : slugs[0];
 }
 
 /* No emulator found because the list of them couldn't be built (memory, on
@@ -436,12 +528,98 @@ static void version_label(const cJSON *rom, char *buf, size_t size) {
 }
 
 static void add_version(cJSON *o, const cJSON *rom) {
-    int others = cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(rom, "sibling_roms"));
+    const cJSON *sibs = cJSON_GetObjectItemCaseSensitive(rom, "sibling_roms"), *s;
+    int others = cJSON_GetArraySize(sibs);
     if (others <= 0) return;
     char label[96];
     version_label(rom, label, sizeof label);
     cJSON_AddStringToObject(o, "version", label);
     cJSON_AddNumberToObject(o, "versions", others + 1);
+    /* The other versions' ids: the game's card is on the console when any is. */
+    cJSON *ids = cJSON_AddArrayToObject(o, "siblings");
+    cJSON_ArrayForEach(s, sibs) cJSON_AddItemToArray(ids, cJSON_CreateNumber(jget_num(s, "id", 0)));
+}
+
+#define VERSIONS_MAX 12 /* versions listed in a game's details, this one included */
+#define DISCS_MAX 16    /* discs counted in a game kept as a folder */
+
+/* The disc a name says: "Final Fantasy IX (USA) (Disc 2) (Rev 1).chd" is 2;
+ * 0 when it says none. */
+static int disc_number(const char *name) {
+    for (const char *p = name; *p; p++) {
+        if (tolower((unsigned char)p[0]) != 'd' || tolower((unsigned char)p[1]) != 'i' ||
+            tolower((unsigned char)p[2]) != 's' || tolower((unsigned char)p[3]) != 'c')
+            continue;
+        const char *d = p + 4;
+        while (*d == ' ' || *d == '_' || *d == '-') d++;
+        if (*d >= '1' && *d <= '9') return atoi(d);
+    }
+    return 0;
+}
+
+/* A game RomM keeps as a folder of discs: [{"disc", "size"}], a disc's files
+ * (its .bin and .cue, its tracks) counted together. Only for two or more:
+ * the folder still comes down whole, an emulator wants every disc. */
+static void add_discs(cJSON *v, const cJSON *rom) {
+    double size[DISCS_MAX + 1] = {0};
+    char seen[DISCS_MAX + 1] = {0};
+    int n = 0;
+    const cJSON *f;
+    cJSON_ArrayForEach(f, cJSON_GetObjectItemCaseSensitive(rom, "files")) {
+        const int d = disc_number(jget_str(f, "file_name", ""));
+        if (d < 1 || d > DISCS_MAX || extra_file(f)) continue;
+        n += !seen[d];
+        seen[d] = 1;
+        size[d] += jget_num(f, "file_size_bytes", 0);
+    }
+    if (n < 2) return;
+    cJSON *arr = cJSON_AddArrayToObject(v, "discs");
+    for (int d = 1; d <= DISCS_MAX; d++) {
+        if (!seen[d]) continue;
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddNumberToObject(o, "disc", d);
+        cJSON_AddNumberToObject(o, "size", size[d]);
+        cJSON_AddItemToArray(arr, o);
+    }
+}
+
+static void version_entry(cJSON *arr, const cJSON *rom) {
+    char label[96];
+    version_label(rom, label, sizeof label);
+    cJSON *v = cJSON_CreateObject();
+    cJSON_AddNumberToObject(v, "id", jget_num(rom, "id", 0));
+    cJSON_AddStringToObject(v, "name", jget_str(rom, "fs_name_no_ext", jget_str(rom, "name", "")));
+    cJSON_AddStringToObject(v, "label", label);
+    cJSON_AddNumberToObject(v, "size", jget_num(rom, "fs_size_bytes", 0));
+    if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(rom, "has_multiple_files"))) add_discs(v, rom);
+    cJSON_AddItemToArray(arr, v);
+}
+
+/* Every version of a game, this one first, for RommPS's picker:
+ * [{"id", "name", "label", "size", "discs"}]. RomM's sibling entries carry no
+ * size, tags or files, so each one is asked for on its own. None when there's
+ * nothing to show: one version, not a folder of discs. */
+static void add_version_list(cJSON *out, const cJSON *rom) {
+    const cJSON *sibs = cJSON_GetObjectItemCaseSensitive(rom, "sibling_roms"), *s;
+    cJSON *arr = cJSON_CreateArray();
+    version_entry(arr, rom);
+    int n = 1;
+    cJSON_ArrayForEach(s, sibs) {
+        if (n++ == VERSIONS_MAX) break;
+        char path[64];
+        snprintf(path, sizeof path, "/api/roms/%d", (int)jget_num(s, "id", 0));
+        long st = 0;
+        cJSON *sib = romm_call("GET", path, NULL, &st);
+        /* A version whose file isn't on RomM's disk any more can't come down. */
+        if (st == 200 && sib && !cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(sib, "missing_from_fs")))
+            version_entry(arr, sib);
+        cJSON_Delete(sib);
+    }
+    if (cJSON_GetArraySize(arr) < 2 && !cJSON_GetObjectItemCaseSensitive(cJSON_GetArrayItem(arr, 0), "discs")) {
+        cJSON_Delete(arr);
+        return;
+    }
+    cJSON_AddItemToObject(out, "version_list", arr);
 }
 
 static void discard_partial(const char *dest, int multi) {
@@ -485,6 +663,24 @@ static void record_rom(job *j, const cJSON *rom, const profile_map *m, const cha
     cJSON_DeleteItemFromObjectCaseSensitive(e, "miss_at");
     cJSON_DeleteItemFromObjectCaseSensitive(e, "stems");
     cJSON_AddItemToObject(e, "stems", stems);
+    cJSON_DeleteItemFromObjectCaseSensitive(e, "discs");
+    if (multi) {
+        /* A folder of discs: each disc's files, so which ones are here can be
+         * told when only some came down. */
+        cJSON *discs = cJSON_CreateObject();
+        const cJSON *f;
+        cJSON_ArrayForEach(f, files) {
+            const int d = disc_number(jget_str(f, "file_name", ""));
+            if (d < 1 || extra_file(f)) continue;
+            char key[12];
+            snprintf(key, sizeof key, "%d", d);
+            cJSON *list = cJSON_GetObjectItemCaseSensitive(discs, key);
+            if (!list) list = cJSON_AddArrayToObject(discs, key);
+            cJSON_AddItemToArray(list, cJSON_CreateString(jget_str(f, "file_name", "")));
+        }
+        if (cJSON_GetArraySize(discs) > 1) cJSON_AddItemToObject(e, "discs", discs);
+        else cJSON_Delete(discs);
+    }
     state_save();
     state_unlock();
     installed_changed();
@@ -659,7 +855,7 @@ static void run_switch_job(job *j, const cJSON *rom, const profile_map *maps, in
         const char *slug = jget_str(rom, "platform_slug", "");
         for (int k = 0; k < n; k++) {
             const profile_map *x = &maps[k];
-            if (x == m || !x->extra || !profile_map_handles(x, slug, jget_str(rom, "platform_fs_slug", ""))) continue;
+            if (x == m || !x->extra || x->twin || !profile_map_handles(x, slug, jget_str(rom, "platform_fs_slug", ""))) continue;
             for (int i = 0; i < nf; i++) {
                 char other[PATH_MAX_LEN];
                 path_join(other, sizeof other, nx_dir(x, files[i].kind), files[i].name);
@@ -684,6 +880,13 @@ static void run_switch_job(job *j, const cJSON *rom, const profile_map *maps, in
     free(files);
 }
 
+/* Another disc than the one asked for: left on RomM. Files no disc names
+ * (the .m3u) come with any disc. */
+static int other_disc(const job *j, const cJSON *f) {
+    const int d = disc_number(jget_str(f, "file_name", ""));
+    return j->disc && d && d != j->disc;
+}
+
 static void run_rom_job(job *j) {
     char path[2048], dest[PATH_MAX_LEN];
     snprintf(path, sizeof path, "/api/roms/%d", j->target_id);
@@ -696,13 +899,17 @@ static void run_rom_job(job *j) {
     }
     pthread_mutex_lock(&g_q_lock);
     str_copy(j->name, sizeof j->name, jget_str(rom, "name", jget_str(rom, "fs_name", "?")));
+    if (j->disc) {
+        const size_t l = strlen(j->name);
+        snprintf(j->name + l, sizeof j->name - l, " (Disc %d)", j->disc);
+    }
     const char *format = ps5_rom_format(rom);
     if (format) {
-        size_t l = strlen(j->name);
+        const size_t l = strlen(j->name);
         snprintf(j->name + l, sizeof j->name - l, " [%s]", format);
     }
     str_copy(j->cover, sizeof j->cover, jget_str(rom, "path_cover_small", ""));
-    str_copy(j->platform, sizeof j->platform, jget_str(rom, "platform_display_name", jget_str(rom, "platform_slug", "")));
+    str_copy(j->platform, sizeof j->platform, console_name(rom, "platform_slug", "platform_fs_slug", "platform_display_name"));
     j->total = (int64_t)jget_num(rom, "fs_size_bytes", 0);
     pthread_mutex_unlock(&g_q_lock);
 
@@ -713,7 +920,7 @@ static void run_rom_job(job *j) {
     if (!m) {
         if (maps_failed(maps, n)) job_end(j, JOB_ERROR, MAPS_SHORT_MSG "%s", "");
         else job_end(j, JOB_ERROR, "no emulator is set up for %s", slug);
-        free(maps);
+        profiles_free(maps);
         cJSON_Delete(rom);
         return;
     }
@@ -728,33 +935,44 @@ static void run_rom_job(job *j) {
         if (strcmp(jget_str(f, "file_name", ""), fs_name) == 0) { multi = 0; break; }
     if (library_not_game(fs_name)) {
         job_end(j, JOB_ERROR, "%s isn't a game", fs_name);
-        free(maps);
+        profiles_free(maps);
         cJSON_Delete(rom);
         return;
     }
     const char *archive = rom_archive(rom, is_switch(slug));
     if (archive) {
         job_end(j, JOB_ERROR, ARCHIVED_MSG, archive);
-        free(maps);
+        profiles_free(maps);
         cJSON_Delete(rom);
         return;
     }
     if (is_switch(slug)) {
         run_switch_job(j, rom, maps, n, m);
-        free(maps);
+        profiles_free(maps);
         cJSON_Delete(rom);
         return;
     }
     if (multi) {
         const cJSON *f;
         int64_t skipped = 0;
-        cJSON_ArrayForEach(f, files) if (extra_file(f)) skipped += (int64_t)jget_num(f, "file_size_bytes", 0);
+        cJSON_ArrayForEach(f, files) if (extra_file(f) || other_disc(j, f)) skipped += (int64_t)jget_num(f, "file_size_bytes", 0);
         pthread_mutex_lock(&g_q_lock);
         if (skipped < j->total) j->total -= skipped;
         pthread_mutex_unlock(&g_q_lock);
     }
-    path_join(dest, sizeof dest, m->rom_dir, fs_name);
-    mkdir_p(m->rom_dir);
+    /* The game is dest, or with game_folders a folder of its own holding it. */
+    char game[PATH_MAX_LEN];
+    const int wrap = !multi && m->game_folders;
+    if (wrap) {
+        char stem[256];
+        path_stem(stem, sizeof stem, fs_name);
+        path_join(game, sizeof game, m->rom_dir, stem);
+        path_join(dest, sizeof dest, game, fs_name);
+    } else {
+        path_join(dest, sizeof dest, m->rom_dir, fs_name);
+        str_copy(game, sizeof game, dest);
+    }
+    mkdir_p(wrap ? game : m->rom_dir);
     /* A game downloaded again: cancelling keeps what was already there. */
     const int had = file_exists(dest) || dir_exists(dest);
     int ok = 1;
@@ -765,14 +983,25 @@ static void run_rom_job(job *j) {
         free(q);
         ok = romm_download(path, dest, progress_cb, j, &r) == 0;
     } else {
-        /* Fetched file by file into <rom_dir>/<fs_name>/ so nothing needs unzipping. */
+        /* Fetched file by file into <rom_dir>/<fs_name>/ so nothing needs
+         * unzipping, each in its folder within the game ("file_path" below
+         * RomM's "<fs_path>/<fs_name>": a GOD game's 415607E1/00007000/...). */
+        char top[PATH_MAX_LEN];
+        snprintf(top, sizeof top, "%s/%s", jget_str(rom, "fs_path", ""), fs_name);
         int64_t base = 0;
         const cJSON *f;
         cJSON_ArrayForEach(f, files) {
-            const char *fn = jget_str(f, "file_name", "");
-            if (extra_file(f)) continue;
-            char fdest[PATH_MAX_LEN];
-            path_join(fdest, sizeof fdest, dest, fn);
+            const char *fn = jget_str(f, "file_name", ""), *fp = jget_str(f, "file_path", "");
+            if (extra_file(f) || other_disc(j, f)) continue;
+            char fdest[PATH_MAX_LEN], sub[PATH_MAX_LEN];
+            const size_t tl = strlen(top);
+            if (!strncmp(fp, top, tl) && fp[tl] == '/' && fp[tl + 1] && !strstr(fp + tl, "/../") && !str_ends_with_ci(fp, "/..")) {
+                path_join(sub, sizeof sub, dest, fp + tl + 1);
+                path_join(fdest, sizeof fdest, sub, fn);
+                mkdir_p(sub);
+            } else {
+                path_join(fdest, sizeof fdest, dest, fn);
+            }
             int64_t size = (int64_t)jget_num(f, "file_size_bytes", -1);
             if (file_size(fdest) == size) {
                 base += size;
@@ -793,19 +1022,19 @@ static void run_rom_job(job *j) {
     }
 
     if (ok && !cancelled(j)) {
-        record_rom(j, rom, m, dest, multi);
-        LOGI("downloaded %s to %s", j->name, dest);
+        record_rom(j, rom, m, game, multi);
+        LOGI("downloaded %s to %s", j->name, game);
         /* The extra emulators for this system get the same game: a hard link
          * where they share a drive, a copy where they don't. */
         for (int i = 0; i < n; i++) {
             const profile_map *x = &maps[i];
-            if (x == m || !x->extra || !profile_map_handles(x, slug, jget_str(rom, "platform_fs_slug", ""))) continue;
+            if (x == m || !x->extra || x->twin || !profile_map_handles(x, slug, jget_str(rom, "platform_fs_slug", ""))) continue;
             int covered = plat_is_mount(x->rom_dir);
             for (int k = 0; k < n && !covered; k++) covered = maps[k].mount_title[0] && !strcmp(maps[k].own_rom_dir, x->rom_dir);
             if (covered) continue; /* an extra's mount shows it the game */
             char other[PATH_MAX_LEN];
-            path_join(other, sizeof other, x->rom_dir, fs_name);
-            if (!strcmp(other, dest)) continue;
+            path_join(other, sizeof other, x->rom_dir, path_basename(game));
+            if (!strcmp(other, game)) continue;
             mkdir_p(x->rom_dir);
             pthread_mutex_lock(&g_q_lock);
             snprintf(j->note, sizeof j->note, "Copying to %s", x->profile_name);
@@ -813,7 +1042,7 @@ static void run_rom_job(job *j) {
             j->speed = 0;
             j->sample_t = 0;
             pthread_mutex_unlock(&g_q_lock);
-            if (link_or_copy_progress(dest, other, progress_cb, j) == 0) {
+            if (link_or_copy_progress(game, other, progress_cb, j) == 0) {
                 record_rom(j, rom, x, other, multi);
                 LOGI("also for %s: %s", x->profile_name, other);
             } else {
@@ -823,9 +1052,10 @@ static void run_rom_job(job *j) {
         finish_download(j, maps, n, rom);
     } else {
         if (cancelled(j) && !(multi && had)) discard_partial(dest, multi);
+        if (wrap && !had) rmdir(game); /* only when empty */
         job_end(j, JOB_ERROR, "%s", r.error);
     }
-    free(maps);
+    profiles_free(maps);
     cJSON_Delete(rom);
 }
 
@@ -837,13 +1067,13 @@ static void run_firmware_job(job *j) {
     snprintf(path, sizeof path, "/api/platforms/%d", j->target_id);
     cJSON *plat = romm_call("GET", path, NULL, &st);
     pthread_mutex_lock(&g_q_lock);
-    str_copy(j->platform, sizeof j->platform, jget_str(plat, "display_name", jget_str(plat, "name", "")));
+    str_copy(j->platform, sizeof j->platform, console_name(plat, "slug", "fs_slug", jget_str(plat, "display_name", "")[0] ? "display_name" : "name"));
     pthread_mutex_unlock(&g_q_lock);
     if (st != 200 || !profile_find_for_platform(maps, n, jget_str(plat, "slug", ""), jget_str(plat, "fs_slug", ""))) {
         if (st == 200 && maps_failed(maps, n)) job_end(j, JOB_ERROR, MAPS_SHORT_MSG "%s", "");
         else job_end(j, JOB_ERROR, "no emulator is set up for %s", plat ? jget_str(plat, "slug", "") : "this platform");
         cJSON_Delete(plat);
-        free(maps);
+        profiles_free(maps);
         return;
     }
     /* Every emulator that plays it gets them, as a sync does. */
@@ -857,7 +1087,7 @@ static void run_firmware_job(job *j) {
     char msg[32];
     snprintf(msg, sizeof msg, "%d file(s) failed", failed);
     job_end(j, failed || count < 0 ? JOB_ERROR : JOB_DONE, "%s", msg);
-    free(maps);
+    profiles_free(maps);
 }
 
 static int concurrency(void) {
@@ -901,9 +1131,15 @@ static void job_requeue(job *j) {
     memset(&j->saves, 0, sizeof j->saves);
 }
 
+/* Whether a job fetches what another does: the same game, unless they're
+ * different discs of it. */
+static int same_files(const job *p, job_type type, int id, int disc) {
+    return p->type == type && p->target_id == id && (!p->disc || !disc || p->disc == disc);
+}
+
 static int downloading(const job *j) {
     for (const job *p = g_jobs; p; p = p->next)
-        if (p != j && p->type == j->type && p->target_id == j->target_id && !finished(p)) return 1;
+        if (p != j && same_files(p, j->type, j->target_id, j->disc) && !finished(p)) return 1;
     return 0;
 }
 
@@ -921,8 +1157,55 @@ static void romm_back(const char *origin) {
     if (n) LOGI("%s answers again: restarting %d download%s", origin, n, n == 1 ? "" : "s");
 }
 
+/* What a download or a copy left in dir and the folders in it when the
+ * payload stopped under it (an update, a crash, the console going off):
+ * .part and .tmp files, and a folder only they were in. Nothing is
+ * downloading or copying yet at startup, so none are anyone's. */
+static int clear_parts_in(const char *dir, int depth) {
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+    struct dirent *de;
+    int gone = 0;
+    while ((de = readdir(d))) {
+        if (de->d_name[0] == '.') continue;
+        char path[PATH_MAX_LEN];
+        path_join(path, sizeof path, dir, de->d_name);
+        if (depth > 0 && dir_exists(path) && !plat_is_mount(path)) {
+            const int here = clear_parts_in(path, depth - 1);
+            if (here && rmdir(path) == 0) LOGI("removed %s, a download or copy that didn't finish", path);
+            gone += here;
+        } else if (ext_in_list(de->d_name, ".part,.tmp") && unlink(path) == 0) {
+            LOGI("removed %s, a download or copy that didn't finish", path);
+            gone++;
+        }
+    }
+    closedir(d);
+    return gone;
+}
+
+static void clear_parts(void) {
+    profile_map *maps = NULL;
+    int n = load_maps(&maps);
+    for (int i = 0; i < n; i++) {
+        const char *dirs[] = {maps[i].own_rom_dir, maps[i].rom_dir, maps[i].update_dir, maps[i].dlc_dir};
+        for (size_t k = 0; k < sizeof dirs / sizeof dirs[0]; k++) {
+            int seen = 0;
+            for (size_t j = 0; j < k; j++) seen |= !strcmp(dirs[j], dirs[k]);
+            if (dirs[k][0] && !seen && !plat_is_mount(dirs[k])) clear_parts_in(dirs[k], 1);
+        }
+    }
+    profiles_free(maps);
+}
+
 void library_init(void) {
     http_on_back(romm_back);
+    clear_parts();
+    /* A copy: comparing old copies can take a while, and nothing waits on it. */
+    config_lock();
+    cJSON *profiles = cJSON_Duplicate(g_cfg.profiles, 1);
+    config_unlock();
+    profiles_follow_moves(profiles);
+    cJSON_Delete(profiles);
     for (int i = 0; i < MAX_WORKERS; i++) {
         thread_start(worker, NULL);
     }
@@ -959,10 +1242,10 @@ static void trim_jobs(void) {
     }
 }
 
-static int enqueue(job_type type, int id, const char *name, const char *cover, char *err, int en) {
+static int enqueue(job_type type, int id, int disc, const char *name, const char *cover, char *err, int en) {
     pthread_mutex_lock(&g_q_lock);
     for (job *p = g_jobs; p; p = p->next) {
-        if (p->type == type && p->target_id == id && !finished(p)) {
+        if (same_files(p, type, id, disc) && !finished(p)) {
             pthread_mutex_unlock(&g_q_lock);
             snprintf(err, (size_t)en, "already downloading");
             return -1;
@@ -976,6 +1259,7 @@ static int enqueue(job_type type, int id, const char *name, const char *cover, c
     }
     j->type = type;
     j->target_id = id;
+    j->disc = disc;
     str_copy(j->name, sizeof j->name, name);
     str_copy(j->cover, sizeof j->cover, cover ? cover : "");
     j->id = ++g_job_seq;
@@ -987,7 +1271,7 @@ static int enqueue(job_type type, int id, const char *name, const char *cover, c
     return 0;
 }
 
-int library_queue_rom(int rom_id, const char *name, const char *cover, char *err, int en) {
+int library_queue_rom(int rom_id, int disc, const char *name, const char *cover, char *err, int en) {
     /* The name the client shows, so the download is named from the start;
      * RomM's own replaces it once the job runs. */
     char fallback[32];
@@ -1003,11 +1287,52 @@ int library_queue_rom(int rom_id, const char *name, const char *cover, char *err
     if (refused) snprintf(err, (size_t)en, ARCHIVED_MSG, archive);
     cJSON_Delete(rom);
     if (refused) return -1;
-    return enqueue(JOB_ROM, rom_id, name && name[0] ? name : fallback, cover, err, en);
+    return enqueue(JOB_ROM, rom_id, disc > 0 ? disc : 0, name && name[0] ? name : fallback, cover, err, en);
+}
+
+int library_queue_scope(const library_scope *scope, int *queued, int *skipped, char *err, int en) {
+    *queued = *skipped = 0;
+    /* Games of a platform nothing here plays would only fail in the queue. */
+    cJSON *plats = library_platforms(err, en);
+    if (!plats) return -1;
+    int played[256], np = 0;
+    const cJSON *p, *it;
+    cJSON_ArrayForEach(p, plats)
+        if (np < (int)(sizeof played / sizeof played[0]) && jget_str(p, "profile", "")[0])
+            played[np++] = (int)jget_num(p, "id", 0);
+    cJSON_Delete(plats);
+    for (int offset = 0, total = 1; offset < total;) {
+        cJSON *page = library_roms(scope, "", offset, 500, err, en);
+        if (!page) return -1;
+        total = (int)jget_num(page, "total", 0);
+        int got = 0;
+        cJSON_ArrayForEach(it, cJSON_GetObjectItemCaseSensitive(page, "items")) {
+            got++;
+            const int plat = (int)jget_num(it, "platform_id", 0);
+            int ok = 0;
+            for (int k = 0; k < np && !ok; k++) ok = played[k] == plat;
+            if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(it, "not_game"))) continue;
+            if (!ok || cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(it, "installed")) ||
+                cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(it, "archived"))) {
+                ++*skipped;
+                continue;
+            }
+            char e2[160];
+            if (enqueue(JOB_ROM, (int)jget_num(it, "id", 0), 0, jget_str(it, "name", ""), jget_str(it, "cover", ""), e2,
+                        sizeof e2) == 0)
+                ++*queued;
+            else
+                ++*skipped; /* already downloading */
+        }
+        cJSON_Delete(page);
+        if (!got) break;
+        offset += got;
+    }
+    return 0;
 }
 
 int library_queue_firmware(int platform_id, char *err, int en) {
-    return enqueue(JOB_FIRMWARE, platform_id, "BIOS files", NULL, err, en);
+    return enqueue(JOB_FIRMWARE, platform_id, 0, "BIOS files", NULL, err, en);
 }
 
 int library_cancel(int id, char *err, int en) {
@@ -1113,6 +1438,40 @@ int library_delete_rom(int rom_id, char *err, int en) {
     return 0;
 }
 
+int library_delete_disc(int rom_id, int disc, char *err, int en) {
+    char key[12];
+    snprintf(key, sizeof key, "%d", disc);
+    int found = 0, left = 0;
+    state_lock();
+    const cJSON *e, *d, *f;
+    cJSON_ArrayForEach(e, state_section("roms")) {
+        const cJSON *discs = cJSON_GetObjectItemCaseSensitive(e, "discs");
+        if ((int)jget_num(e, "rom_id", -1) != rom_id || !cJSON_IsObject(discs)) continue;
+        cJSON_ArrayForEach(d, discs) {
+            const int this_one = !strcmp(d->string, key);
+            found |= this_one;
+            cJSON_ArrayForEach(f, d) {
+                char path[PATH_MAX_LEN];
+                path_join(path, sizeof path, e->string, cJSON_IsString(f) ? f->valuestring : "");
+                if (!this_one) {
+                    left |= file_exists(path);
+                } else if (file_exists(path)) {
+                    LOGI("removing %s (disc %d; saves are kept)", path, disc);
+                    unlink(path);
+                }
+            }
+        }
+    }
+    state_unlock();
+    if (!found) {
+        snprintf(err, (size_t)en, "no disc %d of that game here", disc);
+        return -1;
+    }
+    if (!left) return library_delete_rom(rom_id, err, en); /* the last disc: the folder goes too */
+    installed_changed();
+    return 0;
+}
+
 cJSON *library_downloads(void) {
     static const char *names[] = {"queued", "downloading", "done", "error", "cancelled", "syncing"};
     cJSON *arr = cJSON_CreateArray();
@@ -1122,6 +1481,7 @@ cJSON *library_downloads(void) {
         cJSON_AddNumberToObject(o, "id", j->id);
         cJSON_AddStringToObject(o, "type", j->type == JOB_ROM ? "rom" : "firmware");
         cJSON_AddNumberToObject(o, j->type == JOB_ROM ? "rom_id" : "platform_id", j->target_id);
+        if (j->disc) cJSON_AddNumberToObject(o, "disc", j->disc);
         cJSON_AddStringToObject(o, "name", j->name);
         cJSON_AddStringToObject(o, "platform", j->platform);
         if (j->type == JOB_ROM) cJSON_AddStringToObject(o, "cover", j->cover);
@@ -1162,7 +1522,7 @@ cJSON *library_platforms(char *err, int en) {
         cJSON_AddNumberToObject(o, "id", jget_num(p, "id", 0));
         cJSON_AddStringToObject(o, "slug", jget_str(p, "slug", ""));
         cJSON_AddStringToObject(o, "fs_slug", jget_str(p, "fs_slug", ""));
-        cJSON_AddStringToObject(o, "name", jget_str(p, "display_name", jget_str(p, "name", "")));
+        cJSON_AddStringToObject(o, "name", console_name(p, "slug", "fs_slug", jget_str(p, "display_name", "")[0] ? "display_name" : "name"));
         cJSON_AddNumberToObject(o, "rom_count", jget_num(p, "rom_count", 0));
         cJSON_AddNumberToObject(o, "firmware_count", jget_num(p, "firmware_count", 0));
         if (m) {
@@ -1171,8 +1531,153 @@ cJSON *library_platforms(char *err, int en) {
         }
         cJSON_AddItemToArray(out, o);
     }
-    free(maps);
+    profiles_free(maps);
     cJSON_Delete(plats);
+    return out;
+}
+
+/* RomM's collection kinds: where it lists them, and what /api/roms takes to
+ * list one's games. Virtual ones come grouped by a type (genre, franchise...). */
+static const struct {
+    const char *name, *list_path, *rom_param;
+    int numeric_ids, offered;
+} g_collection_kinds[] = {
+    [COLLECTION_REGULAR] = {"regular", "/api/collections", "collection_id", 1, 1},
+    [COLLECTION_SMART] = {"smart", "/api/collections/smart", "smart_collection_id", 1, 1},
+    [COLLECTION_VIRTUAL] = {"virtual", "/api/collections/virtual?type=all", "virtual_collection_id", 0, 1},
+};
+#define COLLECTION_KINDS ((int)(sizeof g_collection_kinds / sizeof g_collection_kinds[0]))
+
+/* What a collection carries that nothing here reads: every game's id and
+ * large cover, about 200 bytes a game. Its small covers stay, for the first. */
+static const char *const COLLECTION_DROP[] = {"rom_ids", "path_covers_large", NULL};
+
+static int collection_offered(collection_kind kind) {
+    return kind >= 0 && (int)kind < COLLECTION_KINDS && g_collection_kinds[kind].offered;
+}
+
+collection_kind library_collection_kind(const char *name) {
+    for (int k = 0; k < COLLECTION_KINDS; k++)
+        if (name && !strcmp(name, g_collection_kinds[k].name) && collection_offered((collection_kind)k))
+            return (collection_kind)k;
+    return COLLECTION_NONE;
+}
+
+int library_collection_id_ok(collection_kind kind, const char *id) {
+    if (!collection_offered(kind) || !id || !id[0]) return 0;
+    if (!g_collection_kinds[kind].numeric_ids) return 1;
+    if (strlen(id) > 9) return 0;
+    for (const char *c = id; *c; c++)
+        if (!isdigit((unsigned char)*c)) return 0;
+    return atoi(id) > 0;
+}
+
+/* Where a virtual collection's type sorts: RomM's known ones in this order,
+ * any other after them. */
+static int virtual_type_order(const char *type) {
+    static const char *const order[] = {"franchise", "collection", "genre", "company", "mode", NULL};
+    for (int i = 0; order[i]; i++)
+        if (!strcmp(type, order[i])) return i;
+    return 99;
+}
+
+/* In sections, as clients show them: regular, smart, then virtual ones by
+ * type; in each the user's own first, then by name. */
+static int collection_order(const void *a, const void *b) {
+    const cJSON *x = *(const cJSON *const *)a, *y = *(const cJSON *const *)b;
+    int c = library_collection_kind(jget_str(x, "kind", "")) - library_collection_kind(jget_str(y, "kind", ""));
+    if (c) return c;
+    const char *xt = jget_str(x, "type", ""), *yt = jget_str(y, "type", "");
+    if ((c = virtual_type_order(xt) - virtual_type_order(yt)) || (c = strcmp(xt, yt))) return c;
+    int xo = !jget_str(x, "owner", "")[0], yo = !jget_str(y, "owner", "")[0];
+    if (xo != yo) return yo - xo;
+    return strcasecmp(jget_str(x, "name", ""), jget_str(y, "name", ""));
+}
+
+/* Adds kind's collections holding games to *all. 0, or -1 with err set. */
+static int collections_of(collection_kind kind, const char *me, cJSON ***all, int *n, int *cap, int *refused, char *err,
+                          int en) {
+    long st = 0;
+    cJSON *list = romm_get_lean(g_collection_kinds[kind].list_path, COLLECTION_DROP, &st);
+    if (st == 404 && kind != COLLECTION_REGULAR) { /* a RomM from before that kind */
+        cJSON_Delete(list);
+        return 0;
+    }
+    if (st != 200 || !cJSON_IsArray(list)) {
+        if (st == 403) {
+            snprintf(err, (size_t)en, "RomM didn't allow reading collections: pair RommPS again to grant it");
+            *refused = 1;
+        }
+        else if (st || !romm_no_answer(err, en))
+            snprintf(err, (size_t)en, "could not load collections (HTTP %ld)", st);
+        cJSON_Delete(list);
+        return -1;
+    }
+    const cJSON *c;
+    cJSON_ArrayForEach(c, list) {
+        const cJSON *id = cJSON_GetObjectItemCaseSensitive(c, "id");
+        int count = (int)jget_num(c, "rom_count", 0);
+        if (count <= 0) continue;
+        char id_text[512]; /* a virtual one's: base64 of its name and type */
+        if (cJSON_IsString(id)) str_copy(id_text, sizeof id_text, id->valuestring);
+        else if (cJSON_IsNumber(id)) snprintf(id_text, sizeof id_text, "%d", id->valueint);
+        else continue;
+        if (*n == *cap) {
+            int grown_cap = *cap ? *cap * 2 : 16;
+            cJSON **grown = realloc(*all, sizeof **all * (size_t)grown_cap);
+            if (!grown) break;
+            *all = grown;
+            *cap = grown_cap;
+        }
+        /* Its own cover, else the first of its games' RomM puts together. */
+        const char *cover = jget_str(c, "path_cover_small", "");
+        const cJSON *covers = cJSON_GetObjectItemCaseSensitive(c, "path_covers_small");
+        if (!cover[0] && cJSON_IsString(cJSON_GetArrayItem(covers, 0)))
+            cover = cJSON_GetArrayItem(covers, 0)->valuestring;
+        /* Another user's (RomM lists their public ones too). Virtual
+         * collections are nobody's, and with no user known all are ours. */
+        const char *owner = jget_str(c, "owner_username", "");
+        if (!me[0] || !strcmp(owner, me)) owner = "";
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "kind", g_collection_kinds[kind].name);
+        /* What a virtual one gathers by: "genre", "franchise", "company"... */
+        if (kind == COLLECTION_VIRTUAL) cJSON_AddStringToObject(o, "type", jget_str(c, "type", ""));
+        cJSON_AddStringToObject(o, "id", id_text);
+        cJSON_AddStringToObject(o, "name", jget_str(c, "name", ""));
+        /* A smart collection with no description says what it gathers. */
+        const char *about = jget_str(c, "description", "");
+        cJSON_AddStringToObject(o, "description", about[0] ? about : jget_str(c, "filter_summary", ""));
+        cJSON_AddNumberToObject(o, "rom_count", count);
+        cJSON_AddStringToObject(o, "cover", cover);
+        cJSON_AddStringToObject(o, "owner", owner);
+        (*all)[(*n)++] = o;
+    }
+    cJSON_Delete(list);
+    return 0;
+}
+
+cJSON *library_collections(collection_kind only, int *refused, char *err, int en) {
+    *refused = 0;
+    if (only != COLLECTION_NONE && !collection_offered(only)) {
+        snprintf(err, (size_t)en, "unknown kind of collection");
+        return NULL;
+    }
+    char me[sizeof g_cfg.username];
+    config_lock();
+    str_copy(me, sizeof me, g_cfg.username);
+    config_unlock();
+    cJSON **all = NULL;
+    int n = 0, cap = 0, failed = 0;
+    for (int k = 0; k < COLLECTION_KINDS && !failed; k++)
+        if (collection_offered((collection_kind)k) && (only == COLLECTION_NONE || only == (collection_kind)k))
+            failed = collections_of((collection_kind)k, me, &all, &n, &cap, refused, err, en) < 0;
+    cJSON *out = failed ? NULL : cJSON_CreateArray();
+    if (out && n) qsort(all, (size_t)n, sizeof *all, collection_order);
+    for (int i = 0; i < n; i++) {
+        if (out) cJSON_AddItemToArray(out, all[i]);
+        else cJSON_Delete(all[i]);
+    }
+    free(all);
     return out;
 }
 
@@ -1209,20 +1714,25 @@ static void record_link(const char *from, const char *to, const profile_map *x) 
 /* The extras that play the main emulator's games through a mount (see
  * profile_map.mount_games), for the console to put on when they start. */
 static void update_mounts(const profile_map *maps, int n) {
-    plat_mount *want = calloc((size_t)(n > 0 ? n : 1), sizeof *want);
+    plat_mount *want = calloc((size_t)(n > 0 ? 2 * n : 1), sizeof *want);
     int nw = 0;
     for (int i = 0; want && i < n; i++) {
         const profile_map *x = &maps[i];
-        if (!x->mount_title[0]) continue;
-        int dup = 0;
-        for (int k = 0; k < nw && !dup; k++) dup = !strcmp(want[k].title, x->mount_title) && !strcmp(want[k].into, x->mount_into);
-        if (dup) continue;
-        mkdir_p(x->own_rom_dir); /* to mount on */
-        str_copy(want[nw].title, sizeof want[nw].title, x->mount_title);
-        str_copy(want[nw].name, sizeof want[nw].name, x->profile_name);
-        str_copy(want[nw].from, sizeof want[nw].from, x->rom_dir);
-        str_copy(want[nw].into, sizeof want[nw].into, x->mount_into);
-        nw++;
+        /* Its games, then its saves (Dolphin's folders). */
+        const char *title[2] = {x->mount_title, x->saves_title}, *from[2] = {x->rom_dir, x->saves_from},
+                   *into[2] = {x->mount_into, x->saves_into}, *dir[2] = {x->own_rom_dir, x->saves_dir};
+        for (int s = 0; s < 2 && nw < 2 * n; s++) {
+            if (!title[s][0]) continue;
+            int dup = 0;
+            for (int k = 0; k < nw && !dup; k++) dup = !strcmp(want[k].title, title[s]) && !strcmp(want[k].into, into[s]);
+            if (dup) continue;
+            mkdir_p(dir[s]); /* to mount on */
+            str_copy(want[nw].title, sizeof want[nw].title, title[s]);
+            str_copy(want[nw].name, sizeof want[nw].name, x->profile_name);
+            str_copy(want[nw].from, sizeof want[nw].from, from[s]);
+            str_copy(want[nw].into, sizeof want[nw].into, into[s]);
+            nw++;
+        }
     }
     plat_mounts_set(want, nw);
     free(want);
@@ -1237,7 +1747,7 @@ static int move_to_main(const profile_map *maps, int n) {
     int moved = 0;
     for (int i = 0; i < n; i++) {
         const profile_map *x = &maps[i];
-        if (!x->mount_blocked || plat_is_mount(x->rom_dir)) continue;
+        if (x->twin || !x->mount_blocked || plat_is_mount(x->rom_dir)) continue;
         char sys[64];
         str_copy(sys, sizeof sys, x->romm_slugs);
         sys[strcspn(sys, ",")] = 0;
@@ -1307,18 +1817,18 @@ int library_own_games(const char *root, const char *system, const char *action, 
     }
     if (!x || !m || m == x || m->extra) {
         snprintf(err, (size_t)en, "no extra emulator at %s for %s with games in the way of its mount", root, system);
-        free(maps);
+        profiles_free(maps);
         return -1;
     }
     if (plat_is_mount(x->rom_dir)) {
         snprintf(err, (size_t)en, "close %s first", x->profile_name);
-        free(maps);
+        profiles_free(maps);
         return -1;
     }
     DIR *d = opendir(x->rom_dir);
     struct dirent *de;
     while (d && (de = readdir(d))) {
-        if (de->d_name[0] == '.' || ext_in_list(de->d_name, ".part,.tmp")) continue;
+        if (de->d_name[0] == '.' || ext_in_list(de->d_name, ".part,.tmp") || library_not_game(de->d_name)) continue;
         char from[PATH_MAX_LEN], to[PATH_MAX_LEN];
         path_join(from, sizeof from, x->rom_dir, de->d_name);
         path_join(to, sizeof to, m->rom_dir, de->d_name);
@@ -1350,7 +1860,7 @@ int library_own_games(const char *root, const char *system, const char *action, 
     }
     if (d) closedir(d);
     events_save();
-    free(maps);
+    profiles_free(maps);
     library_link_extras(); /* the mount can go on now */
     return done;
 }
@@ -1405,7 +1915,8 @@ static void clear_old_copies(const profile_map *maps, int n) {
         int gone = 0;
         int64_t freed = 0;
         while (d && (de = readdir(d))) {
-            if (de->d_name[0] == '.') continue;
+            /* Not a game (Crux2's README): the emulator's own, never a copy. */
+            if (de->d_name[0] == '.' || library_not_game(de->d_name)) continue;
             char copy[PATH_MAX_LEN], game[PATH_MAX_LEN];
             path_join(copy, sizeof copy, x->own_rom_dir, de->d_name);
             path_join(game, sizeof game, x->rom_dir, de->d_name);
@@ -1439,7 +1950,7 @@ static void clear_old_copies(const profile_map *maps, int n) {
         if (gone) {
             LOGI("%s plays %s's games now: removed %d copies (%lld bytes)", x->profile_name, x->rom_dir, gone, (long long)freed);
             events_save();
-            plat_notify("RommPS: %s now plays the same game files. %.1f GB freed.", x->profile_name, (double)freed / 1e9);
+            plat_notify("RommPS: %s now plays the same game files\n%.1f GB freed", x->profile_name, (double)freed / 1e9);
         }
     }
 }
@@ -1544,7 +2055,7 @@ again:;
     profile_map *maps = NULL;
     int n = load_maps(&maps), linked = 0;
     if (move_to_main(maps, n)) { /* now it can have a mount */
-        free(maps);
+        profiles_free(maps);
         maps = NULL;
         n = load_maps(&maps);
     }
@@ -1553,7 +2064,7 @@ again:;
     nx_unfold(maps, n);
     for (int i = 0; i < n; i++) {
         const profile_map *x = &maps[i];
-        if (!x->extra) continue;
+        if (!x->extra || x->twin) continue;
         char first[64];
         str_copy(first, sizeof first, x->romm_slugs);
         char *comma = strchr(first, ',');
@@ -1567,7 +2078,7 @@ again:;
         /* A folder several of the main emulator's systems share (Porpoise's
          * games: GameCube and Wii): only the games matched for this system. */
         int shared = 0;
-        for (int k = 0; k < n; k++) shared |= &maps[k] != m && !strcmp(maps[k].rom_dir, m->rom_dir);
+        for (int k = 0; k < n; k++) shared |= &maps[k] != m && !maps[k].twin && !strcmp(maps[k].rom_dir, m->rom_dir);
         DIR *d = opendir(m->rom_dir);
         struct dirent *de;
         int here = 0;
@@ -1600,13 +2111,13 @@ again:;
             str_copy(sys, sizeof sys, x->platform_dir);
             for (char *c = sys; *c; c++)
                 if (*c >= 'a' && *c <= 'z') *c -= 32;
-            plat_notify("RommPS: %d %s game%s now also sync with %s", here, sys, here == 1 ? "" : "s",
+            plat_notify("RommPS: %d %s %s with %s", here, sys, here == 1 ? "game now also syncs" : "games now also sync",
                         x->profile_name);
             linked += here;
         }
     }
     if (config_is_paired()) firmware_sync(maps, n, NULL, 0, NULL); /* emulators just turned on */
-    free(maps);
+    profiles_free(maps);
     if (linked) {
         LOGI("extra emulators: %d games linked in", linked);
         sync_request("extra emulators");
@@ -1685,6 +2196,7 @@ cJSON *library_details(int rom_id, char *err, int en) {
     add_version(out, rom);
     /* What a download would bring, or why it can't. */
     const int nx = is_switch(jget_str(rom, "platform_slug", ""));
+    if (!nx) add_version_list(out, rom);
     const char *archive = rom_archive(rom, nx);
     if (archive) {
         char msg[200];
@@ -1948,6 +2460,29 @@ int library_on_console(int id) {
     return 0;
 }
 
+cJSON *library_discs_here(int id) {
+    cJSON *here = NULL;
+    const cJSON *e, *disc, *file;
+    state_lock();
+    cJSON_ArrayForEach(e, state_section("roms")) {
+        const cJSON *discs = cJSON_GetObjectItemCaseSensitive(e, "discs");
+        if ((int)jget_num(e, "rom_id", -1) != id || !cJSON_IsObject(discs) || !dir_exists(e->string)) continue;
+        here = cJSON_CreateArray();
+        cJSON_ArrayForEach(disc, discs) {
+            int all = 1;
+            cJSON_ArrayForEach(file, disc) {
+                char path[PATH_MAX_LEN];
+                path_join(path, sizeof path, e->string, cJSON_IsString(file) ? file->valuestring : "");
+                all = all && file_exists(path);
+            }
+            if (all) cJSON_AddItemToArray(here, cJSON_CreateNumber(atoi(disc->string)));
+        }
+        break;
+    }
+    state_unlock();
+    return here;
+}
+
 /* The installed fingerprint, worked out lazily and kept: the status that
  * carries it is asked for every few seconds, and that never touches the
  * disk. It's looked at again at most every INSTALLED_SIG_SEC, never while a
@@ -2006,7 +2541,7 @@ unsigned library_installed_sig(void) {
 #define PAGE_CACHE_SLOTS 32
 #define PAGE_CACHE_SEC   300
 static struct {
-    char key[1100]; /* the request path (up to 1024) and its offset and limit */
+    char key[3200]; /* the request path (up to 3072) and its offset and limit */
     double at;
     cJSON *page;
 } g_pages[PAGE_CACHE_SLOTS];
@@ -2040,6 +2575,15 @@ static void page_cache_put(const char *key, const cJSON *page) {
     pthread_mutex_unlock(&g_pages_lock);
 }
 
+/* A game's card stands for every version of it: on the console when any is. */
+static int any_on_console(const cJSON *o) {
+    if (library_on_console((int)jget_num(o, "id", 0))) return 1;
+    const cJSON *s;
+    cJSON_ArrayForEach(s, cJSON_GetObjectItemCaseSensitive(o, "siblings"))
+        if (library_on_console((int)s->valuedouble)) return 1;
+    return 0;
+}
+
 /* Keeps only what the library page shows of each game. */
 static int add_library_rom(const cJSON *it, const cJSON *page, int first, void *ctx) {
     cJSON *out = ctx;
@@ -2061,7 +2605,6 @@ static int add_library_rom(const cJSON *it, const cJSON *page, int first, void *
         covers_warm(jget_str(it, "path_cover_small", "")); /* fetched ahead, in the background */
     cJSON_AddNumberToObject(o, "platform_id", jget_num(it, "platform_id", 0));
     cJSON_AddBoolToObject(o, "multi", cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(it, "has_multiple_files")));
-    cJSON_AddBoolToObject(o, "installed", library_on_console(id));
     /* A Switch game's update or DLC comes with the game, and isn't listed. */
     const int nx = is_switch(jget_str(it, "platform_slug", ""));
     unsigned long long game;
@@ -2087,6 +2630,7 @@ static int add_library_rom(const cJSON *it, const cJSON *page, int first, void *
     const char *format = ps5_rom_format(it);
     if (format) add_ps5_name(o, jget_str(it, "name", jget_str(it, "fs_name", "")), format);
     cJSON_AddItemToArray(cJSON_GetObjectItemCaseSensitive(out, "items"), o);
+    cJSON_AddBoolToObject(o, "installed", any_on_console(o));
     return 0;
 }
 
@@ -2166,7 +2710,8 @@ static void nx_collapse(cJSON *page) {
  * takes a second or two for a page of a big platform. One thread, working
  * from the latest page shown: what was asked for meanwhile is dropped. */
 static struct {
-    int busy, pending, platform_id, offset, limit, total;
+    int busy, pending, offset, limit, total;
+    library_scope scope;
     char path[sizeof g_pages[0].key], search[256];
     pthread_t thread;
 } g_near;
@@ -2190,7 +2735,8 @@ static void *near_pages_thread(void *arg) {
     g_near.thread = pthread_self();
     while (g_near.pending) {
         g_near.pending = 0;
-        int platform_id = g_near.platform_id, offset = g_near.offset, limit = g_near.limit, total = g_near.total;
+        library_scope scope = g_near.scope;
+        int offset = g_near.offset, limit = g_near.limit, total = g_near.total;
         str_copy(path, sizeof path, g_near.path);
         str_copy(search, sizeof search, g_near.search);
         pthread_mutex_unlock(&g_pages_lock);
@@ -2198,7 +2744,7 @@ static void *near_pages_thread(void *arg) {
         const int near[3] = {offset + limit, offset + 2 * limit, offset - limit};
         for (int k = 0; k < 3; k++) {
             if (near[k] < 0 || near[k] >= total || page_cached(path, near[k], limit)) continue;
-            cJSON_Delete(library_roms(platform_id, search, near[k], limit, err, sizeof err));
+            cJSON_Delete(library_roms(&scope, search, near[k], limit, err, sizeof err));
             pthread_mutex_lock(&g_pages_lock);
             int moved = g_near.pending;
             pthread_mutex_unlock(&g_pages_lock);
@@ -2212,7 +2758,8 @@ static void *near_pages_thread(void *arg) {
     return NULL;
 }
 
-static void fetch_near_pages(const char *path, int platform_id, const char *search, int offset, int limit, int total) {
+static void fetch_near_pages(const char *path, const library_scope *scope, const char *search, int offset, int limit,
+                             int total) {
     if (!(offset + limit < total && !page_cached(path, offset + limit, limit)) &&
         !(offset - limit >= 0 && !page_cached(path, offset - limit, limit)))
         return;
@@ -2222,7 +2769,7 @@ static void fetch_near_pages(const char *path, int platform_id, const char *sear
         return;
     }
     g_near.pending = 1;
-    g_near.platform_id = platform_id;
+    g_near.scope = *scope;
     g_near.offset = offset;
     g_near.limit = limit;
     g_near.total = total;
@@ -2238,22 +2785,74 @@ static void fetch_near_pages(const char *path, int platform_id, const char *sear
     }
 }
 
-cJSON *library_roms(int platform_id, const char *search, int offset, int limit, char *err, int en) {
-    char path[1024];
+/* A platform's versions of a game come as one entry (RomM groups them by their
+ * metadata), except on the Switch, where an update or DLC can share its game's
+ * metadata and nx_collapse sorts the entries out instead, and on the PS5 and
+ * PS4, where each format of a game is a card of its own. Asked once a
+ * platform; a search across every platform is grouped. */
+static int group_versions(int platform_id) {
+    static struct { int id, group; } seen[64];
+    static int count;
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    if (platform_id <= 0) return 1;
+    pthread_mutex_lock(&lock);
+    for (int i = 0; i < count; i++)
+        if (seen[i].id == platform_id) {
+            const int group = seen[i].group;
+            pthread_mutex_unlock(&lock);
+            return group;
+        }
+    pthread_mutex_unlock(&lock);
+    char path[64];
+    snprintf(path, sizeof path, "/api/platforms/%d", platform_id);
+    long st = 0;
+    cJSON *p = romm_call("GET", path, NULL, &st);
+    if (st != 200 || !p) { /* can't tell: one card per entry, as before */
+        cJSON_Delete(p);
+        return 0;
+    }
+    /* PS5 and PS4 games stay one card a file: the same game as an FPKG and a
+     * game folder are two copies to pick from, each named by its format. */
+    const char *slug = jget_str(p, "slug", ""), *fs_slug = jget_str(p, "fs_slug", "");
+    const int group = !is_switch(slug) && !is_ps5(slug) && !is_ps5(fs_slug) && !is_ps4(slug) && !is_ps4(fs_slug);
+    cJSON_Delete(p);
+    pthread_mutex_lock(&lock);
+    if (count < 64) seen[count].id = platform_id, seen[count].group = group, count++;
+    pthread_mutex_unlock(&lock);
+    return group;
+}
+
+cJSON *library_roms(const library_scope *scope, const char *search, int offset, int limit, char *err, int en) {
+    char path[3072], filter[2048] = "";
+    int o = 0;
+    /* Platform 0: every platform (a search across the library, or a
+     * collection's games). Games whose files RomM's last scan didn't find are
+     * left out: they can't come down. */
+    if (scope->platform_id > 0) o += snprintf(filter, sizeof filter, "&platform_ids=%d", scope->platform_id);
+    if (scope->collection != COLLECTION_NONE) {
+        if (!library_collection_id_ok(scope->collection, scope->collection_id)) {
+            snprintf(err, (size_t)en, "no such collection");
+            return NULL;
+        }
+        char *id = http_escape(scope->collection_id);
+        o += snprintf(filter + o, sizeof filter - (size_t)o, "&%s=%s", g_collection_kinds[scope->collection].rom_param, id);
+        free(id);
+    }
+    /* Not in a collection: RomM fronts a game's group with one version, and a
+     * collection holding others (Square USA: Final Fantasy IX's discs, not
+     * its .m3u) would lose the game. A collection lists what's in it. */
+    if (group_versions(scope->platform_id) && scope->collection == COLLECTION_NONE)
+        snprintf(filter + o, sizeof filter - (size_t)o, "&group_by_meta_id=true");
     char *q = http_escape(search ? search : "");
-    /* Platform 0: every platform (a search across the library). */
-    if (platform_id > 0)
-        snprintf(path, sizeof path, "/api/roms?platform_ids=%d&search_term=%s&order_by=name&order_dir=asc" ROMS_LEAN, platform_id, q);
-    else
-        snprintf(path, sizeof path, "/api/roms?search_term=%s&order_by=name&order_dir=asc" ROMS_LEAN, q);
+    snprintf(path, sizeof path, "/api/roms?search_term=%s%s&order_by=name&order_dir=asc&missing=false" ROMS_LEAN, q, filter);
     free(q);
     char key[sizeof g_pages[0].key];
     snprintf(key, sizeof key, "%s&offset=%d&limit=%d", path, offset, limit);
     cJSON *out = page_cache_get(key), *it;
     if (out) {
         cJSON_ArrayForEach(it, cJSON_GetObjectItemCaseSensitive(out, "items"))
-            cJSON_ReplaceItemInObjectCaseSensitive(it, "installed", cJSON_CreateBool(library_on_console((int)jget_num(it, "id", 0))));
-        fetch_near_pages(path, platform_id, search, offset, limit, (int)jget_num(out, "total", 0));
+            cJSON_ReplaceItemInObjectCaseSensitive(it, "installed", cJSON_CreateBool(any_on_console(it)));
+        fetch_near_pages(path, scope, search, offset, limit, (int)jget_num(out, "total", 0));
         return out;
     }
     out = cJSON_CreateObject();
@@ -2268,6 +2867,6 @@ cJSON *library_roms(int platform_id, const char *search, int offset, int limit, 
     if (!cJSON_GetObjectItemCaseSensitive(out, "total")) cJSON_AddNumberToObject(out, "total", 0);
     nx_collapse(out);
     page_cache_put(key, out);
-    fetch_near_pages(path, platform_id, search, offset, limit, (int)jget_num(out, "total", 0));
+    fetch_near_pages(path, scope, search, offset, limit, (int)jget_num(out, "total", 0));
     return out;
 }

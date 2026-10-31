@@ -20,7 +20,6 @@
 #define RA_ROM_DIR "{root}/content/{platform}"
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
-static void rekey(const char *from, const char *to);
 static time_t g_checked;
 static cJSON *g_pending;
 
@@ -44,8 +43,8 @@ int ra2_layout(const char *root) {
 
 int ra2_is_v2(const char *root) { return ra2_layout(root) >= 2; }
 
-/* 2.0 plays PS2 with PS5SX2, not LRPS2: two shared memory cards (memcard.c
- * backs them up), none per game. */
+/* 2.0 plays PS2 with PS5SX2, not LRPS2: its memory cards are as the core's
+ * rule says (platform/retroarch_cores.json), not LRPS2's. */
 static int to_ps5sx2(cJSON *p, const char *root) {
     char core[PATH_MAX_LEN];
     path_join(core, sizeof core, root, "cores/ps5sx2_libretro.info");
@@ -57,6 +56,7 @@ static int to_ps5sx2(cJSON *p, const char *root) {
         jset_str(e, "core_name", "PS5SX2");
         cJSON_DeleteItemFromObjectCaseSensitive(e, "save_exts");
         cJSON_DeleteItemFromObjectCaseSensitive(e, "sync_requires_option");
+        detect_apply_core_rules(e, "ps2", "PS5SX2", 1);
         LOGI("RetroArch 2.0 at %s: PS2 plays with PS5SX2", root);
         return 1;
     }
@@ -158,7 +158,7 @@ void ra2_check(int now) {
     const cJSON *mv;
     cJSON_ArrayForEach(mv, moves) {
         state_lock();
-        rekey(jget_str(mv, "from", ""), jget_str(mv, "to", ""));
+        state_rekey(jget_str(mv, "from", ""), jget_str(mv, "to", ""));
         state_save();
         state_unlock();
         LOGI("RetroArch moved %s to %s: the games' records follow", jget_str(mv, "from", ""), jget_str(mv, "to", ""));
@@ -215,7 +215,7 @@ void ra2_check(int now) {
     } else {
         cJSON_Delete(folders);
     }
-    free(maps);
+    profiles_free(maps);
     pthread_mutex_unlock(&g_lock);
 }
 
@@ -224,28 +224,6 @@ cJSON *ra2_pending(void) {
     cJSON *j = g_pending ? cJSON_Duplicate(g_pending, 1) : NULL;
     pthread_mutex_unlock(&g_lock);
     return j;
-}
-
-/* Records under from (games, and saves kept beside them) follow it to to. */
-static void rekey(const char *from, const char *to) {
-    static const char *const sections[] = {"roms", "saves", "states", "conflicts"};
-    size_t fl = strlen(from);
-    for (size_t s = 0; s < sizeof sections / sizeof *sections; s++) {
-        cJSON *sec = state_section(sections[s]), *found = cJSON_CreateArray(), *e = sec->child;
-        while (e) {
-            cJSON *next = e->next;
-            if (!strncmp(e->string, from, fl) && (!e->string[fl] || e->string[fl] == '/' || e->string[fl] == '#'))
-                cJSON_AddItemToArray(found, cJSON_DetachItemViaPointer(sec, e));
-            e = next;
-        }
-        while ((e = cJSON_DetachItemFromArray(found, 0))) {
-            char key[PATH_MAX_LEN + 256];
-            snprintf(key, sizeof key, "%s%s", to, e->string + fl);
-            cJSON_DeleteItemFromObjectCaseSensitive(sec, key); /* an old record of something gone */
-            cJSON_AddItemToObject(sec, key, e);
-        }
-        cJSON_Delete(found);
-    }
 }
 
 /* Moves what's in from to to; how many failed. */
@@ -266,7 +244,7 @@ static int move_folder(const char *from, const char *to, int *moved) {
             continue;
         }
         state_lock();
-        rekey(src, dst);
+        state_rekey(src, dst);
         state_unlock();
         (*moved)++;
     }

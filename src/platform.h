@@ -61,6 +61,11 @@ void plat_notify(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 /* Title id of the foreground app. 1 if one is running, 0 if not, -1 if unknown. */
 int plat_running_title(char *title_id, size_t n);
 
+/* Whether any process of the app with that title id runs, foreground or not
+ * (a console resting with it open, where plat_running_title has none): 1 if
+ * one does, 0 if none, -1 if unknown. */
+int plat_app_alive(const char *title_id);
+
 /* Where config, state and logs are kept. */
 const char *plat_data_dir(void);
 

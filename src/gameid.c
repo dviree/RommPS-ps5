@@ -1,6 +1,7 @@
 #include "gameid.h"
 
 #include <ctype.h>
+#include <dirent.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -300,7 +301,8 @@ static void psx_close(psx_disc *d) {
     free(d->hunk);
 }
 
-/* One 2048-byte user-data sector. */
+/* One 2048-byte user-data sector. A DVD's CHD (PS2) keeps 2048-byte frames
+ * with no header; a CD's keeps whole 2352-byte frames (and subcode). */
 static int psx_sector(psx_disc *d, uint32_t lba, unsigned char *out) {
     unsigned char frame[2352];
     if (d->chd) {
@@ -309,14 +311,78 @@ static int psx_sector(psx_disc *d, uint32_t lba, unsigned char *out) {
             if (chd_read(d->chd, (uint32_t)hunk, d->hunk) != CHDERR_NONE) return -1;
             d->cached_hunk = hunk;
         }
-        memcpy(frame, d->hunk + (size_t)(lba % d->frames_per_hunk) * d->frame_bytes, sizeof frame);
+        const unsigned char *at = d->hunk + (size_t)(lba % d->frames_per_hunk) * d->frame_bytes;
+        if (d->frame_bytes < sizeof frame) {
+            if (d->frame_bytes < SECTOR) return -1;
+            memcpy(out, at, SECTOR);
+            return 0;
+        }
+        memcpy(frame, at, sizeof frame);
     } else if (d->raw) {
-        if (fseek(d->f, (long)lba * 2352, SEEK_SET) != 0 || fread(frame, 1, sizeof frame, d->f) != sizeof frame) return -1;
+        if (fseeko(d->f, (off_t)lba * 2352, SEEK_SET) != 0 || fread(frame, 1, sizeof frame, d->f) != sizeof frame) return -1;
     } else {
-        return fseek(d->f, (long)lba * SECTOR, SEEK_SET) == 0 && fread(out, 1, SECTOR, d->f) == SECTOR ? 0 : -1;
+        return fseeko(d->f, (off_t)lba * SECTOR, SEEK_SET) == 0 && fread(out, 1, SECTOR, d->f) == SECTOR ? 0 : -1;
     }
     /* Mode 2 (PS1 discs) has an 8-byte subheader after the 16-byte header. */
     memcpy(out, frame + (frame[15] == 2 ? 24 : 16), SECTOR);
+    return 0;
+}
+
+/* A file on the disc by its path ("SYSTEM.CNF", "\\DATA\\SLUS_123.45;1"):
+ * where it starts and how long it is. Names match without their ";1". */
+static int psx_find(psx_disc *d, const char *path, uint32_t *lba, uint32_t *size) {
+    unsigned char pvd[SECTOR];
+    if (psx_sector(d, 16, pvd) != 0 || pvd[0] != 1 || memcmp(pvd + 1, "CD001", 5) != 0) return -1;
+    uint32_t at = le32(pvd + 156 + 2), len = le32(pvd + 156 + 10);
+    int is_dir = 1;
+    while (*path == '\\' || *path == '/') path++;
+    while (*path) {
+        size_t nl = strcspn(path, "\\/;");
+        if (!is_dir || !nl) return -1;
+        if (len > 64 * SECTOR) len = 64 * SECTOR;
+        unsigned char *dir = malloc(len + SECTOR);
+        uint32_t got = 0;
+        while (dir && got < len && psx_sector(d, at + got / SECTOR, dir + got) == 0) got += SECTOR;
+        int found = 0;
+        for (uint32_t p = 0; dir && p + 33 < got && !found;) {
+            unsigned rl = dir[p];
+            if (!rl) {
+                p = (p / SECTOR + 1) * SECTOR;
+                continue;
+            }
+            unsigned fl = dir[p + 32];
+            const char *name = (const char *)dir + p + 33;
+            size_t base = 0;
+            while (base < fl && name[base] != ';') base++;
+            if (p + 33 + fl <= got && base == nl && !strncasecmp(name, path, nl)) {
+                at = le32(dir + p + 2);
+                len = le32(dir + p + 10);
+                is_dir = (dir[p + 25] & 2) != 0;
+                found = 1;
+            }
+            p += rl;
+        }
+        free(dir);
+        if (!found) return -1;
+        path += nl;
+        if (*path == ';') path += strcspn(path, "\\/");
+        while (*path == '\\' || *path == '/') path++;
+    }
+    if (is_dir) return -1;
+    *lba = at;
+    *size = len;
+    return 0;
+}
+
+/* SYSTEM.CNF's text, 0-terminated. */
+static int read_cnf(psx_disc *d, char *out, size_t n) {
+    uint32_t lba, len;
+    unsigned char cnf[SECTOR];
+    if (n < 2 || psx_find(d, "SYSTEM.CNF", &lba, &len) != 0 || psx_sector(d, lba, cnf) != 0) return -1;
+    size_t l = len < SECTOR ? len : SECTOR;
+    if (l > n - 1) l = n - 1;
+    memcpy(out, cnf, l);
+    out[l] = 0;
     return 0;
 }
 
@@ -344,38 +410,37 @@ static int serial_from_cnf(const char *cnf, char *out, size_t n) {
 
 int gameid_psx(const char *path, char *out, size_t n) {
     psx_disc d;
-    if (psx_open(&d, path) != 0) {
-        psx_close(&d);
-        return -1;
-    }
+    char cnf[SECTOR + 1];
+    int rc = psx_open(&d, path) == 0 && read_cnf(&d, cnf, sizeof cnf) == 0 ? serial_from_cnf(cnf, out, n) : -1;
+    psx_close(&d);
+    return rc;
+}
+
+int gameid_ps2_crc(const char *path, uint32_t *crc) {
+    psx_disc d;
+    char cnf[SECTOR + 1], boot[256];
+    uint32_t lba, len;
     int rc = -1;
-    unsigned char pvd[SECTOR], *dir = NULL;
-    if (psx_sector(&d, 16, pvd) == 0 && pvd[0] == 1 && !memcmp(pvd + 1, "CD001", 5)) {
-        uint32_t lba = le32(pvd + 156 + 2), size = le32(pvd + 156 + 10);
-        if (size > 64 * SECTOR) size = 64 * SECTOR;
-        dir = malloc(size + SECTOR);
-        uint32_t got = 0;
-        while (dir && got < size && psx_sector(&d, lba + got / SECTOR, dir + got) == 0) got += SECTOR;
-        for (uint32_t p = 0; dir && p + 33 < got;) {
-            unsigned rl = dir[p];
-            if (!rl) {
-                p = (p / SECTOR + 1) * SECTOR;
-                continue;
-            }
-            unsigned fl = dir[p + 32];
-            if (fl >= 10 && !strncasecmp((const char *)dir + p + 33, "SYSTEM.CNF", 10)) {
-                unsigned char cnf[SECTOR + 1];
-                if (psx_sector(&d, le32(dir + p + 2), cnf) == 0) {
-                    uint32_t len = le32(dir + p + 10);
-                    cnf[len < SECTOR ? len : SECTOR] = 0;
-                    rc = serial_from_cnf((const char *)cnf, out, n);
-                }
-                break;
-            }
-            p += rl;
-        }
+    if (psx_open(&d, path) != 0 || read_cnf(&d, cnf, sizeof cnf) != 0) goto out;
+    /* "BOOT2 = cdrom0:\SLUS_205.52;1": the file after the device. */
+    const char *b = strstr(cnf, "BOOT2"), *colon;
+    if (!b || !(colon = strchr(b, ':'))) goto out;
+    size_t bl = strcspn(colon + 1, "\r\n");
+    if (bl >= sizeof boot) goto out;
+    memcpy(boot, colon + 1, bl);
+    boot[bl] = 0;
+    if (psx_find(&d, boot, &lba, &len) != 0 || len < 4 || len > 64u << 20) goto out;
+    uint32_t x = 0, left = len & ~3u;
+    unsigned char sec[SECTOR];
+    for (uint32_t s = 0; left; s++) {
+        if (psx_sector(&d, lba + s, sec) != 0) goto out;
+        uint32_t take = left < SECTOR ? left : SECTOR;
+        for (uint32_t i = 0; i < take; i += 4) x ^= le32(sec + i);
+        left -= take;
     }
-    free(dir);
+    *crc = x;
+    rc = 0;
+out:
     psx_close(&d);
     return rc;
 }
@@ -571,4 +636,155 @@ int gameid_from_library(const char *library_json, const char *system, const char
     }
     cJSON_Delete(lib);
     return found;
+}
+
+/* XDVDFS, the Xbox disc filesystem: a root file's offset and size. The game
+ * partition sits at 0 in a trimmed .xiso, or one video partition in on a full
+ * disc image (XGD1). The magic is checked at both ends of the volume
+ * descriptor, so a stray copy inside game data doesn't pass for one. */
+static int xdvdfs_root_file(FILE *f, const char *name, uint64_t *off, uint32_t *size) {
+    static const uint64_t bases[] = {0, 34078720, 265879552, 405798912};
+    unsigned char vd[SECTOR];
+    for (size_t i = 0; i < sizeof bases / sizeof bases[0]; i++) {
+        if (read_at(f, (long)(bases[i] + 0x10000), vd, sizeof vd) != 0 || memcmp(vd, "MICROSOFT*XBOX*MEDIA", 20) != 0 ||
+            memcmp(vd + 0x7EC, "MICROSOFT*XBOX*MEDIA", 20) != 0)
+            continue;
+        uint32_t table_size = le32(vd + 0x18);
+        if (!table_size || table_size > 512 * 1024) return -1;
+        unsigned char *table = malloc(table_size);
+        if (!table || read_at(f, (long)(bases[i] + (uint64_t)le32(vd + 0x14) * SECTOR), table, table_size) != 0) {
+            free(table);
+            return -1;
+        }
+        /* A binary tree, ordered by the uppercased name, a prefix first.
+         * Children are in 4-byte units; 0 or 0xff is none. */
+        uint32_t at = 0;
+        int rc = -1;
+        for (int depth = 0; depth < 64 && at + 14 <= table_size; depth++) {
+            const unsigned char *e = table + at;
+            const size_t len = e[13];
+            if (at + 14 + len > table_size) break;
+            int cmp = 0;
+            for (size_t k = 0; k < len && !cmp; k++) {
+                if (!name[k]) cmp = -1;
+                else cmp = toupper((unsigned char)name[k]) - toupper(e[14 + k]);
+            }
+            if (!cmp && name[len]) cmp = 1;
+            if (!cmp) {
+                if (!(e[12] & 0x10)) {
+                    *off = bases[i] + (uint64_t)le32(e + 4) * SECTOR;
+                    *size = le32(e + 8);
+                    rc = 0;
+                }
+                break;
+            }
+            const uint16_t next = le16(e + (cmp < 0 ? 0 : 2));
+            if (!next || next == 0xff) break;
+            at = (uint32_t)next * 4;
+        }
+        free(table);
+        return rc;
+    }
+    return -1;
+}
+
+int gameid_xbox(const char *path, char *out, size_t n) {
+    char xbe[PATH_MAX_LEN];
+    str_copy(xbe, sizeof xbe, path);
+    if (dir_exists(path)) path_join(xbe, sizeof xbe, path, "default.xbe");
+    FILE *f = fopen(xbe, "rb");
+    if (!f || n < 9) {
+        if (f) fclose(f);
+        return -1;
+    }
+    unsigned char h[0x11C], cert[12];
+    uint64_t at = 0;
+    uint32_t size = sizeof h;
+    int rc = -1;
+    if (read_at(f, 0, h, 4) == 0 && (!memcmp(h, "XBEH", 4) || xdvdfs_root_file(f, "default.xbe", &at, &size) == 0) &&
+        size >= sizeof h && read_at(f, (long)at, h, sizeof h) == 0 && !memcmp(h, "XBEH", 4)) {
+        /* The certificate, by the address the image loads at. */
+        const uint32_t base = le32(h + 0x104), addr = le32(h + 0x118);
+        if (addr >= base && read_at(f, (long)(at + (addr - base)), cert, sizeof cert) == 0 && le32(cert) >= 12 && le32(cert) <= 0x1000) {
+            snprintf(out, n, "%08X", (unsigned)le32(cert + 8));
+            rc = 0;
+        }
+    }
+    fclose(f);
+    return rc;
+}
+
+
+static uint32_t be32(const unsigned char *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
+
+/* An STFS package's title id: "LIVE", "PIRS" or "CON " first, the title id at
+ * 0x360. A GOD game's header is one ("<title id>/00007000/<media id>"), and
+ * an Xbox Live Arcade game is one file of its own. */
+static int stfs_file(const char *path, char *out, size_t n) {
+    unsigned char h[0x364];
+    FILE *f = fopen(path, "rb");
+    int rc = -1;
+    if (f && read_at(f, 0, h, sizeof h) == 0 && (!memcmp(h, "LIVE", 4) || !memcmp(h, "PIRS", 4) || !memcmp(h, "CON ", 4)) &&
+        be32(h + 0x360)) {
+        snprintf(out, n, "%08X", (unsigned)be32(h + 0x360));
+        rc = 0;
+    }
+    if (f) fclose(f);
+    return rc;
+}
+
+/* The title id of the STFS header somewhere below dir. */
+static int stfs_title(const char *dir, char *out, size_t n, int depth) {
+    DIR *d = opendir(dir);
+    struct dirent *de;
+    int rc = -1;
+    while (d && rc && (de = readdir(d))) {
+        if (de->d_name[0] == '.') continue;
+        char path[PATH_MAX_LEN];
+        path_join(path, sizeof path, dir, de->d_name);
+        if (dir_exists(path)) {
+            if (depth < 3 && !str_ends_with_ci(de->d_name, ".data")) rc = stfs_title(path, out, n, depth + 1);
+        } else {
+            rc = stfs_file(path, out, n);
+        }
+    }
+    if (d) closedir(d);
+    return rc;
+}
+
+int gameid_x360(const char *path, char *out, size_t n) {
+    char xex[PATH_MAX_LEN];
+    str_copy(xex, sizeof xex, path);
+    if (dir_exists(path)) {
+        path_join(xex, sizeof xex, path, "default.xex");
+        if (!file_exists(xex)) return n >= 9 ? stfs_title(path, out, n, 0) : -1;
+    } else if (n >= 9 && stfs_file(path, out, n) == 0) {
+        return 0;
+    }
+    FILE *f = fopen(xex, "rb");
+    if (!f || n < 9) {
+        if (f) fclose(f);
+        return -1;
+    }
+    unsigned char h[0x18 + 64 * 8], info[16];
+    uint64_t at = 0;
+    uint32_t size = 0;
+    int rc = -1;
+    if (read_at(f, 0, h, 4) == 0 && (!memcmp(h, "XEX2", 4) || xdvdfs_root_file(f, "default.xex", &at, &size) == 0) &&
+        read_at(f, (long)at, h, 0x18) == 0 && !memcmp(h, "XEX2", 4)) {
+        /* The optional headers: key and value pairs, big-endian. The
+         * execution info's value is its offset from the XEX's start; its
+         * title id is 12 bytes in. */
+        uint32_t count = be32(h + 0x14);
+        if (count > 64) count = 64;
+        if (read_at(f, (long)at + 0x18, h + 0x18, count * 8) == 0)
+            for (uint32_t i = 0; i < count && rc; i++)
+                if (be32(h + 0x18 + i * 8) == 0x00040006 &&
+                    read_at(f, (long)(at + be32(h + 0x1C + i * 8)), info, sizeof info) == 0 && be32(info + 12)) {
+                    snprintf(out, n, "%08X", (unsigned)be32(info + 12));
+                    rc = 0;
+                }
+    }
+    fclose(f);
+    return rc;
 }

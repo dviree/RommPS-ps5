@@ -17,6 +17,9 @@
 #include "util.h"
 #ifdef ROMM_EMBED_CA
 #include "cacert_pem.h" /* generated from the SDK's Mozilla CA bundle */
+#include <openssl/pem.h>
+#include <openssl/ssl.h>
+#include <openssl/x509.h>
 #endif
 
 static char g_ca_bundle[PATH_MAX_LEN];
@@ -24,6 +27,12 @@ static char g_ca_bundle[PATH_MAX_LEN];
  * which have no system CA store. */
 static char *g_ca_blob;
 static size_t g_ca_blob_len;
+#ifdef ROMM_EMBED_CA
+/* The same roots, parsed once and handed to every connection. Given as a
+ * blob, libcurl parses all ~140 of them again for each new connection and
+ * caches nothing, which the PS4's memory pool can't afford. */
+static X509_STORE *g_ca_store;
+#endif
 static int g_tls_verify = 1;
 static char g_user_agent[64];
 
@@ -42,6 +51,7 @@ static pthread_mutex_t g_share_locks[CURL_LOCK_DATA_LAST];
  * the freshest) or a new one, and gives it back; POOL_MAX are kept. */
 #define POOL_MAX 8
 static CURL *g_pool[POOL_MAX];
+static int pool_max(void) { return strcmp(plat_info()->name, "ps4") ? POOL_MAX : 3; }
 static int g_npool;
 static pthread_mutex_t g_pool_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -57,7 +67,7 @@ static CURL *handle_take(void) {
 
 static void handle_give(CURL *c) {
     pthread_mutex_lock(&g_pool_lock);
-    const int kept = g_npool < POOL_MAX;
+    const int kept = g_npool < pool_max();
     if (kept) g_pool[g_npool++] = c;
     pthread_mutex_unlock(&g_pool_lock);
     if (!kept) curl_easy_cleanup(c);
@@ -67,6 +77,23 @@ static double mono_sec(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+/* When a request last failed for want of memory: a reply we couldn't keep in
+ * memory (a download's write error is the disk's), or curl or OpenSSL coming
+ * up empty. */
+static double g_oom_at = -1;
+static pthread_mutex_t g_oom_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int out_of_memory(CURLcode rc, int in_memory) {
+    return rc == CURLE_OUT_OF_MEMORY || rc == CURLE_SSL_CACERT_BADFILE || (in_memory && rc == CURLE_WRITE_ERROR);
+}
+
+int http_out_of_memory(void) {
+    pthread_mutex_lock(&g_oom_lock);
+    const int recent = g_oom_at >= 0 && mono_sec() - g_oom_at < 30;
+    pthread_mutex_unlock(&g_oom_lock);
+    return recent;
 }
 
 /* A server that doesn't answer at all (no connection) isn't asked again by
@@ -166,6 +193,37 @@ static void share_unlock(CURL *c, curl_lock_data data, void *ud) {
     if (data < CURL_LOCK_DATA_LAST) pthread_mutex_unlock(&g_share_locks[data]);
 }
 
+#ifdef ROMM_EMBED_CA
+/* What libcurl does with a CA blob (load_cacert_from_memory and the flags it
+ * sets), done once. NULL if not one certificate in it could be read. */
+static X509_STORE *ca_store(const char *pem, size_t len) {
+    X509_STORE *st = X509_STORE_new();
+    BIO *bio = st && len <= 0x7fffffff ? BIO_new_mem_buf(pem, (int)len) : NULL;
+    STACK_OF(X509_INFO) *infos = bio ? PEM_X509_INFO_read_bio(bio, NULL, NULL, NULL) : NULL;
+    int n = 0;
+    for (int i = 0; infos && i < sk_X509_INFO_num(infos); i++) {
+        X509_INFO *inf = sk_X509_INFO_value(infos, i);
+        if (inf->x509 && X509_STORE_add_cert(st, inf->x509)) n++;
+    }
+    sk_X509_INFO_pop_free(infos, X509_INFO_free);
+    BIO_free(bio);
+    if (!n) {
+        X509_STORE_free(st);
+        return NULL;
+    }
+    X509_STORE_set_flags(st, X509_V_FLAG_TRUSTED_FIRST | X509_V_FLAG_PARTIAL_CHAIN);
+    return st;
+}
+
+/* Every connection's SSL_CTX gets the one store; libcurl's own, empty, goes. */
+static CURLcode use_ca_store(CURL *c, void *ssl_ctx, void *ud) {
+    (void)c;
+    if (!X509_STORE_up_ref(ud)) return CURLE_OUT_OF_MEMORY;
+    SSL_CTX_set_cert_store(ssl_ctx, ud);
+    return CURLE_OK;
+}
+#endif
+
 void http_global_init(const char *ca_bundle, int tls_verify) {
     curl_global_init(CURL_GLOBAL_ALL);
     for (int i = 0; i < CURL_LOCK_DATA_LAST; i++) pthread_mutex_init(&g_share_locks[i], NULL);
@@ -193,6 +251,11 @@ void http_global_init(const char *ca_bundle, int tls_verify) {
         }
     }
     free(user);
+    const char *tls = curl_version_info(CURLVERSION_NOW)->ssl_version;
+    if (g_ca_blob && tls && !strncmp(tls, "OpenSSL", 7) && (g_ca_store = ca_store(g_ca_blob, g_ca_blob_len))) {
+        free(g_ca_blob);
+        g_ca_blob = NULL;
+    }
     LOGI("libcurl %s, CA bundle: built-in%s%s", curl_version_info(CURLVERSION_NOW)->version,
          g_ca_bundle[0] ? " + " : "", g_ca_bundle);
 #else
@@ -284,6 +347,14 @@ static CURL *easy_new(const char *url, struct curl_slist **hdrs, const char *aut
     curl_easy_setopt(c, CURLOPT_DEBUGFUNCTION, curl_trace);
     curl_easy_setopt(c, CURLOPT_VERBOSE, 1L);
 #endif
+#ifdef ROMM_EMBED_CA
+    if (g_ca_store) {
+        curl_easy_setopt(c, CURLOPT_CAINFO, NULL);
+        curl_easy_setopt(c, CURLOPT_CAPATH, NULL);
+        curl_easy_setopt(c, CURLOPT_SSL_CTX_FUNCTION, use_ca_store);
+        curl_easy_setopt(c, CURLOPT_SSL_CTX_DATA, g_ca_store);
+    } else
+#endif
     if (g_ca_blob) {
         struct curl_blob blob = {g_ca_blob, g_ca_blob_len, CURL_BLOB_NOCOPY};
         curl_easy_setopt(c, CURLOPT_CAINFO_BLOB, &blob);
@@ -310,6 +381,11 @@ static int finish(CURL *c, CURLcode rc, membuf *m, http_resp *out, const char *u
     down_note(url, out->no_answer, probe);
     if (rc != CURLE_OK) {
         snprintf(out->error, sizeof out->error, "%s", curl_easy_strerror(rc));
+        if (out_of_memory(rc, m != NULL)) {
+            pthread_mutex_lock(&g_oom_lock);
+            g_oom_at = mono_sec();
+            pthread_mutex_unlock(&g_oom_lock);
+        }
         /* A download (CURLOPT_FAILONERROR) stopped by the server's answer:
          * say which, so a 404 isn't "HTTP response code said error". */
         if (rc == CURLE_HTTP_RETURNED_ERROR) {
@@ -321,8 +397,10 @@ static int finish(CURL *c, CURLcode rc, membuf *m, http_resp *out, const char *u
         long os_err = 0;
         curl_easy_getinfo(c, CURLINFO_OS_ERRNO, &os_err);
         const char *detail = errbuf && errbuf[0] ? errbuf : out->error;
-        if (os_err) LOGW("HTTP %s: %s (errno %ld: %s)", url, detail, os_err, strerror((int)os_err));
-        else LOGW("HTTP %s: %s", url, detail);
+        /* curl's words for a reply we had no room for don't say so. */
+        const char *oom = out_of_memory(rc, m != NULL) && rc != CURLE_OUT_OF_MEMORY ? " (out of memory)" : "";
+        if (os_err) LOGW("HTTP %s: %s%s (errno %ld: %s)", url, detail, oom, os_err, strerror((int)os_err));
+        else LOGW("HTTP %s: %s%s", url, detail, oom);
         free(m ? m->buf : NULL);
         return -1;
     }

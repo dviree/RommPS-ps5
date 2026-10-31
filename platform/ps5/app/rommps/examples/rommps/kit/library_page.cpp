@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 
@@ -32,6 +33,8 @@ constexpr float kPlatformTop = 196.0f;
 // Platform tiles
 constexpr int kTileCols = 4;
 constexpr float kTileW = 408.0f, kTileH = 220.0f, kTileGap = 32.0f, kTilePitch = kTileH + kTileGap;
+constexpr float kHeadH = 64.0f; // a section's heading, above its first row
+constexpr float kInstallArmed = 4.0f; // seconds the second Square of "Install all" has
 // A grid of games: its columns and cards follow the shape of its covers
 constexpr int kMinCols = 4, kMaxCols = 8;
 constexpr float kGridTop = 400.0f, kGridW = 1620.0f, kCardTallest = 235.0f, kColGap = 24.0f, kRowGap = 25.0f;
@@ -43,6 +46,29 @@ constexpr int kSlots = 27;
 constexpr float kSearchDelay = 0.35f; // seconds after the last key before searching
 
 using Slots = std::array<int, kSlots>; // each slot's first game, -1 for none
+
+// The heading of a collection's section: its kind, or a virtual one's type.
+std::string section_of(const Collection &c)
+{
+    if (c.kind == "regular")
+        return "Collections";
+    if (c.kind == "smart")
+        return "Smart collections";
+    static const struct
+    {
+        const char *type, *heading;
+    } named[] = {{"franchise", "Franchises"}, {"collection", "Series"}, {"genre", "Genres"},
+                 {"company", "Companies"},    {"mode", "Game modes"}};
+    for (const auto &n : named)
+        if (c.type == n.type)
+            return n.heading;
+    if (c.type.empty())
+        return "More collections";
+    std::string t = c.type;
+    std::replace(t.begin(), t.end(), '_', ' ');
+    t[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(t[0])));
+    return t;
+}
 
 int slot_of(const std::string &key)
 {
@@ -242,10 +268,11 @@ void draw_badge(hui::gfx::DrawList &list, const Look &look, App &app, const Game
 void draw_version(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, const Look &, const Game *g,
                   const Rect &rect)
 {
-    if (!g || g->version.empty())
+    if (!g || g->versions < 2)
         return;
     const float size = rect.w > 160 ? 17.0f : 15.0f, pad = 10;
-    const std::string text = fonts.semibold.font->fit(g->version, size, rect.w - 24 - 2 * pad);
+    const std::string text =
+        fonts.semibold.font->fit(std::to_string(g->versions) + " versions", size, rect.w - 24 - 2 * pad);
     const float w = fonts.semibold.font->measure(text, size) + 2 * pad;
     const Rect tag{rect.x + 12, rect.y + rect.h - size - 30, w, size + 14};
     list.rounded_rect(tag, tag.h * 0.5f, Color::rgb(0x0b0d16, 0.78f));
@@ -299,18 +326,92 @@ std::string LibraryPage::backdrop_cover(App &app) const
         return g->cover;
     if (mode_ == kPlatforms)
     {
-        const auto &platforms = app.platforms();
-        if (tile_ >= 0 && tile_ < static_cast<int>(platforms.size()))
-            if (const Game *first = app.games(platforms[static_cast<std::size_t>(tile_)].id, "").at(0))
+        const std::vector<Tile> all = tiles(app);
+        if (tile_ >= 0 && tile_ < static_cast<int>(all.size()))
+            if (const Game *first = app.games(all[static_cast<std::size_t>(tile_)].scope, "").at(0))
                 return first->cover;
     }
     return "";
+}
+
+std::vector<LibraryPage::Tile> LibraryPage::tiles(App &app) const
+{
+    std::vector<Tile> out;
+    if (browse_ == kByPlatform)
+        for (const Platform &p : app.platforms())
+            out.push_back({Scope::platform(p.id), p.name, p.slug, p.profile.empty() ? "No emulator" : p.profile,
+                           !p.profile.empty(), p.rom_count});
+    else
+        for (const Collection &c : app.collections())
+            out.push_back({Scope::collection(c), c.name, "",
+                           !c.owner.empty()         ? "by " + c.owner
+                           : c.description.empty() ? std::string(c.kind == "virtual" ? "" : "Collection")
+                                                   : c.description,
+                           false, c.rom_count, section_of(c)});
+    return out;
+}
+
+LibraryPage::Placement LibraryPage::place(const std::vector<Tile> &all)
+{
+    Placement p;
+    int row = -1, col = kTileCols;
+    for (std::size_t i = 0; i < all.size(); ++i)
+    {
+        const bool starts = i == 0 || all[i].section != all[i - 1].section;
+        if (starts || col == kTileCols)
+        {
+            ++row;
+            col = 0;
+            if (starts && !all[i].section.empty())
+                p.heads.emplace_back(row, all[i].section);
+        }
+        p.row.push_back(row);
+        p.col.push_back(col++);
+    }
+    return p;
+}
+
+float LibraryPage::Placement::top(int r) const
+{
+    int heads_on = 0;
+    for (const auto &h : heads)
+        heads_on += h.first <= r;
+    return static_cast<float>(r) * kTilePitch + static_cast<float>(heads_on) * kHeadH;
+}
+
+int LibraryPage::Placement::first_of(int r) const
+{
+    for (std::size_t i = 0; i < row.size(); ++i)
+        if (row[i] == r)
+            return static_cast<int>(i);
+    return -1;
+}
+
+int LibraryPage::Placement::last_of(int r) const
+{
+    int last = -1;
+    for (std::size_t i = 0; i < row.size(); ++i)
+        if (row[i] == r)
+            last = static_cast<int>(i);
+    return last;
+}
+
+std::string LibraryPage::scope_name(App &app, const Scope &scope)
+{
+    if (scope.in_collection())
+    {
+        const Collection *c = app.collection_by_id(scope.collection_kind, scope.collection_id);
+        return c ? c->name : "Collection";
+    }
+    const Platform *p = app.platform_by_id(scope.platform_id);
+    return p ? p->name : "";
 }
 
 bool LibraryPage::update(App &app, const hui::InputFrame &input, float dt, hui::ui::Feedback &feedback)
 {
     mode_age_ += dt;
     shown_age_ += dt;
+    install_armed_ = std::max(0.0f, install_armed_ - dt);
     nudge_.update(dt, 9.0f);
     bool details = false;
     switch (mode_)
@@ -325,13 +426,28 @@ bool LibraryPage::update(App &app, const hui::InputFrame &input, float dt, hui::
         update_search(app, input, dt, feedback);
         break;
     }
-    // Scrolling.
-    const int tile_rows = std::max(1, static_cast<int>((1000.0f - kPlatformTop - 24.0f) / kTilePitch));
-    const int tile_row = tile_ / kTileCols;
-    if (tile_row < tiles_scroll_.target)
-        tiles_scroll_.target = static_cast<float>(tile_row);
-    if (tile_row > tiles_scroll_.target + static_cast<float>(tile_rows - 1))
-        tiles_scroll_.target = static_cast<float>(tile_row - tile_rows + 1);
+    // Scrolling: the focused tile's row in view, with its section's heading
+    // when the row is the section's first.
+    if (mode_ == kPlatforms)
+    {
+        const Placement at = place(tiles(app));
+        if (tile_ >= 0 && tile_ < static_cast<int>(at.row.size()))
+        {
+            const float view = std::max(1.0f, std::floor((1000.0f - kPlatformTop - 24.0f) / kTilePitch)) * kTilePitch;
+            const int r = at.row[static_cast<std::size_t>(tile_)];
+            float top = at.top(r);
+            const float bottom = top + kTileH;
+            for (const auto &h : at.heads)
+                if (h.first == r)
+                    top -= kHeadH;
+            if (r == 0)
+                top = 0.0f;
+            if (top < tiles_scroll_.target)
+                tiles_scroll_.target = top;
+            if (bottom > tiles_scroll_.target + view)
+                tiles_scroll_.target = bottom - view;
+        }
+    }
     tiles_scroll_.update(dt, 14.0f);
     if (mode_ == kGrid)
         grid_scroll_.target = static_cast<float>(std::max(0, index_ / grid_layout(grid(app)).cols - 1));
@@ -350,24 +466,37 @@ bool LibraryPage::update(App &app, const hui::InputFrame &input, float dt, hui::
 
 void LibraryPage::update_platforms(App &app, const hui::InputFrame &input, hui::ui::Feedback &feedback)
 {
-    const auto &platforms = app.platforms();
-    const int ntiles = static_cast<int>(platforms.size());
+    if (browse_ == kByCollection)
+        app.want_collections(); // the first time they're looked at, or after pairing again
+    const std::vector<Tile> all = tiles(app);
+    const int ntiles = static_cast<int>(all.size());
     tile_ = std::clamp(tile_, 0, std::max(0, ntiles - 1));
+    const Placement at = place(all);
 
     // The covers of the tiles in view.
-    const int first_row = static_cast<int>(tiles_scroll_.value);
-    for (int i = first_row * kTileCols; i < std::min(ntiles, (first_row + 3) * kTileCols); ++i)
-        app.ensure(app.games(platforms[static_cast<std::size_t>(i)].id, ""), 0, 0);
+    for (int i = 0; i < ntiles; ++i)
+    {
+        const float y = at.top(at.row[static_cast<std::size_t>(i)]) - tiles_scroll_.value;
+        if (y > -kTilePitch && y < 3 * kTilePitch)
+            app.ensure(app.games(all[static_cast<std::size_t>(i)].scope, ""), 0, 0);
+    }
 
     const bool repeat = input.nav_repeat;
+    const int row = ntiles ? at.row[static_cast<std::size_t>(tile_)] : 0;
+    const int col = ntiles ? at.col[static_cast<std::size_t>(tile_)] : 0;
+    // The tile on another row under (or over) this one: the same column, or
+    // that row's last when it's shorter.
+    auto on_row = [&](int r) {
+        const int first = at.first_of(r);
+        return first < 0 ? -1 : std::min(first + col, at.last_of(r));
+    };
     switch (input.nav)
     {
     case Direction::left:
     case Direction::right:
     {
-        const int col = tile_ % kTileCols;
         const int next = tile_ + (input.nav == Direction::right ? 1 : -1);
-        if ((input.nav == Direction::right ? col < kTileCols - 1 : col > 0) && next >= 0 && next < ntiles)
+        if (next >= 0 && next < ntiles && at.row[static_cast<std::size_t>(next)] == row)
         {
             tile_ = next;
             feedback.play(Cue::focus);
@@ -377,65 +506,106 @@ void LibraryPage::update_platforms(App &app, const hui::InputFrame &input, hui::
         break;
     }
     case Direction::up:
-        if (tile_ - kTileCols >= 0)
-        {
-            tile_ -= kTileCols;
-            feedback.play(Cue::focus);
-        }
-        else if (!repeat)
-            refuse(feedback);
-        break;
     case Direction::down:
-        if (tile_ + kTileCols < ntiles)
+    {
+        const int next = ntiles ? on_row(row + (input.nav == Direction::down ? 1 : -1)) : -1;
+        if (next >= 0)
         {
-            tile_ += kTileCols;
-            feedback.play(Cue::focus);
-        }
-        else if (tile_ / kTileCols < (ntiles - 1) / kTileCols)
-        {
-            tile_ = ntiles - 1;
+            tile_ = next;
             feedback.play(Cue::focus);
         }
         else if (!repeat)
             refuse(feedback);
         break;
+    }
     case Direction::none:
         break;
+    }
+    // L2 / R2: the section before or after (back to the start of this one
+    // first, when the focus is past it).
+    if (ntiles > 0 && !at.heads.empty() && (input.is_pressed(Action::jump_prev) || input.is_pressed(Action::jump_next)))
+    {
+        int here = 0; // this section, an index into at.heads
+        for (std::size_t h = 0; h < at.heads.size(); ++h)
+            if (at.heads[h].first <= row)
+                here = static_cast<int>(h);
+        int to = here + (input.is_pressed(Action::jump_next) ? 1 : -1);
+        if (input.is_pressed(Action::jump_prev) && tile_ != at.first_of(at.heads[static_cast<std::size_t>(here)].first))
+            to = here;
+        if (to >= 0 && to < static_cast<int>(at.heads.size()))
+        {
+            tile_ = at.first_of(at.heads[static_cast<std::size_t>(to)].first);
+            feedback.play(Cue::focus);
+        }
+        else
+            refuse(feedback);
     }
     if (input.is_pressed(Action::confirm) && ntiles > 0)
     {
         feedback.play(Cue::open);
-        open_grid(app, platforms[static_cast<std::size_t>(tile_)].id, "");
+        open_grid(app, all[static_cast<std::size_t>(tile_)].scope, "");
+    }
+    if (input.is_pressed(Action::west))
+    {
+        browse_ = browse_ == kByPlatform ? kByCollection : kByPlatform;
+        tile_ = 0;
+        tiles_scroll_.snap(0.0f);
+        tiles_scroll_.target = 0.0f;
+        mode_age_ = 0.0f;
+        feedback.play(Cue::tab);
+        if (browse_ == kByCollection)
+        {
+            app.reload_platforms(); // a collection's games show their platform's emulator
+            app.refresh_collections(); // which may have changed in RomM
+        }
     }
     if (input.is_pressed(Action::north))
     {
         feedback.play(Cue::modal_open);
-        open_search(0);
+        open_search(Scope{});
     }
 }
 
 void LibraryPage::draw_platforms(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, const Look &look, App &app,
                                  Color accent, float clock, float age) const
 {
-    const auto &platforms = app.platforms();
+    const std::vector<Tile> all = tiles(app);
     const float shake = ui::shake(nudge_.value, clock, 10.0f, 9.0f);
 
-    // Platforms
+    // Platforms or collections
     const float top = kPlatformTop;
     const float in = tween::stagger(age, 1, 0.08f, 0.6f);
     list.push_opacity(in);
     char label[64];
-    std::snprintf(label, sizeof label, "Platforms  \xC2\xB7  %d", static_cast<int>(platforms.size()));
+    std::snprintf(label, sizeof label, "%s  \xC2\xB7  %d", browse_ == kByPlatform ? "Platforms" : "Collections",
+                  static_cast<int>(all.size()));
     ui::text(list, fonts.semibold, label, kMargin, top, 24, look.text);
-    if (platforms.empty())
-        ui::text(list, fonts.regular, "Loading your platforms", kMargin, top + 60, 26, look.muted);
-    const float grid_top = top + 24;
-    list.push_clip({0, grid_top - 20, 1920, 1080 - grid_top + 20});
-    for (int i = 0; i < static_cast<int>(platforms.size()); ++i)
+    if (all.empty())
     {
-        const Platform &p = platforms[static_cast<std::size_t>(i)];
-        const int row = i / kTileCols, col = i % kTileCols;
-        const float y = grid_top + (static_cast<float>(row) - tiles_scroll_.value) * kTilePitch;
+        const bool failed = browse_ == kByCollection && !app.collections_error().empty();
+        std::string empty = "Loading your platforms";
+        if (browse_ == kByCollection)
+            empty = !app.collections_loaded() ? "Loading your collections"
+                    : failed                  ? "Couldn't load your collections: " + app.collections_error()
+                                              : "No collections with games in RomM yet";
+        ui::text(list, fonts.regular, fonts.regular.font->fit(empty, 26, 1700), kMargin, top + 60, 26,
+                 failed ? look.danger : look.muted);
+    }
+    const float grid_top = top + 24;
+    const Placement at = place(all);
+    list.push_clip({0, grid_top - 20, 1920, 1080 - grid_top + 20});
+    for (const auto &[row, heading] : at.heads)
+    {
+        const float y = grid_top + at.top(row) - kHeadH - tiles_scroll_.value;
+        if (y > 1080 || y + kHeadH < grid_top - 20)
+            continue;
+        ui::text(list, fonts.semibold, heading, kMargin, y + 40, 22, look.muted);
+    }
+    for (int i = 0; i < static_cast<int>(all.size()); ++i)
+    {
+        const Tile &p = all[static_cast<std::size_t>(i)];
+        const int row = at.row[static_cast<std::size_t>(i)], col = at.col[static_cast<std::size_t>(i)];
+        const float y = grid_top + at.top(row) - tiles_scroll_.value;
         if (y > 1080 || y + kTileH < grid_top - 20)
             continue;
         const bool on = i == tile_;
@@ -444,7 +614,7 @@ void LibraryPage::draw_platforms(hui::gfx::DrawList &list, const hui::ui::Fonts 
             list.glow(r, 26, 26, accent.with_alpha(0.4f));
         draw_panel(list, look, r, 26);
         // A few of its covers, fanned on the right.
-        GameList &games = app.games(p.id, "");
+        GameList &games = app.games(p.scope, "");
         for (int k = 2; k >= 0; --k)
         {
             const Game *g = games.at(k);
@@ -452,20 +622,29 @@ void LibraryPage::draw_platforms(hui::gfx::DrawList &list, const hui::ui::Fonts 
                 continue;
             // Each its own shape, as tall as fits 120 wide, standing on the same line.
             const float shape = cover_shape(app, g);
-            const float h = std::min(133.0f, 120.0f / shape), w = h * shape;
-            const Rect c{r.x + r.w - 28 - w - static_cast<float>(k) * 40, r.y + 161 + static_cast<float>(k) * 10 - h, w, h};
+            float h = std::min(133.0f, 120.0f / shape), w = h * shape;
+            // Just loaded, it pops in: from a little smaller, past its size and back.
+            double since = 0;
+            if (!g->cover.empty() && app.cover_aspect(g->cover, &since) > 0)
+            {
+                const float pop = 0.85f + 0.15f * tween::back_out(tween::clamp01(static_cast<float>(app.clock() - since) / 0.35f));
+                w *= pop;
+                h *= pop;
+            }
+            const float right = r.x + r.w - 28 - static_cast<float>(k) * 40 - std::min(133.0f, 120.0f / shape) * shape * 0.5f;
+            const Rect c{right - w * 0.5f, r.y + 161 + static_cast<float>(k) * 10 - h, w, h};
             list.shadow({c.x, c.y + 8, c.w, c.h}, 10, 16, Color::rgb(0x000000, 0.35f));
             draw_cover(list, fonts, look, app, g, c, 1.0f - 0.15f * static_cast<float>(k), 10, false);
         }
         // The system's logo, small, in the corner under the covers.
-        draw_logo(list, app, p.slug, {r.x + r.w - 28 - 30, r.y + 172, 30, 30}, 0.9f);
+        if (!p.slug.empty())
+            draw_logo(list, app, p.slug, {r.x + r.w - 28 - 30, r.y + 172, 30, 30}, 0.9f);
         ui::paragraph(list, fonts.semibold, p.name, r.x + 28, r.y + 56, 28, 165, 34, look.panel_text, 2);
         char count[48];
-        std::snprintf(count, sizeof count, p.rom_count == 1 ? "%d game" : "%d games", p.rom_count);
+        std::snprintf(count, sizeof count, p.count == 1 ? "%d game" : "%d games", p.count);
         ui::text(list, fonts.regular, count, r.x + 28, r.y + 150, 22, look.panel_muted);
-        ui::text(list, fonts.semibold, fonts.semibold.font->fit(p.profile.empty() ? "No emulator" : p.profile, 18, 200),
-                 r.x + 28, r.y + 190, 18, p.profile.empty() ? look.panel_muted.with_alpha(0.6f) : accent, Align::left,
-                 1.5f);
+        ui::text(list, fonts.semibold, fonts.semibold.font->fit(p.note, 18, 200), r.x + 28, r.y + 190, 18,
+                 p.note_on ? accent : look.panel_muted.with_alpha(0.6f), Align::left, 1.5f);
         if (on)
             list.bordered_rect(r.inset(-6), 30, Color::rgb(0x000000, 0.0f), 4, look.focus.with_alpha(1.0f));
     }
@@ -475,10 +654,11 @@ void LibraryPage::draw_platforms(hui::gfx::DrawList &list, const hui::ui::Fonts 
 
 // ------------------------------------------------------------------ a grid
 
-void LibraryPage::open_grid(App &app, int platform_id, const std::string &search)
+void LibraryPage::open_grid(App &app, const Scope &scope, const std::string &search)
 {
-    grid_platform_ = platform_id;
+    grid_scope_ = scope;
     grid_search_ = search;
+    install_armed_ = 0.0f;
     mode_ = kGrid;
     mode_age_ = 0.0f;
     index_ = 0;
@@ -580,7 +760,28 @@ void LibraryPage::move_in_grid(App &app, const hui::InputFrame &input, hui::ui::
     if (input.is_pressed(Action::north))
     {
         feedback.play(Cue::modal_open);
-        open_search(grid_platform_);
+        open_search(grid_scope_);
+        return;
+    }
+    // A collection: Square, then Square again, downloads every game of it
+    // that isn't here yet. Not from a search in it: that's a few of its games.
+    if (input.is_pressed(Action::west) && grid_scope_.in_collection() && grid_search_.empty() && !on_letters_)
+    {
+        const Collection *c = app.collection_by_id(grid_scope_.collection_kind, grid_scope_.collection_id);
+        if (!c)
+            refuse(feedback);
+        else if (install_armed_ <= 0.0f)
+        {
+            install_armed_ = kInstallArmed;
+            feedback.play(Cue::toggle);
+        }
+        else
+        {
+            install_armed_ = 0.0f;
+            app.download_collection(*c);
+            feedback.play(Cue::launch);
+            feedback.rumble(0.7f, 0.18f);
+        }
         return;
     }
     if (on_letters_)
@@ -692,17 +893,19 @@ void LibraryPage::draw_grid(hui::gfx::DrawList &list, const hui::ui::Fonts &font
 {
     GameList &l = grid(app);
     const Game *g = l.at(index_);
-    const Platform *own = app.platform_by_id(grid_platform_);
-    const Platform *p = app.platform_by_id(g ? g->platform_id : grid_platform_);
+    // A platform's own games, not a collection's (which mixes platforms).
+    const Platform *own = grid_scope_.in_collection() ? nullptr : app.platform_by_id(grid_scope_.platform_id);
+    const Platform *p = app.platform_by_id(g ? g->platform_id : grid_scope_.platform_id);
     if (!p)
         p = own;
 
     // The heading: where we are, then the focused game.
     const float in = tween::stagger(age, 1, 0.08f, 0.6f);
     list.push_opacity(in);
-    std::string where = grid_search_.empty() ? (own ? own->name : "Library")
+    const std::string name = scope_name(app, grid_scope_);
+    std::string where = grid_search_.empty() ? (name.empty() ? "Library" : name)
                                              : "\xE2\x80\x9C" + grid_search_ + "\xE2\x80\x9D  \xC2\xB7  " +
-                                                   (own ? "in " + own->name : "every platform");
+                                                   (name.empty() ? "every platform" : "in " + name);
     char count[48] = "";
     if (l.ready())
         std::snprintf(count, sizeof count, l.total == 1 ? "1 game" : "%d games", l.total);
@@ -718,7 +921,7 @@ void LibraryPage::draw_grid(hui::gfx::DrawList &list, const hui::ui::Fonts &font
                  60, look.text);
         std::string meta = human_size(g->size);
         if (g->versions > 1)
-            meta = g->version + ", 1 of " + std::to_string(g->versions) + " versions  \xC2\xB7  " + meta;
+            meta = std::to_string(g->versions) + " versions  \xC2\xB7  " + meta;
         if (!grid_search_.empty() || !own)
             meta += "  \xC2\xB7  " + (p ? p->name : std::string());
         meta += "  \xC2\xB7  " + (p && !p->profile.empty() ? p->profile : std::string("No emulator"));
@@ -861,12 +1064,12 @@ void LibraryPage::draw_grid(hui::gfx::DrawList &list, const hui::ui::Fonts &font
 
 // ------------------------------------------------------------------ search
 
-void LibraryPage::open_search(int platform_id)
+void LibraryPage::open_search(const Scope &scope)
 {
     before_search_ = mode_ == kSearch ? before_search_ : mode_;
     mode_ = kSearch;
     mode_age_ = 0.0f;
-    search_platform_ = platform_id;
+    search_scope_ = scope;
     query_.clear();
     applied_.clear();
     typed_age_ = 0.0f;
@@ -884,7 +1087,7 @@ void LibraryPage::update_search(App &app, const hui::InputFrame &input, float dt
     if (query_ != applied_ && typed_age_ > kSearchDelay)
         applied_ = query_;
     if (!applied_.empty())
-        app.ensure(app.games(search_platform_, applied_), 0, 9);
+        app.ensure(app.games(search_scope_, applied_), 0, 9);
     if (e == hui::ui::Event::cancelled)
     {
         mode_ = before_search_;
@@ -895,18 +1098,18 @@ void LibraryPage::update_search(App &app, const hui::InputFrame &input, float dt
         if (query_.empty())
             refuse(feedback);
         else
-            open_grid(app, search_platform_, query_);
+            open_grid(app, search_scope_, query_);
     }
 }
 
 void LibraryPage::draw_search(hui::gfx::DrawList &list, const hui::ui::Fonts &fonts, const Look &look, App &app,
                               Color accent, float clock) const
 {
-    const Platform *p = app.platform_by_id(search_platform_);
+    const std::string name = scope_name(app, search_scope_);
     const float in = tween::stagger(mode_age_, 0, 0.06f, 0.5f);
     list.push_opacity(in);
-    ui::text(list, fonts.semibold, ui::upper(p ? "Search " + p->name : std::string("Search every platform")), kMargin,
-             196, 20, accent, Align::left, 4.0f);
+    ui::text(list, fonts.semibold, ui::upper(name.empty() ? std::string("Search every platform") : "Search " + name),
+             kMargin, 196, 20, accent, Align::left, 4.0f);
     const Rect field{kMargin, 220, 1300, 84};
     draw_panel(list, look, field, 22);
     const float size = 36.0f;
@@ -921,7 +1124,7 @@ void LibraryPage::draw_search(hui::gfx::DrawList &list, const hui::ui::Fonts &fo
 
     // The first results, as you type.
     std::string status = "Type to search";
-    const GameList *l = applied_.empty() ? nullptr : &app.games(search_platform_, applied_);
+    const GameList *l = applied_.empty() ? nullptr : &app.games(search_scope_, applied_);
     if (l)
     {
         char text[64];
@@ -980,12 +1183,25 @@ std::vector<hui::ui::Hint> LibraryPage::hints() const
     switch (mode_)
     {
     case kPlatforms:
+        if (browse_ == kByCollection)
+            return {{Button::l1, "Pages", Button::r1},
+                    {Button::l2, "Sections", Button::r2},
+                    {Button::square, "Platforms"},
+                    {Button::triangle, "Search"},
+                    {Button::cross, "Open"}};
         return {{Button::l1, "Pages", Button::r1},
+                {Button::square, "Collections"},
                 {Button::triangle, "Search"},
                 {Button::cross, "Open"}};
     case kGrid:
         if (on_letters_)
             return {{Button::cross, "Jump"}, {Button::circle, "Back"}};
+        if (grid_scope_.in_collection() && grid_search_.empty())
+            return {{Button::l2, "Letters", Button::r2},
+                    {Button::square, install_armed_ > 0.0f ? "Press again to install all" : "Install all"},
+                    {Button::triangle, "Search"},
+                    {Button::cross, "Details"},
+                    {Button::circle, "Back"}};
         return {{Button::l2, "Letters", Button::r2},
                 {Button::triangle, "Search"},
                 {Button::cross, "Details"},

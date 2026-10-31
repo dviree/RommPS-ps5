@@ -384,6 +384,8 @@ std::vector<Row> SyncView::rows() const
         out.push_back(it.row);
     if (armed_ >= 0 && armed_ < static_cast<int>(out.size()))
         out[static_cast<std::size_t>(armed_)].value = "Press again to restore";
+    if (busy_ && busy_row_ >= 0 && busy_row_ < static_cast<int>(out.size()))
+        out[static_cast<std::size_t>(busy_row_)].value = busy_text_;
     return out;
 }
 
@@ -429,6 +431,8 @@ void SyncView::update(App &app, const hui::InputFrame &input, float dt, hui::ui:
         const Conflict c = conflicts_[static_cast<std::size_t>(choosing_)];
         const bool local = it.action == kKeepLocal;
         busy_ = true;
+        busy_row_ = e.row;
+        busy_text_ = "Resolving\xE2\x80\xA6";
         app.post("/api/conflicts/resolve",
                  "{\"path\":" + json_str(c.path) + ",\"keep\":\"" + (local ? "local" : "server") + "\"}",
                  [this, &app, local](const Response &r) {
@@ -453,6 +457,8 @@ void SyncView::update(App &app, const hui::InputFrame &input, float dt, hui::ui:
         }
         armed_ = -1;
         busy_ = true;
+        busy_row_ = e.row;
+        busy_text_ = "Restoring\xE2\x80\xA6";
         app.post("/api/restore",
                  std::string("{\"kind\":\"") + (it.action == kRestoreSave ? "save" : "state") + "\",\"id\":" +
                      std::to_string(it.arg) + "}",

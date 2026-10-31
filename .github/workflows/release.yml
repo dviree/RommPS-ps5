@@ -1,8 +1,20 @@
-# Builds the PS5 and PS4 payloads and publishes a GitHub release. Triggered either by:
+# Builds the PS5 and PS4 payloads and RommPS (PPSA76677.zip, the file
+# ProsperoStore installs), then publishes them as one GitHub release. Nothing is
+# published unless all of it built: 1.3.0 went out without the zip, back when
+# RommPS was built by hand, and the store sat on 1.2.1 for a day.
+#
+# Triggered either by:
 #
 #   - merging a PR into main from a branch named with a version, e.g.
 #     release/v1.0.2 or v1.0.2-some-fix (the tag is created on the merge commit)
 #   - pushing a version tag manually: git tag v1.0.0 && git push origin v1.0.0
+#
+# Run by hand (Actions > Release > Run workflow, or
+# gh workflow run release.yml -f tag=v1.3.0 -f ref=release/v1.3.0), it instead
+# rebuilds only the PS4 payload from ref and swaps it into the existing tag's
+# release: a PS4 fix that doesn't make the PS5 download anything. Those already
+# on that version reinstall it by hand; the in-app update only offers newer ones.
+# The PS5's files, PPSA76677.zip included, stay exactly as they are.
 name: Release
 
 on:
@@ -11,21 +23,33 @@ on:
   pull_request:
     types: [closed]
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release whose PS4 payload is replaced (v1.3.0)"
+        required: true
+      ref:
+        description: "Branch or commit the PS4 payload is built from"
+        required: true
 
 permissions:
   contents: write
 
 jobs:
-  release:
+  payloads:
     if: >-
       github.event_name == 'push' ||
       (github.event.pull_request.merged &&
        contains(github.event.pull_request.head.ref, 'v'))
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      sha: ${{ steps.version.outputs.sha }}
     steps:
       - name: Resolve version
         id: version
         env:
+          GH_TOKEN: ${{ github.token }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           if [ "$GITHUB_EVENT_NAME" = push ]; then
@@ -39,6 +63,12 @@ jobs:
             echo "Branch '$HEAD_REF' has no vX.Y.Z version; skipping release."
             exit 0
           fi
+          # A release branch merged again after its release went out (a fix
+          # shipped with the manual PS4 run below, say).
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $tag already exists; skipping."
+            exit 0
+          fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
@@ -47,19 +77,32 @@ jobs:
         with:
           ref: ${{ steps.version.outputs.sha }}
 
-      # RommPS (built with tools/release-app.sh, outside this workflow) is
-      # offered as an update by the homebrew catalog only if its contentVersion
-      # goes up, so the tag has to match it: v1.1.0 is 01.001.000.
-      - name: Check RommPS's contentVersion
+      # The catalog offers RommPS as an update only if its contentVersion goes
+      # up, so the tag has to match it: v1.1.0 is 01.001.000. And RommPS starts
+      # the payload it carries, so it must ask for this one. Both are checked
+      # again when it's built (tools/package-app.sh); here they fail in a
+      # minute rather than after the long build.
+      - name: Check versions and release notes
         if: steps.version.outputs.tag
         env:
           TAG: ${{ steps.version.outputs.tag }}
+        # The notes are written by hand, in docs/releases/<tag>.md: the homebrew
+        # catalog shows them as RommPS's release notes, and drops GitHub's
+        # generated list.
         run: |
           IFS=. read -r major minor patch <<< "${TAG#v}"
           want=$(printf "%02d.%03d.%03d" "$major" "$minor" "$patch")
           have=$(jq -r .contentVersion platform/ps5/app/rommps/ps5/sce_sys/param.json)
           if [ "$have" != "$want" ]; then
             echo "::error::RommPS's contentVersion is $have, $TAG needs $want (platform/ps5/app/rommps/ps5/sce_sys/param.json)"
+            exit 1
+          fi
+          if ! grep -q "kMinPayload = \"${TAG#v}\"" platform/ps5/app/rommps/examples/rommps/kit/rommps_app.hpp; then
+            echo "::error::kMinPayload in rommps_app.hpp isn't ${TAG#v}"
+            exit 1
+          fi
+          if [ ! -s "docs/releases/$TAG.md" ]; then
+            echo "::error::docs/releases/$TAG.md is missing; write the release notes before tagging"
             exit 1
           fi
 
@@ -119,24 +162,114 @@ jobs:
           }
           sign romm-sync.elf manifest
           sign romm-sync-ps4.elf manifest-ps4
-          cd dist && sha256sum * > SHA256SUMS
 
-      # Creates the tag on the target commit if it doesn't exist yet. A tag pushed
-      # by GITHUB_TOKEN does not re-trigger this workflow, so there's no double release.
-      - name: Publish release
+      - uses: actions/upload-artifact@v4
         if: steps.version.outputs.tag
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.version.outputs.tag }}
-          SHA: ${{ steps.version.outputs.sha }}
-        # The notes are written by hand, in docs/releases/<tag>.md: the homebrew
-        # catalog shows them as RommPS's release notes, and drops GitHub's
-        # generated list.
+        with:
+          name: payloads
+          path: dist/
+          if-no-files-found: error
+
+  app:
+    needs: payloads
+    if: needs.payloads.outputs.tag
+    uses: ./.github/workflows/app.yml
+    with:
+      sha: ${{ needs.payloads.outputs.sha }}
+      tag: ${{ needs.payloads.outputs.tag }}
+      payloads: payloads
+
+  # Only once the payloads and RommPS have both built. gh uploads every file
+  # before the release is published, so nobody sees half of one. It creates
+  # the tag on the target commit too; a tag pushed by GITHUB_TOKEN does not
+  # re-trigger this workflow, so there's no double release.
+  publish:
+    needs: [payloads, app]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.payloads.outputs.tag }}
+      SHA: ${{ needs.payloads.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.payloads.outputs.sha }}
+
+      # Only what's published: the Docker builds upload records of their own,
+      # and one failing to come down shouldn't hold the release back.
+      - uses: actions/download-artifact@v4
+        with:
+          name: payloads
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: rommps
+          path: dist
+
+      - name: Publish release
         run: |
-          notes="docs/releases/$TAG.md"
-          if [ ! -s "$notes" ]; then
-            echo "::error::$notes is missing; write the release notes before tagging"
+          for file in romm-sync.elf manifest.json manifest.sig romm-sync-ps4.elf romm-sync-ps4.pkg \
+                      manifest-ps4.json manifest-ps4.sig PPSA76677.zip; do
+            [ -s "dist/$file" ] || { echo "::error::dist/$file is missing"; exit 1; }
+          done
+          (cd dist && sha256sum * > SHA256SUMS)
+          gh release create "$TAG" dist/* \
+            --target "$SHA" --title "$TAG" --notes-file "docs/releases/$TAG.md"
+
+  replace-ps4:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ inputs.tag }}
+    steps:
+      - name: Check the release
+        run: |
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::'$TAG' isn't a vX.Y.Z tag"
             exit 1
           fi
-          gh release create "$TAG" dist/* \
-            --target "$SHA" --title "$TAG" --notes-file "$notes"
+          gh release view "$TAG" >/dev/null || { echo "::error::no release $TAG to update"; exit 1; }
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: platform/ps4/docker
+          tags: romm-sync-ps4sdk:v0.9-crt1352-oo0.5.4
+          load: true
+          cache-from: type=gha,scope=ps4
+          cache-to: type=gha,mode=max,scope=ps4,ignore-error=true
+
+      - name: Build the PS4 payload
+        run: tools/ps4-build.sh ps4-pkg VERSION="${TAG#v}"
+
+      - name: Sign
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          if [ -z "$RELEASE_SIGNING_KEY" ]; then
+            echo "::error::RELEASE_SIGNING_KEY secret is not set; in-app updates need a signed release."
+            exit 1
+          fi
+          make tools
+          mkdir dist
+          cp build/ps4/romm-sync-ps4.elf build/ps4/romm-sync-ps4.pkg dist/
+          build/host/release-sign manifest "$TAG" dist/romm-sync-ps4.elf > dist/manifest-ps4.json
+          build/host/release-sign sign dist/manifest-ps4.json > dist/manifest-ps4.sig
+          build/host/release-sign check dist/manifest-ps4.json dist/manifest-ps4.sig
+
+      # The PS5's files and their checksums stay as they are.
+      - name: Replace the PS4 files
+        run: |
+          cd dist
+          ps4="romm-sync-ps4.elf romm-sync-ps4.pkg manifest-ps4.json manifest-ps4.sig"
+          gh release download "$TAG" --pattern SHA256SUMS --output old-sums
+          grep -vE '  (romm-sync-ps4\.(elf|pkg)|manifest-ps4\.(json|sig))$' old-sums > SHA256SUMS || true
+          sha256sum $ps4 >> SHA256SUMS
+          gh release upload "$TAG" $ps4 SHA256SUMS --clobber

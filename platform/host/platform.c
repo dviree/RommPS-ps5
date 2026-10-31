@@ -1,6 +1,7 @@
 /* platform.h for macOS and Linux, used for development and tests.
  * ROMM_SYNC_DATA sets the data folder (default ./host-data). Writing a title id
- * to <data>/foreground pretends a game is running. It presents itself as a PS5,
+ * to <data>/foreground pretends a game is running, and title ids in
+ * <data>/alive apps whose processes run (plat_app_alive). It presents itself as a PS5,
  * so the end-to-end tests cover the PS5 paths and release assets.
  * ROMM_SYNC_MOUNTS=<folder> makes it a console that can mount, with apps in
  * that folder; plat_mounts_set writes its list to <data>/mounts.txt. */
@@ -75,6 +76,18 @@ int plat_running_title(char *title_id, size_t n) {
     str_copy(title_id, n, txt);
     free(txt);
     return title_id[0] ? 1 : 0;
+}
+
+/* Tests list the apps "running" in <data>/alive, a title id per line; without
+ * the file it's unknown. */
+int plat_app_alive(const char *title_id) {
+    char p[PATH_MAX_LEN];
+    path_join(p, sizeof p, g_data, "alive");
+    char *txt = read_file(p, NULL);
+    if (!txt) return -1;
+    int found = title_id && title_id[0] && strstr(txt, title_id) != NULL;
+    free(txt);
+    return found;
 }
 
 const char *plat_data_dir(void) { return g_data; }

@@ -23,6 +23,7 @@
 #include "ra2.h"
 #include "state.h"
 #include "util.h"
+#include "presets.h"
 
 /* Bump this when generated profiles gain new keys, or existing installs keep
  * their old profile forever (ask me how I know). */
@@ -158,9 +159,14 @@ static int name_in(const cJSON *list, const char *name, int contains) {
     return 0;
 }
 
+/* Keys a core's rule decides even in a saved profile: how its memory cards
+ * sync follows the core, as an emulator's follows its preset (profiles.c). */
+static const char *const RULE_ONLY[] = {"memcards", "cards", "save_layout", "pcsx2_cards"};
+
 /* Adds the matching rule's keys to e: all of them, or (missing_only) those e
- * doesn't have, for a profile saved before the rule had them. How many. */
-static int apply_core_rules(cJSON *e, const char *system, const char *corename, int missing_only) {
+ * doesn't have, for a profile saved before the rule had them, and RULE_ONLY's
+ * where they differ. How many. */
+int detect_apply_core_rules(cJSON *e, const char *system, const char *corename, int missing_only) {
     int added = 0;
     static cJSON *rules;
     static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -174,7 +180,10 @@ static int apply_core_rules(cJSON *e, const char *system, const char *corename, 
         if (systems && !name_in(systems, system, 0)) continue;
         const cJSON *k;
         cJSON_ArrayForEach(k, cJSON_GetObjectItemCaseSensitive(r, "entry")) {
-            if (missing_only && cJSON_GetObjectItemCaseSensitive(e, k->string)) continue;
+            const cJSON *have = cJSON_GetObjectItemCaseSensitive(e, k->string);
+            int rule_only = 0;
+            for (size_t i = 0; i < sizeof RULE_ONLY / sizeof RULE_ONLY[0]; i++) rule_only |= !strcmp(k->string, RULE_ONLY[i]);
+            if (missing_only && have && (!rule_only || cJSON_Compare(have, k, 1))) continue;
             cJSON_DeleteItemFromObjectCaseSensitive(e, k->string);
             cJSON_AddItemToObject(e, k->string, cJSON_Duplicate(k, 1));
             added++;
@@ -185,7 +194,10 @@ static int apply_core_rules(cJSON *e, const char *system, const char *corename, 
     return added;
 }
 
-/* One platform entry per system; the first core found for a system wins. */
+/* One platform entry per system; the first core found for a system wins, and
+ * the others are listed in its "cores": RetroArch picks one as a game starts,
+ * so the saves of each that keeps them in a known format sync too (profiles.c
+ * makes them twins). */
 static void add_core_platforms(cJSON *plats, cJSON *cores, const char *core_id, const char *info) {
     char corename[64] = "", dbs[1024] = "";
     info_get(info, "corename", corename, sizeof corename);
@@ -203,10 +215,22 @@ static void add_core_platforms(cJSON *plats, cJSON *cores, const char *core_id, 
         str_copy(first, sizeof first, slugs);
         char *comma = strchr(first, ',');
         if (comma) *comma = 0;
-        int dup = 0;
-        const cJSON *p;
-        cJSON_ArrayForEach(p, plats) if (!strcmp(jget_str(p, "dir", ""), first)) dup = 1;
-        if (dup) continue;
+        cJSON *p, *dup = NULL;
+        cJSON_ArrayForEach(p, plats) if (!strcmp(jget_str(p, "dir", ""), first)) dup = p;
+        if (dup) {
+            /* (once a core: its databases can name one system twice) */
+            if (!strcmp(jget_str(dup, "core_name", ""), corename)) continue;
+            cJSON *also = cJSON_GetObjectItemCaseSensitive(dup, "cores"), *c0;
+            int listed = 0;
+            cJSON_ArrayForEach(c0, also) listed |= !strcmp(jget_str(c0, "core_name", ""), corename);
+            if (listed) continue;
+            if (!also) also = cJSON_AddArrayToObject(dup, "cores");
+            cJSON *c = cJSON_CreateObject();
+            cJSON_AddStringToObject(c, "core_name", corename);
+            cJSON_AddStringToObject(c, "emulator", core_id);
+            cJSON_AddItemToArray(also, c);
+            continue;
+        }
         cJSON *e = cJSON_CreateObject();
         cJSON_AddItemToObject(e, "romm", slug_array(slugs));
         cJSON_AddStringToObject(e, "dir", first);
@@ -215,7 +239,7 @@ static void add_core_platforms(cJSON *plats, cJSON *cores, const char *core_id, 
         cJSON_AddStringToObject(e, "core_name", corename);
         /* Saves other emulators keep in the same format (save_format) share
          * one save on RomM; save files, cards and layouts per core. */
-        apply_core_rules(e, first, corename, 0);
+        detect_apply_core_rules(e, first, corename, 0);
         cJSON_AddItemToArray(plats, e);
     }
 }
@@ -382,6 +406,14 @@ static int app_installed(const char *title_id) {
     return 0;
 }
 
+/* Presets typically are {"format", "version", "console" "emulators": [....]}*/
+static cJSON *catalog_from(cJSON *file) {
+    if (cJSON_IsArray(file)) return file;
+    cJSON *list = cJSON_DetachItemFromObjectCaseSensitive(file, "emulators");
+    cJSON_Delete(file);
+    return list;
+}
+
 /* The catalog: ROMM_SYNC_CATALOG names a file (for tests), else the console's. */
 static cJSON *emulator_catalog(void) {
     const char *env = getenv("ROMM_SYNC_CATALOG");
@@ -389,9 +421,9 @@ static cJSON *emulator_catalog(void) {
         char *txt = read_file(env, NULL);
         cJSON *j = txt ? cJSON_Parse(txt) : NULL;
         free(txt);
-        return j;
+        return catalog_from(j);
     }
-    return plat_info()->emulator_catalog ? cJSON_Parse(plat_info()->emulator_catalog) : NULL;
+    return cJSON_Duplicate(presets_catalog(), 1);
 }
 
 static cJSON *g_catalog;
@@ -399,9 +431,13 @@ static void load_catalog(void) { g_catalog = emulator_catalog(); }
 
 const cJSON *detect_catalog_entry(const char *id) {
     static pthread_once_t once = PTHREAD_ONCE_INIT;
-    pthread_once(&once, load_catalog);
-    const cJSON *e;
-    cJSON_ArrayForEach(e, g_catalog)
+    const char *env = getenv("ROMM_SYNC_CATALOG");
+    const cJSON *catalog = presets_catalog(), *e;
+    if (env && *env) {
+        pthread_once(&once, load_catalog);
+        catalog = g_catalog;
+    }
+    cJSON_ArrayForEach(e, catalog)
         if (!strcmp(jget_str(e, "id", ""), id)) return e;
     return NULL;
 }
@@ -510,7 +546,7 @@ cJSON *detect_emulators(void) {
             if (g) closedir(g);
             cJSON_AddNumberToObject(d, "games", games);
         }
-        free(maps);
+        profiles_free(maps);
         cJSON_Delete(one);
         const cJSON *fixed = cJSON_GetObjectItemCaseSensitive(profile, "fixed");
         cJSON_AddItemToObject(c, "fixed", fixed ? cJSON_Duplicate(fixed, 1) : cJSON_CreateArray());
@@ -524,6 +560,107 @@ cJSON *detect_emulators(void) {
  * preset, which follow it (PSXS5's cores, as its versions change them). */
 static const char *const PRESET_ONLY[] = {"state_core_setting"};
 
+/* Folders and names a preset used to have and has changed since: a saved
+ * copy of one is the old preset's, not the user's pick, so it follows the
+ * preset now. When a preset's value changes, its old one goes here, or the
+ * profiles saved with it keep it. */
+static const struct {
+    const char *profile, *key, *value;
+} SHIPPED_VALUES[] = {
+    {"seedee5", "save_dir", "{root}/saves"}, /* CD-i saves: each game's NVRAM, 1.4.0 */
+    {"ps5sx2", "bios_dir", "{root}"},        /* PS5SX2 2.x lists its BIOS in bios/, 1.4.0 */
+    /* SwanStationPS5 names cards and states by serial once it knows it, 1.4.0 */
+    {"swanstationps5", "save_name", "{rom_stem}_1{ext}"},
+    {"swanstationps5", "save_stems", "{rom_stem}_1"},
+    {"swanstationps5", "state_stems", "{rom_stem_safe}"},
+    {"swanstationps5", "state_name", "{rom_stem_safe}{ext}"},
+    {"ps5cemu", "name", "PS5CEMU-HAR"}, /* renamed PS5-ECAM by its developer, 1.4.0 */
+    /* PS5-ECAM 5.1 moved each system out of /data/ps5cemu into its own folder, 1.4.0 */
+    {"ps5cemu", "rom_dir", "{root}/games"},
+    {"ps5cemu", "rom_dir", "{root}/azahar/games"},
+    {"ps5cemu", "rom_dir", "{root}/melonds/games"},
+    {"ps5cemu", "rom_dir", "{root}/eden/roms"},
+    {"ps5cemu", "bios_dir", "{root}"},
+    {"ps5cemu", "bios_dir", "{root}/azahar/sysdata"},
+    {"ps5cemu", "bios_dir", "{root}/melonds/bios"},
+    {"ps5cemu", "bios_dir", "{root}/eden"},
+    {"ps5cemu", "save_dir", "{root}/melonds/saves"},
+    {"ps5cemu", "state_dir", "{root}/azahar/states"},
+    {"ps5cemu", "state_dir", "{root}/melonds/states"},
+    {"ps5cemu", "bundle_dirs", "{root}/mlc01/usr/save"},
+    {"ps5cemu", "bundle_dirs", "{root}/azahar/sdmc/Nintendo 3DS/00000000000000000000000000000000/00000000000000000000000000000000/title"},
+    {"ps5cemu", "bundle_dirs", "{root}/eden/user/nand/user/save/0000000000000000/{switch_user}"},
+    {"ps5cemu", "switch_users", "{root}/eden/config/prosperoeden.json"},
+    {"mupen64ps5", "save_dir", "{root}/saves"}, /* its own files now go through a .srm of RommPS's, 1.4.0 */
+    /* Test builds before it was the user's choice (PS5-ECAM asks): new folder first */
+    {"ps5cemu", "user_dir", "/data/cemu,{root}"},
+    {"ps5cemu", "user_dir", "/data/azahar,{root}/azahar"},
+    {"ps5cemu", "user_dir", "/data/melonds,{root}/melonds"},
+    {"ps5cemu", "user_dir", "/data/eden,{root}/eden"},
+    {"ps5cemu", "user_dir_has", "mlc01"},
+};
+
+static int shipped_value(const char *profile, const char *key, const cJSON *have) {
+    for (size_t i = 0; i < sizeof SHIPPED_VALUES / sizeof SHIPPED_VALUES[0]; i++)
+        if (!strcmp(SHIPPED_VALUES[i].profile, profile) && !strcmp(SHIPPED_VALUES[i].key, key) &&
+            cJSON_IsString(have) && !strcmp(have->valuestring, SHIPPED_VALUES[i].value))
+            return 1;
+    return 0;
+}
+
+/* "sync_saves" says whether an emulator's saves can sync, and only the preset
+ * gets to say it now (profiles.c). Saved profiles still carry copies from
+ * before: a "false" the preset never shipped was the user switching sync off,
+ * which "sync": "off" says now; one it did ship (and has since dropped, the
+ * saves turning out fine) is simply gone. Every "false" ever shipped, by
+ * emulator and system ("*": all of them): */
+static const struct {
+    const char *profile, *system;
+} SHIPPED_NO_SYNC[] = {
+    {"ps5cemu", "nds"}, {"prosperoeden", "*"}, {"ps4sx2", "*"}, {"ps5sx2", "*"},
+    {"resonance", "*"}, {"seedee5", "*"},      {"xpsemu", "*"},
+    /* new in 1.4.0 with games only, then saves too */
+    {"beetlepce", "*"}, {"genplusgx", "*"}, {"snes9xps5", "*"}, {"fbneops5", "*"}, {"psp5", "*"}, {"mupen64ps5", "*"},
+};
+
+static int shipped_no_sync(const char *profile, const char *system) {
+    for (size_t i = 0; i < sizeof SHIPPED_NO_SYNC / sizeof SHIPPED_NO_SYNC[0]; i++)
+        if (!strcmp(SHIPPED_NO_SYNC[i].profile, profile) &&
+            (!strcmp(SHIPPED_NO_SYNC[i].system, "*") || !strcmp(SHIPPED_NO_SYNC[i].system, system)))
+            return 1;
+    return 0;
+}
+
+/* One level's saved copy (the profile's, system "*", or a platform's) gone;
+ * the user's own "off" kept as "sync". `preset` is what the preset says for
+ * that level now: a copy of it isn't anyone's choice either. */
+static int drop_saved_sync_saves(cJSON *o, const cJSON *preset, const char *profile, const char *system, const char *name) {
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(o, "sync_saves");
+    if (!v) return 0;
+    if (cJSON_IsFalse(v) && !cJSON_IsFalse(preset) && !shipped_no_sync(profile, system)) {
+        cJSON_DeleteItemFromObjectCaseSensitive(o, "sync");
+        cJSON_AddStringToObject(o, "sync", "off");
+        LOGI("the %s profile: sync turned off for %s, as its saved profile had it", name, !strcmp(system, "*") ? "all its systems" : system);
+    }
+    cJSON_DeleteItemFromObjectCaseSensitive(o, "sync_saves");
+    return 1;
+}
+
+static int drop_saved_sync(cJSON *p, const cJSON *preset) {
+    const char *id = jget_str(p, "id", ""), *name = jget_str(p, "name", "");
+    const cJSON *top = cJSON_GetObjectItemCaseSensitive(preset, "sync_saves");
+    int n = drop_saved_sync_saves(p, top, id, "*", name);
+    cJSON *pe;
+    cJSON_ArrayForEach(pe, cJSON_GetObjectItemCaseSensitive(p, "platforms")) {
+        const cJSON *ce, *says = top;
+        cJSON_ArrayForEach(ce, cJSON_GetObjectItemCaseSensitive(preset, "platforms"))
+            if (!strcmp(profiles_system_key(ce), profiles_system_key(pe)) && cJSON_GetObjectItemCaseSensitive(ce, "sync_saves"))
+                says = cJSON_GetObjectItemCaseSensitive(ce, "sync_saves");
+        n += drop_saved_sync_saves(pe, says, id, profiles_system_key(pe), name);
+    }
+    return n;
+}
+
 static int fill_from_catalog(cJSON *p) {
     const cJSON *entry = detect_catalog_entry(jget_str(p, "id", ""));
     const cJSON *preset = entry ? cJSON_GetObjectItemCaseSensitive(entry, "profile") : NULL, *k;
@@ -534,39 +671,90 @@ static int fill_from_catalog(cJSON *p) {
     cJSON_ArrayForEach(pe, cJSON_GetObjectItemCaseSensitive(p, "platforms")) {
         const cJSON *first = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(pe, "romm"), 0);
         const char *core = jget_str(pe, "core_name", "");
-        if (cJSON_IsString(first) && core[0]) added += apply_core_rules(pe, first->valuestring, core, 1);
+        if (cJSON_IsString(first) && core[0]) added += detect_apply_core_rules(pe, first->valuestring, core, 1);
     }
     if (!preset) {
         if (added) LOGI("the %s profile got %d setting%s from RetroArch's core rules", jget_str(p, "name", ""), added, added == 1 ? "" : "s");
         return added;
     }
     cJSON_ArrayForEach(k, preset) {
-        if (!strcmp(k->string, "platforms")) continue;
+        if (!strcmp(k->string, "platforms") || !strcmp(k->string, "sync_saves")) continue; /* (the preset's alone) */
         const cJSON *have = cJSON_GetObjectItemCaseSensitive(p, k->string);
         int preset_only = 0;
         for (size_t i = 0; i < sizeof PRESET_ONLY / sizeof PRESET_ONLY[0]; i++) preset_only |= !strcmp(k->string, PRESET_ONLY[i]);
         if (!have) {
             cJSON_AddItemToObject(p, k->string, cJSON_Duplicate(k, 1));
             added++;
-        } else if (preset_only && !cJSON_Compare(have, k, 1)) {
+        } else if ((preset_only || shipped_value(jget_str(p, "id", ""), k->string, have)) && !cJSON_Compare(have, k, 1)) {
             cJSON_ReplaceItemInObjectCaseSensitive(p, k->string, cJSON_Duplicate(k, 1));
             added++;
         }
     }
+    /* An emulator renamed by its developer: a saved name the preset shipped
+     * takes the new one (the name sits beside the profile, not in it). */
+    const cJSON *name = cJSON_GetObjectItemCaseSensitive(entry, "name"), *had = cJSON_GetObjectItemCaseSensitive(p, "name");
+    if (cJSON_IsString(name) && had && shipped_value(jget_str(p, "id", ""), "name", had) && !cJSON_Compare(had, name, 1)) {
+        LOGI("%s is called %s now", had->valuestring, name->valuestring);
+        cJSON_ReplaceItemInObjectCaseSensitive(p, "name", cJSON_Duplicate(name, 1));
+        added++;
+    }
+    const int dropped = drop_saved_sync(p, preset);
     cJSON_ArrayForEach(pe, cJSON_GetObjectItemCaseSensitive(p, "platforms")) {
         const cJSON *first = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(pe, "romm"), 0), *ce;
         if (!cJSON_IsString(first)) continue;
         cJSON_ArrayForEach(ce, cJSON_GetObjectItemCaseSensitive(preset, "platforms")) {
             const cJSON *cf = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(ce, "romm"), 0);
             if (!cJSON_IsString(cf) || strcmp(cf->valuestring, first->valuestring)) continue;
-            cJSON_ArrayForEach(k, ce)
-                if (!cJSON_GetObjectItemCaseSensitive(pe, k->string)) {
+            cJSON_ArrayForEach(k, ce) {
+                if (!strcmp(k->string, "sync_saves")) continue;
+                const cJSON *have = cJSON_GetObjectItemCaseSensitive(pe, k->string);
+                if (!have) {
                     cJSON_AddItemToObject(pe, k->string, cJSON_Duplicate(k, 1));
                     added++;
+                } else if (shipped_value(jget_str(p, "id", ""), k->string, have) && !cJSON_Compare(have, k, 1)) {
+                    cJSON_ReplaceItemInObjectCaseSensitive(pe, k->string, cJSON_Duplicate(k, 1));
+                    added++;
                 }
+            }
         }
     }
     if (added) LOGI("the %s profile got %d setting%s from its newer preset", jget_str(p, "name", ""), added, added == 1 ? "" : "s");
+    return added + dropped;
+}
+
+/* A system a newer preset adds to an emulator (Switch to PS5-ECAM, for
+ * Eden) joins its saved profile. When another emulator already plays that
+ * system, the new one comes in excluded from it, as the user's pick stands:
+ * Emulator Settings can hand it over. */
+static int add_new_platforms(cJSON *profiles) {
+    int added = 0;
+    cJSON *p;
+    cJSON_ArrayForEach(p, profiles) {
+        const cJSON *entry = detect_catalog_entry(jget_str(p, "id", ""));
+        const cJSON *preset = entry ? cJSON_GetObjectItemCaseSensitive(entry, "profile") : NULL, *ce, *pe;
+        cJSON *mine = cJSON_GetObjectItemCaseSensitive(p, "platforms");
+        if (!preset || !cJSON_IsArray(mine)) continue;
+        cJSON_ArrayForEach(ce, cJSON_GetObjectItemCaseSensitive(preset, "platforms")) {
+            const char *key = profiles_system_key(ce);
+            int have = !key[0];
+            cJSON_ArrayForEach(pe, mine) have |= !strcmp(profiles_system_key(pe), key);
+            if (have) continue;
+            cJSON_AddItemToArray(mine, cJSON_Duplicate(ce, 1));
+            const cJSON *o;
+            int taken = 0;
+            cJSON_ArrayForEach(o, profiles) {
+                if (o == p || cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(o, "enabled")) || profiles_excludes(o, key)) continue;
+                cJSON_ArrayForEach(pe, cJSON_GetObjectItemCaseSensitive(o, "platforms")) taken |= !strcmp(profiles_system_key(pe), key);
+            }
+            if (taken) {
+                cJSON *ex = cJSON_GetObjectItemCaseSensitive(p, "exclude");
+                if (!cJSON_IsArray(ex)) ex = cJSON_AddArrayToObject(p, "exclude");
+                cJSON_AddItemToArray(ex, cJSON_CreateString(key));
+            }
+            LOGI("the %s profile plays %s now%s", jget_str(p, "name", ""), key, taken ? " (another emulator keeps it)" : "");
+            added++;
+        }
+    }
     return added;
 }
 
@@ -575,6 +763,7 @@ int detect_refresh_profiles(cJSON *profiles) {
     cJSON *found = NULL;
     cJSON *each;
     cJSON_ArrayForEach(each, profiles) changed += fill_from_catalog(each) > 0;
+    changed += add_new_platforms(profiles);
     for (int i = 0; i < cJSON_GetArraySize(profiles); i++) {
         cJSON *p = cJSON_GetArrayItem(profiles, i);
         const char *id = jget_str(p, "id", "");
@@ -608,6 +797,27 @@ int detect_refresh_profiles(cJSON *profiles) {
             cJSON_ReplaceItemInArray(profiles, i, fresh);
             changed++;
             break;
+        }
+    }
+    /* A RetroArch's other cores per system, as they are now: installed or
+     * removed since, or a profile saved before they were listed. */
+    cJSON_ArrayForEach(each, profiles) {
+        if (strncmp(jget_str(each, "id", ""), "retroarch-", 10) != 0) continue;
+        if (!found) found = detect_emulators();
+        const cJSON *c;
+        cJSON_ArrayForEach(c, found) {
+            if (strcmp(jget_str(c, "root", ""), jget_str(each, "root", "")) != 0) continue;
+            const cJSON *fresh = cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(c, "profile"), "platforms"), *fe;
+            cJSON *pe;
+            cJSON_ArrayForEach(pe, cJSON_GetObjectItemCaseSensitive(each, "platforms")) {
+                const cJSON *now = NULL, *had = cJSON_GetObjectItemCaseSensitive(pe, "cores");
+                cJSON_ArrayForEach(fe, fresh)
+                    if (!strcmp(profiles_system_key(fe), profiles_system_key(pe))) now = cJSON_GetObjectItemCaseSensitive(fe, "cores");
+                if ((!now && !had) || (now && had && cJSON_Compare(now, had, 1))) continue;
+                cJSON_DeleteItemFromObjectCaseSensitive(pe, "cores");
+                if (now) cJSON_AddItemToObject(pe, "cores", cJSON_Duplicate(now, 1));
+                changed++;
+            }
         }
     }
     cJSON_Delete(found);

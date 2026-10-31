@@ -17,11 +17,11 @@ One memory card per game, named after the game file (after the disc with PCSX-Re
 
 ### SwanStationPS5
 
-Plays the games in PSXS5's folder. One memory card per game, named after the game file. Its save states load only in SwanStationPS5.
+Plays the games in PSXS5's folder. One memory card per game, named after the disc serial (or the game file, when it can't find one). Its save states load only in SwanStationPS5.
 
 | System | Games | Saves | Save files | Saved as | States | State files | Memory cards |
 |---|---|---|---|---|---|---|---|
-| psx, ps1, playstation | `/data/PSXS5/games` | `{root}/saves` | `.mcd` | `{rom_stem}_1{ext}` | `{root}/states` | `.state*` | one per game |
+| psx, ps1, playstation | `/data/PSXS5/games` | `{root}/saves` | `.mcd` | `{serial}_1{ext}`, else `{rom_stem}_1{ext}` | `{root}/states` | `.state*` | one per game |
 
 ### PSSwanStation
 
@@ -41,11 +41,21 @@ Games save into their own disk images. Save Disks sync; there are no save states
 
 ### PS5SX2
 
-Two memory cards for every game, backed up to RomM (5.3 or newer).
+One memory card per game, set in each game's settings, or its two shared cards, backed up to RomM (5.3 or newer). No save states yet.
 
 | System | Games | Saves | Save files | Saved as | States | State files | Memory cards |
 |---|---|---|---|---|---|---|---|
-| ps2 | `{root}/games` | not synced |  |  | not synced |  | shared by every game. Shared cards (synced whole, while the system uses shared cards): `{root}/Mcd001.ps2`, `{root}/Mcd002.ps2` |
+| ps2 | `{root}/games` | `{root}/memcards,{root}` | its own card, `{rom_stem}.ps2`, named in `{root}/settings/{rom_stem}.ini`, synced as one 8 MB card of the game's saves |  | not synced |  | one per game; can be shared by every game. One per game: RomM Sync gives each game its own. Shared cards (synced whole, while the system uses shared cards): `{card_dir}/Mcd001.ps2`, `{card_dir}/Mcd002.ps2` |
+
+### Crux2
+
+One memory card per game, as Crux2 names them (games that share saves share one), or its two shared cards. Uses /data/crux2 when that folder exists. Its save states load only in Crux2.
+
+`{user_dir}`: `/data/crux2`, else `{root}`, the first that's there.
+
+| System | Games | Saves | Save files | Saved as | States | State files | Memory cards |
+|---|---|---|---|---|---|---|---|
+| ps2 | `{root}/games` | `{user_dir}/memcards` | its own card, , named in `{user_dir}/gamesettings/{serial}_{crc}.ini`, synced as one 8 MB card of the game's saves |  | `{user_dir}/sstates` | `.01.p2s,.02.p2s,.03.p2s,.04.p2s,.05.p2s,.06.p2s,.07.p2s,.08.p2s,.09.p2s,.10.p2s,.auto.p2s,.resume.p2s` | one per game; can be shared by every game. One per game: Turn on Settings > Memory cards > A memory card for each game in Crux2 (read from `{user_dir}/inis/PCSX2.ini`, `CardPerGame`). Shared cards (synced whole, while the system uses shared cards): `{card_dir}/Mcd001.ps2`, `{card_dir}/Mcd002.ps2` |
 
 ### PS5N64
 
@@ -62,6 +72,67 @@ Untested: v7 may look for games in PS5SX2's folder.
 | System | Games | Saves | Save files | Saved as | States | State files | Memory cards |
 |---|---|---|---|---|---|---|---|
 | nes, famicom | `{root}/games` | `{root}/saves` | `.sav` | `{rom_fnv64}{ext}` | `{root}/saves` | `.state*` |  |
+
+### Beetle PCE PS5
+
+PC Engine, CD and SuperGrafx games and the System Card. Saves are shared with RetroArch's Beetle PCE; its states load only in Beetle PCE PS5.
+
+| System | Games | Saves | Save files | Saved as | States | State files | Memory cards |
+|---|---|---|---|---|---|---|---|
+| tg16, turbografx16--1, pce, pcengine | `{root}/roms` | `{root}/saves/PCEngine` | `.srm` | `{rom_stem}{ext}` | `{root}/states/PCEngine` | `.state1,.state2,.state3,.state4,.state5,.state6,.state7,.state8,.state9,.state10` |  |
+| turbografx-cd, pcecd | `{root}/roms` | `{root}/saves/PCEngineCD` | `.srm` | `{rom_stem}{ext}` | `{root}/states/PCEngineCD` | `.state1,.state2,.state3,.state4,.state5,.state6,.state7,.state8,.state9,.state10` |  |
+| supergrafx | `{root}/roms` | `{root}/saves/SuperGrafx` | `.srm` | `{rom_stem}{ext}` | `{root}/states/SuperGrafx` | `.state1,.state2,.state3,.state4,.state5,.state6,.state7,.state8,.state9,.state10` |  |
+
+### Genesis Plus GX PS5
+
+Mega Drive, Master System and Mega CD games. Cartridge saves are shared with RetroArch's Genesis Plus GX; Mega CD saves (one backup RAM per region) don't sync. Its states load only in Genesis Plus GX PS5.
+
+| System | Games | Saves | Save files | Saved as | States | State files | Memory cards |
+|---|---|---|---|---|---|---|---|
+| genesis, genesis-slash-megadrive, megadrive | `{root}/roms` | `{root}/saves/MegaDrive` | `.srm` | `{rom_stem}{ext}` | `{root}/states/MegaDrive` | `.state1,.state2,.state3,.state4,.state5,.state6,.state7,.state8,.state9,.state10` |  |
+| sms, mastersystem | `{root}/roms` | `{root}/saves/MasterSystem` | `.srm` | `{rom_stem}{ext}` | `{root}/states/MasterSystem` | `.state1,.state2,.state3,.state4,.state5,.state6,.state7,.state8,.state9,.state10` |  |
+| segacd, sega-cd, megacd | `{root}/roms` | not synced |  |  | not synced |  |  |
+
+### Snes9x PS5
+
+SNES games. Saves are shared with RetroArch's Snes9x; its states load only in Snes9x PS5.
+
+| System | Games | Saves | Save files | Saved as | States | State files | Memory cards |
+|---|---|---|---|---|---|---|---|
+| snes, sfam | `{root}/roms` | `{root}/saves` | `.srm` | `{rom_stem}{ext}` | `{root}/states` | `.000,.001,.002,.003,.004,.005,.006,.007,.008,.009` |  |
+
+### GBCXY
+
+Game Boy and Game Boy Color (mGBA). Saves are named after a hash of the game file and shared with RetroArch's mGBA and Gambatte; its states only load in GBCXY.
+
+| System | Games | Saves | Save files | Saved as | States | State files | Memory cards |
+|---|---|---|---|---|---|---|---|
+| gb | `{root}/games/{platform}` | `{root}/saves` | `.sav` | `{rom_fnv64}{ext}` | `{root}/states` | `.state` |  |
+| gbc | `{root}/games/{platform}` | `{root}/saves` | `.sav` | `{rom_fnv64}{ext}` | `{root}/states` | `.state` |  |
+
+### Mupen64Plus PS5
+
+N64 games. Its saves (.eep, .sra, .fla and .mpk, named from its game database) are shared with PS5N64 and RetroArch as one .srm; its states load only in Mupen64Plus PS5.
+
+| System | Games | Saves | Save files | Saved as | States | State files | Memory cards |
+|---|---|---|---|---|---|---|---|
+| n64 | `{root}/roms` | `{data}/n64/mupen64plus` | `.srm` | `{rom_stem}{ext}` | `{root}/states` | `.st0,.st1,.st2,.st3,.st4,.st5,.st6,.st7,.st8,.st9` |  |
+
+### PSP5
+
+PSP games, from its memory stick. Saves are PPSSPP's, shared with RetroArch's PPSSPP.
+
+| System | Games | Saves | Save files | Saved as | States | State files | Memory cards |
+|---|---|---|---|---|---|---|---|
+| psp | `{root}/memstick/PSP/GAME` | `{rom_dir}` | a zip per game (psp), from `{root}/memstick/PSP/SAVEDATA` |  | `{rom_dir}` | `.state*` |  |
+
+### FBNeo PS5
+
+Arcade games, with their BIOS sets beside them. Saves (NVRAM and EEPROM) and states sync in a slot of their own: RetroArch's FBNeo keeps them in other forms.
+
+| System | Games | Saves | Save files | Saved as | States | State files | Memory cards |
+|---|---|---|---|---|---|---|---|
+| arcade, fbneo, neogeoaes, neogeomvs, cps1, cps2, cps3 | `{root}/roms` | `{root}/saves` | `.nvram,.nv` | `{rom_stem}{ext}` | `{root}/states` | `.state1,.state2,.state3,.state4,.state5,.state6,.state7,.state8,.state9,.state10` |  |
 
 ### Porpoise
 
@@ -82,37 +153,48 @@ Each game's own memory card syncs as its save; the shared ones (Own memory card 
 
 ### Seedee5
 
-Games and BIOS files only: saved games are kept as folders, and only after a clean exit.
+Each game's saves are the console's NVRAM (one 8 KB file, written every 20 s while playing), and states from its five slots.
 
 | System | Games | Saves | Save files | Saved as | States | State files | Memory cards |
 |---|---|---|---|---|---|---|---|
-| philips-cd-i | `{root}/roms` | not synced |  |  | not synced |  |  |
+| philips-cd-i | `{root}/roms` | `{root}/saves/same_cdi/nvram/{rom_stem}/cdimono1` | `mk48t08` | `mk48t08` | `{root}/saves/states` | `.state` |  |
 
 ### XPSemu
 
-Games and BIOS files only: saves live inside its hard disk image.
+Saves sync from inside its hard disk image, once it's closed.
 
 | System | Games | Saves | Save files | Saved as | States | State files | Memory cards |
 |---|---|---|---|---|---|---|---|
-| xbox | `{root}/games` | not synced |  |  | not synced |  |  |
+| xbox | `{root}/games` | `{rom_dir}` | a zip per game (xbox), from  |  | `{rom_dir}` | `.state*` |  |
 
-### PS5CEMU-HAR
+### PS5X360
 
-Wii U (Cemu), 3DS (Azahar) and DS (melonDS). Wii U and 3DS saves sync; 3DS save states load only in PS5CEMU-HAR. DS: games and BIOS files only for now.
+Xbox 360 (Xenia). Games go in /data/xbox360, a folder each; saves sync for the player signed in first.
 
 | System | Games | Saves | Save files | Saved as | States | State files | Memory cards |
 |---|---|---|---|---|---|---|---|
-| wiiu | `{root}/games` | `{rom_dir}` | a zip per game (wiiu), from `{root}/mlc01/usr/save` |  | `{rom_dir}` | `.state*` |  |
-| 3ds | `{root}/azahar/games` | `{rom_dir}` | a zip per game (3ds), from `{root}/azahar/sdmc/Nintendo 3DS/00000000000000000000000000000000/00000000000000000000000000000000/title` |  | `{root}/azahar/states` | `.cst` |  |
-| nds | `{root}/melonds/games` | not synced |  |  | not synced |  |  |
+| xbox360 | `/data/xbox360` | `{rom_dir}` | a zip per game (x360), from `{root}/saves/{xuid}` |  | `{rom_dir}` | `.state*` |  |
+
+### PS5-ECAM
+
+Wii U (Cemu), 3DS (Azahar), DS (melonDS) and Switch (Eden). Saves sync for all four; 3DS and DS save states load only in PS5-ECAM.
+
+`{user_dir}` for wiiu: `{root}`, else `/data/cemu`, the first with `.ecam-separated-v2` in it, else the first that's there; `{user_dir}` for 3ds: `{root}/azahar`, else `/data/azahar`, the first with `.ecam-separated-v2` in it, else the first that's there; `{user_dir}` for nds: `{root}/melonds`, else `/data/melonds`, the first with `.ecam-separated-v2` in it, else the first that's there; `{user_dir}` for switch: `{root}/eden`, else `/data/eden`, the first with `.ecam-separated-v2` in it, else the first that's there.
+
+| System | Games | Saves | Save files | Saved as | States | State files | Memory cards |
+|---|---|---|---|---|---|---|---|
+| wiiu | `{user_dir}/games` | `{rom_dir}` | a zip per game (wiiu), from `{user_dir}/mlc01/usr/save` |  | `{rom_dir}` | `.state*` |  |
+| 3ds | `{user_dir}/games` | `{rom_dir}` | a zip per game (3ds), from `{user_dir}/sdmc/Nintendo 3DS/00000000000000000000000000000000/00000000000000000000000000000000/title` |  | `{user_dir}/states` | `.cst` |  |
+| nds | `{user_dir}/games` | `{user_dir}/saves` | `.sav` | `{rom_stem}{ext}` | `{user_dir}/states` | `.ml*` |  |
+| switch | `{user_dir}/roms` | `{rom_dir}` | a zip per game (switch), from `{user_dir}/user/nand/user/save/0000000000000000/{switch_user}` |  | `{rom_dir}` | `.state*` |  |
 
 ### ProsperoEden
 
-Games (with their updates and DLC) and keys only: saves are kept per Switch user profile. Its Switch UI app shares the same folders.
+Games (with their updates and DLC), keys and saves: one Switch user's, its first unless you pick another. Its Switch UI app shares the same folders.
 
 | System | Games | Saves | Save files | Saved as | States | State files | Memory cards |
 |---|---|---|---|---|---|---|---|
-| switch | `{root}/roms` | not synced |  |  | not synced |  |  |
+| switch | `{root}/roms` | `{rom_dir}` | a zip per game (switch), from `{root}/user/nand/user/save/0000000000000000/{switch_user}` |  | `{rom_dir}` | `.state*` |  |
 
 ## PS4
 
@@ -227,10 +309,16 @@ From `platform/retroarch_cores.json`. Saves default to `<game>.srm` (`.sav`, `.r
 | Core | System | Save files | Saved as | Memory cards | Notes |
 |---|---|---|---|---|---|
 | LRPS2, PCSX2 | ps2 | `.ps2` |  | shared by every game; can be one per game. One per game: Turn off Shared Memory Cards in LRPS2's core options. Shared cards (synced whole, while the system uses shared cards): `{bios}/pcsx2/memcards/Mcd001.ps2`, `{bios}/pcsx2/memcards/Mcd002.ps2` | Per game: <save folder>/<game>.ps2 (slot 1 only). Shared (the default): <system>/pcsx2/memcards/Mcd001.ps2 and Mcd002.ps2. |
-| PS5SX2 | ps2 |  |  | shared by every game. Shared cards (synced whole, while the system uses shared cards): `{bios}/pcsx2/memcards/Mcd001.ps2`, `{bios}/pcsx2/memcards/Mcd002.ps2` | Shared only: <system>/pcsx2/memcards/Mcd001.ps2 and Mcd002.ps2. |
+| PS5SX2 | ps2 | each game's own card, synced as one 8 MB card of its saves |  | one per game; can be shared by every game. One per game: RomM Sync gives each game its own. Shared cards (synced whole, while the system uses shared cards): `{card_dir}/Mcd001.ps2`, `{card_dir}/Mcd002.ps2` | One per game (the default): <game>.ps2 in <system>/pcsx2/memcards, named in <system>/ps5sx2/gamesettings/<serial>_<crc>.ini, which RomM Sync writes. Shared: Mcd001.ps2 and Mcd002.ps2 there. |
 | SwanStation | psx | `.srm,.mcd` |  | one per game; can be shared by every game. One per game: Set Memory Card 1 Type to Libretro in SwanStation's core options | Card 1: <game>.srm (Libretro, the default), <serial>_1.mcd (per game by code) or <game>_1.mcd (by title). Shared: duckstation_shared_card_1.mcd. |
 | *Beetle PSX* | psx |  |  | one per game; can be shared by every game. One per game: Turn off Shared Memory Cards in the core options | Card 1: <game>.srm. Shared cards (mednafen_psx_libretro_shared.N.mcr) need the Mednafen card method. |
 | PCSX-ReARMed | psx |  |  | one per game | Card 1: <game>.srm. |
+| melonDS DS | nds |  |  |  | <save folder>/<game>.srm: the raw cartridge save, the same as standalone melonDS's .sav (PS5-ECAM), so the two share one. |
+| DeSmuME | nds | `.dsv` |  |  | <save folder>/<game>.dsv: the cartridge save with DeSmuME's footer after it. The save alone goes to RomM and the others (melonDS DS, PS5-ECAM); the footer is put back for DeSmuME. |
+| Snes9x | snes |  |  |  | <save folder>/<game>.srm: the cartridge's SRAM, the same as Snes9x PS5's, so they share one. |
+| Beetle PCE | tg16, turbografx-cd, supergrafx |  |  |  | <save folder>/<game>.srm: the save RAM, the same as Beetle PCE PS5's, so they share one. |
+| Genesis Plus GX, Genesis Plus GX Wide | genesis, sms |  |  |  | <save folder>/<game>.srm: the cartridge's SRAM (without its trailing blank bytes), the same save as Genesis Plus GX PS5's 64 KB one, so they share one. |
+| mGBA, Gambatte | gb, gbc |  |  |  | <save folder>/<game>.srm: the cartridge's SRAM, the same as GBCXY's .sav, so they share one. The clock (.rtc) stays on each console. |
 | Flycast | dc | `.bin` | `{game_id}.A1{ext}` | shared by every game; can be one per game. One per game: Set Per-Game VMUs to VMU A1 in Flycast's core options. Shared cards (synced whole, while the system uses shared cards): `{bios}/dc/vmu_save_A1.bin`, `{bios}/dc/vmu_save_B1.bin`, `{bios}/dc/vmu_save_C1.bin`, `{bios}/dc/vmu_save_D1.bin` | Shared (the default): <system>/dc/vmu_save_<port>.bin. Per-Game VMUs on VMU A1 or All VMUs: <save folder>/<disc id>.A1.bin (<game>.A1.bin before late 2024), the same raw 128 KB card as PSFlyCast's. |
 | any | saturn | `.srm,.bcr,.bkr` |  | one per game; can be shared by every game. One per game: Turn off Shared Internal and Backup Memory in Beetle Saturn's core options | Beetle Saturn: internal backup memory as <game>.srm (its Libretro save method, the default) or <game>.bkr; the cartridge's as <game>.bcr. |
 | *ParaLLEl*, *Mupen64Plus* | n64 |  |  | one per game | Controller paks live in each game's .srm (EEPROM, four paks, SRAM, flash): there's no shared one. |

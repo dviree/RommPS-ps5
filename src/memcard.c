@@ -70,7 +70,7 @@ static int cards_list(card *out, int max) {
             str_copy(c->label, sizeof c->label, m->profile_name);
         }
     }
-    free(maps);
+    profiles_free(maps);
     return n;
 }
 
@@ -489,7 +489,7 @@ cJSON *memcard_status(void) {
     /* An emulator that keeps either: PS2's method can be chosen (lrps2: 1.2's name). */
     cJSON_AddBoolToObject(j, "choice", choice != NULL);
     cJSON_AddBoolToObject(j, "lrps2", choice != NULL);
-    free(maps);
+    profiles_free(maps);
     card cards[MAX_CARDS];
     int n = cards_list(cards, MAX_CARDS);
     cJSON_AddBoolToObject(j, "enabled", n > 0 && config_server_at_least(5, 3, 0));
@@ -510,4 +510,25 @@ cJSON *memcard_status(void) {
         cJSON_AddItemToArray(slots, o);
     }
     return j;
+}
+
+void memcard_keep_shared(void) {
+    config_lock();
+    const int checked = g_cfg.ps2_cards_checked;
+    config_unlock();
+    if (checked) return;
+    int synced = 0;
+    state_lock();
+    const cJSON *e;
+    cJSON_ArrayForEach(e, state_section("memcards"))
+        if (str_ends_with_ci(e->string, ".ps2") && jget_num(e, "card_id", 0) > 0) synced = 1;
+    state_unlock();
+    config_lock();
+    if (synced && strcmp(g_cfg.ps2_cards, "shared") != 0) {
+        LOGI("PS2: shared memory cards have synced with RomM here, so they stay shared (one card per game is a choice in Emulator Settings)");
+        str_copy(g_cfg.ps2_cards, sizeof g_cfg.ps2_cards, "shared");
+    }
+    g_cfg.ps2_cards_checked = 1;
+    config_unlock();
+    config_save();
 }

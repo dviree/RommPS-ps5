@@ -1,0 +1,74 @@
+# Makes sure the latest release actually reaches ProsperoStore. release.yml
+# doesn't publish a PS5 release without PPSA76677.zip any more (1.3.0 went out
+# without one and the store sat on 1.2.1 for a day); this is the backstop for
+# a release published some other way, and for the store side.
+#
+# Every hour it looks at the latest release:
+#
+#   - no zip at all (published by hand, say)
+#   - the store still lists an older version 12 hours on (the catalog's own
+#     bot proposes new releases three times a day)
+#
+# A problem opens an issue (one per release) and fails the run; once it's
+# fixed, the issue is closed. PS4-only re-releases (release.yml's replace-ps4)
+# never touch the zip, so they never come up here.
+name: Store
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    # Upstream only: this fork takes s0liton/RommPS's presets and isn't in ProsperoStore.
+    if: github.repository == 's0liton/RommPS'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      ZIP: PPSA76677.zip
+      TITLE_ID: PPSA76677
+      STORE_API: https://prosperostore.net/api/v1/versions.json
+    steps:
+      - name: Check the latest release
+        run: |
+          minutes_since() { echo $(( ($(date +%s) - $(date -d "$1" +%s)) / 60 )); }
+          failed=0
+
+          # report <tag> <problem, or empty when there's none>
+          report() {
+            local title="$1 isn't on ProsperoStore" open
+            open=$(gh issue list --state open --search "in:title \"$title\"" --json number,title |
+                   jq -r --arg t "$title" '.[] | select(.title == $t) | .number')
+            if [[ -z "$2" ]]; then
+              for n in $open; do gh issue close "$n" --comment "Fixed."; done
+              echo "$1: fine"
+              return
+            fi
+            [[ -n "$open" ]] || gh issue create --title "$title" --body "$2"
+            echo "::error::$2"
+            failed=1
+          }
+
+          release=$(gh api "repos/$GH_REPO/releases/latest")
+          tag=$(jq -r .tag_name <<< "$release")
+          problem=
+          if ! jq -e --arg zip "$ZIP" 'any(.assets[]; .name == $zip)' <<< "$release" >/dev/null; then
+            problem="$tag is published without $ZIP, so the store has nothing to pick up. Run \`tools/release-app.sh $tag --upload\` from a checkout of $tag."
+          # The store's API being down isn't our problem; the next run asks again.
+          elif listed=$(curl -fsS --retry 3 "$STORE_API" | jq -r --arg id "$TITLE_ID" '.apps[$id].version // empty'); then
+            if [[ "$listed" != "${tag#v}" ]] && (( $(minutes_since "$(jq -r .published_at <<< "$release")") >= 720 )); then
+              problem="$ZIP is attached to $tag, but the store still lists ${listed:-nothing}. Open the catalog update by hand (docs/release-checklist.md)."
+            fi
+          else
+            echo "::warning::couldn't read $STORE_API"
+            exit "$failed" # no verdict, so its issue stays as it is
+          fi
+          report "$tag" "$problem"
+
+          exit "$failed"
