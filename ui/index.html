@@ -76,16 +76,17 @@ if (/PlayStation/.test(navigator.userAgent)) document.documentElement.className 
       </div>
       <div id="ps2Choice" style="display:none">
         <h3>PlayStation 2 memory cards</h3>
-        <p class="muted">LRPS2 can keep one memory card per game or shared cards for every game. RomM Sync syncs one of the two, never both.</p>
-        <label class="choice"><input type="radio" name="ps2" value="per_game" checked><div>
-          <b>One memory card per game</b>
-          <span class="muted">Works with any RomM version. In RetroArch, open the LRPS2 core options and turn off Shared Memory Cards. Saves already on the shared card stay there.</span>
-        </div></label>
+        <p class="muted" id="ps2Intro"></p>
         <label class="choice" id="ps2BackupChoice"><input type="radio" name="ps2" value="shared"><div>
           <b>Shared memory cards</b>
           <span class="muted">Needs RomM 5.3.0 or newer. The whole cards sync with your other consoles as they change; when both changed, the newer wins and the other is kept.</span>
           <div class="warn" id="ps2BackupNote"></div>
         </div></label>
+        <label class="choice"><input type="radio" name="ps2" value="per_game" checked><div>
+          <b class="ps2PerGameName"></b>
+          <span class="muted" id="ps2PerGameText"></span>
+        </div></label>
+        <p class="muted" id="ps2Hint"></p>
       </div>
       <div class="row" style="margin-top:14px"><button id="wzEmusCancel" style="display:none">Cancel</button><button class="primary" id="wzEmus">Continue</button></div>
     </div>
@@ -183,12 +184,14 @@ if (/PlayStation/.test(navigator.userAgent)) document.documentElement.className 
 
 <section id="library">
   <div class="card" id="platCard">
-    <h2>Platforms</h2>
+    <div class="row" style="margin-bottom:14px"><h2 style="margin:0" id="browseTitle">Platforms</h2>
+      <div class="seg fixed"><button id="byPlatform" class="on">Platforms</button><button id="byCollection">Collections</button></div></div>
     <div class="plats" id="platforms"></div>
+    <div class="plats" id="collections" style="display:none"></div>
   </div>
   <div class="card" id="romCard" style="display:none">
     <div class="row">
-      <button id="backPlat">Platforms</button>
+      <button id="backPlat">Back</button>
       <h2 style="margin:0" id="platTitle"></h2>
       <button id="biosBtn">Download BIOS</button>
     </div>
@@ -276,9 +279,10 @@ if (/PlayStation/.test(navigator.userAgent)) document.documentElement.className 
     <h2>PlayStation 2 memory cards</h2>
     <label for="ps2Mode">Mode</label>
     <select id="ps2Mode">
-      <option value="per_game">One memory card per game</option>
       <option value="shared">Shared memory cards, synced (RomM 5.3.0+)</option>
+      <option value="per_game" class="ps2PerGameName">One memory card per game</option>
     </select>
+    <p class="muted" id="ps2ModeHint" style="display:none"></p>
     <div id="ps2Status" style="margin-top:12px"></div>
   </div>
   <div class="card" id="systemsCard" style="display:none">
@@ -331,7 +335,7 @@ var each = function (sel, fn) { Array.prototype.forEach.call(document.querySelec
   document.body.removeChild(d);
 })();
 
-var state = { status: null, platform: null, offset: 0, total: 0, items: [], dl: {} };
+var state = { status: null, scope: null, offset: 0, total: 0, items: [], dl: {} };
 
 function api(method, path, body) {
   var opt = { method: method, headers: {} };
@@ -543,29 +547,46 @@ function emuCard(c) {
     return '<div class="emu"><div class="head"><b>' + esc(c.name) + "</b>" + pill("no preset yet", "warn") + "</div>" +
       '<div class="path">' + esc(c.root) + '</div><p class="muted">' + esc(c.note || "") +
       " If yours works, pick its folders below.</p></div>";
-  var plats = (c.profile && c.profile.platforms) || [];
+  var prof = c.profile || {}, plats = prof.platforms || [];
+  // Off for the platform, or for the whole emulator (XPSemu's saves are inside its disk image).
+  var off = function (p) { return p.sync_saves === false || (p.sync_saves === undefined && prof.sync_saves === false); };
   var platPills = plats.map(function (p) {
     if (p.sync_requires_option) return pill(p.dir, "warn");
-    return pill(p.dir, p.sync_saves === false ? "off" : "ok");
+    return pill(p.dir, off(p) ? "off" : "ok");
   }).join("");
+  var why = plats.filter(off).map(function (p) { return p.sync_note || prof.sync_note; }).filter(Boolean)[0];
   var on = wz.editing ? !!wz.current[c.root] : true;
   return '<div class="emu"><label class="head"><input type="checkbox" data-root="' + esc(c.root) + '"' + (on ? " checked" : "") + "><b>" + esc(c.name) + "</b>" +
     (c.title_id ? pill(c.title_id, "off") : "") + "</label>" +
     '<div class="path">' + esc(c.root) + "</div>" +
     (c.cores.length ? '<div class="group"><small>Cores</small><div>' + c.cores.map(function (x) { return pill(x); }).join("") + "</div></div>" : "") +
-    (plats.length ? '<div class="group"><small>Platforms</small><div>' + platPills + "</div></div>" : "") +
+    (plats.length ? '<div class="group"><small>Platforms</small><div>' + platPills +
+      (why ? '<br><small class="muted">' + esc(why) + "</small>" : "") + "</div></div>" : "") +
     ($("wzSaveSync").checked ? '<div class="group"><small>Save sync</small><div><select data-sync="' + esc(c.root) + '">' +
       [["all", "Saves and states"], ["saves", "Saves"], ["off", "Off"]].concat((wz.sync || {})[c.root] === "mixed" ? [["mixed", "Per platform"]] : []).map(function (o) {
         return '<option value="' + o[0] + '"' + (((wz.sync || {})[c.root] || "all") === o[0] ? " selected" : "") + ">" + o[1] + "</option>";
       }).join("") + "</select></div></div>" : "") + "</div>";
 }
 // Names for system keys (the first RomM slug of a platform), until RomM's own load.
-var SYSTEM_NAMES = { psx: "PlayStation", ps2: "PlayStation 2", psp: "PSP", n64: "Nintendo 64", nds: "Nintendo DS",
-  gba: "Game Boy Advance", gb: "Game Boy", gbc: "Game Boy Color", nes: "NES", fds: "Famicom Disk System", snes: "SNES",
-  genesis: "Mega Drive / Genesis", sms: "Master System", gamegear: "Game Gear", segacd: "Sega CD", sega32: "32X",
-  sg1000: "SG-1000", saturn: "Saturn", dc: "Dreamcast", arcade: "Arcade", tg16: "PC Engine / TurboGrafx-16",
-  ngc: "GameCube", wii: "Wii", dos: "DOS", msx: "MSX", lynx: "Lynx", virtualboy: "Virtual Boy", wonderswan: "WonderSwan",
-  "neo-geo-pocket": "Neo Geo Pocket", atari2600: "Atari 2600", atari7800: "Atari 7800", c64: "Commodore 64" };
+var SYSTEM_NAMES = { "3do": "Panasonic 3DO", "3ds": "Nintendo 3DS", amiga: "Commodore Amiga",
+  "amiga-cd32": "Commodore Amiga CD32", arcade: "Arcade", atari2600: "Atari 2600", atari5200: "Atari 5200",
+  atari7800: "Atari 7800", c64: "Commodore 64", "channel-f": "Fairchild Channel F",
+  colecovision: "Coleco ColecoVision", "commodore-cdtv": "Commodore CDTV", dc: "Sega Dreamcast", dos: "MS-DOS",
+  fds: "Nintendo Famicom Disk System", gamegear: "Sega Game Gear", gb: "Nintendo Game Boy",
+  gba: "Nintendo Game Boy Advance", gbc: "Nintendo Game Boy Color", genesis: "Sega Mega Drive / Genesis",
+  jaguar: "Atari Jaguar", lynx: "Atari Lynx", msx: "MSX", n64: "Nintendo 64", nds: "Nintendo DS",
+  "neo-geo-cd": "SNK Neo Geo CD", "neo-geo-pocket": "SNK Neo Geo Pocket",
+  "neo-geo-pocket-color": "SNK Neo Geo Pocket Color", neogeoaes: "SNK Neo Geo AES", neogeomvs: "SNK Neo Geo MVS",
+  nes: "Nintendo Entertainment System", ngc: "Nintendo GameCube", "pc-fx": "NEC PC-FX", "philips-cd-i": "Philips CD-i",
+  "pokemon-mini": "Nintendo Pokémon Mini", ps2: "Sony PlayStation 2", ps3: "Sony PlayStation 3",
+  psp: "Sony PlayStation Portable", psvita: "Sony PlayStation Vita", psx: "Sony PlayStation",
+  satellaview: "Nintendo Satellaview", saturn: "Sega Saturn", scummvm: "ScummVM", "sega-pico": "Sega Pico",
+  sega32: "Sega 32X", segacd: "Sega CD / Mega-CD", sg1000: "Sega SG-1000", sms: "Sega Master System",
+  snes: "Super Nintendo Entertainment System", "sufami-turbo": "Bandai SuFami Turbo", supergrafx: "NEC SuperGrafx",
+  switch: "Nintendo Switch", tg16: "NEC PC Engine / TurboGrafx-16",
+  "turbografx-cd": "NEC PC Engine CD / TurboGrafx-CD", virtualboy: "Nintendo Virtual Boy", wii: "Nintendo Wii",
+  wiiu: "Nintendo Wii U", wonderswan: "Bandai WonderSwan", "wonderswan-color": "Bandai WonderSwan Color",
+  xbox: "Microsoft Xbox", xbox360: "Microsoft Xbox 360", zxs: "Sinclair ZX Spectrum" };
 function systemName(key) {
   var p = (state.platforms || []).filter(function (x) { return x.slug === key || x.fs_slug === key; })[0];
   return p ? p.name : SYSTEM_NAMES[key] || key;
@@ -754,16 +775,51 @@ function loadEmus() {
     each("#emus input[data-root]", function (x) { x.onchange = function () { renderEmuChoices(); renderOwn(); }; });
     renderEmuChoices();
     api("GET", "/api/platforms").then(function (p) { state.platforms = wz.platforms = p; renderEmuChoices(); renderOwn(); }).catch(function () {});
-    var hasPs2 = list.some(function (c) { return (c.cores || []).indexOf("LRPS2") >= 0; });
+    var gameSaves = list.some(function (c) { return c.ready !== false && c.profile && ps2GameSaves(c.profile); });
+    var hasPs2 = gameSaves || list.some(function (c) { return (c.cores || []).indexOf("LRPS2") >= 0; });
     $("ps2Choice").style.display = hasPs2 ? "" : "none";
+    wz.ps2GameSaves = gameSaves;
+    var t = ps2Texts(gameSaves);
+    $("ps2Intro").textContent = t.intro;
+    $("ps2PerGameText").textContent = t.text;
+    each(".ps2PerGameName", function (x) { x.textContent = t.name; });
+    ps2Check("per_game");
     var v = state.status && state.status.server_version, ok = serverAtLeast(v, "5.3.0");
     var backup = document.querySelector('input[name=ps2][value=shared]');
     backup.disabled = !ok;
     $("ps2BackupChoice").classList.toggle("disabled", !ok);
     $("ps2BackupNote").textContent = ok ? "" : "Your server runs RomM " + (v || "an older version") + ".";
-    if (!ok) document.querySelector('input[name=ps2][value=per_game]').checked = true;
+    if (!ok) ps2Check("per_game");
+    // Editing: what's chosen now.
+    if (hasPs2 && ok) api("GET", "/api/memcards").then(function (mc) { if (mc.chosen) ps2Check(mc.chosen); }).catch(function () {});
   }).catch(function (e) { $("emus").innerHTML = '<p class="err">' + esc(e.message) + "</p>"; });
 }
+// PS2 emulators RomM Sync gives each game its own card in (PS5SX2: save_layout "ps2"),
+// rather than ones that keep a card per game themselves (RetroArch's LRPS2).
+function ps2GameSaves(p) {
+  return (p.platforms || []).some(function (e) { return (e.romm || []).indexOf("ps2") >= 0 && (e.save_layout || p.save_layout) === "ps2"; });
+}
+var PS2_TEXT = {
+  layout: { intro: "RomM Sync syncs one of the two, never both.", name: "One memory card per game",
+            text: "Works with any RomM version. Each game gets its own card, with its saves copied from the shared card, which stays as it is.",
+            hint: { shared: "The whole cards sync between your consoles.", per_game: "The default. Each game's card syncs as its save, so other RomM apps can load it." } },
+  card: { intro: "LRPS2 can keep one memory card per game or shared cards for every game. RomM Sync syncs one of the two, never both.",
+          name: "One memory card per game",
+          text: "Works with any RomM version. In RetroArch, open the LRPS2 core options and turn off Shared Memory Cards. Saves already on the shared card stay there." }
+};
+function ps2Texts(gameSaves) { return PS2_TEXT[gameSaves ? "layout" : "card"]; }
+// The hint under the PS2 choice follows the option picked; LRPS2's options say it all.
+function ps2ShowHint(el, gameSaves, mode) {
+  var h = ps2Texts(gameSaves).hint;
+  el.textContent = h ? h[mode] || "" : "";
+  el.style.display = h ? "" : "none";
+}
+function ps2Check(mode) {
+  var r = document.querySelector('input[name=ps2][value="' + mode + '"]');
+  if (r && !r.disabled) r.checked = true;
+  ps2ShowHint($("ps2Hint"), wz.ps2GameSaves, ps2Mode());
+}
+each("input[name=ps2]", function (x) { x.onchange = function () { ps2ShowHint($("ps2Hint"), wz.ps2GameSaves, ps2Mode()); }; });
 function ps2Mode() { var r = document.querySelector("input[name=ps2]:checked"); return r ? r.value : "per_game"; }
 $("wzEmus").onclick = function () {
   var roots = [];
@@ -886,15 +942,56 @@ function platIconError(img) {
   var initials = name.replace(/[^A-Za-z0-9 ]/g, "").split(" ").map(function (w) { return /^[0-9]+$/.test(w) ? w : (w[0] || ""); }).join("").slice(0, 4);
   img.parentNode.innerHTML = "<span>" + esc(initials.toUpperCase()) + "</span>";
 }
+// The Library shows platforms or collections.
+function browse(by) {
+  var coll = by === "collections";
+  $("byPlatform").classList.toggle("on", !coll); $("byCollection").classList.toggle("on", coll);
+  $("browseTitle").textContent = coll ? "Collections" : "Platforms";
+  $("platforms").style.display = coll ? "none" : ""; $("collections").style.display = coll ? "" : "none";
+  if (coll) loadCollections();
+}
+$("byPlatform").onclick = function () { browse("platforms"); };
+$("byCollection").onclick = function () { browse("collections"); };
+function loadCollections() {
+  if (!state.platforms) loadPlatforms(); // a collection's games show their platform's emulator
+  $("collections").innerHTML = '<p class="muted">Loading</p>';
+  // Every kind of collection the payload offers, the user's own first, then
+  // other users' public ones (with an owner), each by name.
+  api("GET", "/api/collections").then(function (list) {
+    state.collections = list;
+    $("collections").innerHTML = list.map(function (c, i) {
+      var cover = c.cover ? '<img alt="" src="' + coverUrl(c) + '" onerror="this.style.visibility=\'hidden\'">' : "<span>" + esc(c.name.charAt(0).toUpperCase()) + "</span>";
+      return '<button class="plat" data-coll="' + i + '"><div class="logo">' + cover + "</div>" +
+        '<span class="n">' + esc(c.name) + "</span><small>" + c.rom_count + (c.rom_count == 1 ? " game" : " games") + "</small>" +
+        (c.owner ? '<small class="muted">by ' + esc(c.owner) + "</small>" : "") +
+        (c.description ? '<small class="muted">' + esc(c.description) + "</small>" : "") + "</button>";
+    }).join("") || '<p class="muted">No collections with games in RomM yet.</p>';
+  }).catch(function (e) { $("collections").innerHTML = '<p class="err">' + esc(e.message) + "</p>"; });
+}
+// What the open list holds: { platform_id } or { collection_kind, collection_id }.
+function openScope(scope, title, info, bios) {
+  state.scope = scope;
+  $("platCard").style.display = "none"; $("romCard").style.display = "";
+  $("platTitle").textContent = title;
+  $("platInfo").innerHTML = info;
+  $("biosBtn").style.display = bios ? "" : "none";
+  $("search").value = ""; loadRoms();
+}
+function scopeQuery(s) {
+  return s.collection_id ? "collection_kind=" + encodeURIComponent(s.collection_kind) + "&collection_id=" + encodeURIComponent(s.collection_id)
+    : "platform_id=" + s.platform_id;
+}
 $("platforms").onclick = function (ev) {
   var b = ev.target.closest(".plat"); if (!b) return;
   var p = state.platforms.filter(function (x) { return x.id == b.dataset.id; })[0];
-  state.platform = p;
-  $("platCard").style.display = "none"; $("romCard").style.display = "";
-  $("platTitle").textContent = p.name;
-  $("platInfo").innerHTML = p.profile ? pill(p.profile) + "<code>" + esc(p.rom_dir) + "</code>" : '<span class="warn">No emulator is set up for this platform. Add one in Settings.</span>';
-  $("biosBtn").style.display = p.profile && p.firmware_count ? "" : "none";
-  $("search").value = ""; loadRoms();
+  openScope({ platform_id: p.id }, p.name,
+    p.profile ? pill(p.profile) + "<code>" + esc(p.rom_dir) + "</code>" : '<span class="warn">No emulator is set up for this platform. Add one in Settings.</span>',
+    p.profile && p.firmware_count);
+};
+$("collections").onclick = function (ev) {
+  var b = ev.target.closest(".plat"); if (!b) return;
+  var c = state.collections[+b.dataset.coll];
+  openScope({ collection_kind: c.kind, collection_id: c.id }, c.name, esc(c.description || "Games from every platform in this collection."), false);
 };
 $("backPlat").onclick = function () { $("romCard").style.display = "none"; $("platCard").style.display = ""; };
 
@@ -917,8 +1014,10 @@ function jobSaves(d) {
   if (d.states) got.push(plural(d.states, "state"));
   return got.length ? got.join(" and ") + " synced" : "";
 }
+// The platform a game is on, for its emulator (a collection mixes platforms).
+function platformOf(g) { return (state.platforms || []).filter(function (p) { return p.id === g.platform_id; })[0] || {}; }
 function romButton(g) {
-  if (!state.platform.profile) return "";
+  if (!platformOf(g).profile) return "";
   var j = romJob(g);
   if (j) return "<button disabled>" + jobLabel(j) + "</button>";
   if (g.installed) return '<button class="icon" data-hist="' + g.id + '" title="History" aria-label="History">' + CLOCK_ICON + '</button> <button class="danger" data-del="' + g.id + '">Remove</button>';
@@ -933,6 +1032,12 @@ function notice(title, text) {
   $("histClose").focus();
 }
 var ARCHIVED = "This download is archived. Decompress it on your RomM server first.";
+// In a collection, which platform a game is on, and that no emulator plays it.
+function romPlatform(g) {
+  if (!state.scope.collection_id) return "";
+  var p = platformOf(g);
+  return (p.name || "") + (p.profile ? "" : " · No emulator");
+}
 function romStatus(g) {
   var j = romJob(g);
   if (j) return pill(jobLabel(j), "warn");
@@ -961,7 +1066,7 @@ function renderRoms() {
     $("roms").innerHTML = '<table class="romtable"><thead><tr><th></th><th>Name</th><th>File</th><th>Size</th><th></th><th></th></tr></thead><tbody>' +
       items.map(function (g) {
         return '<tr data-rom="' + g.id + '"><td>' + (g.cover ? '<img alt="" loading="lazy" src="' + coverUrl(g) + '" onerror="this.style.visibility=\'hidden\'">' : "") + "</td>" +
-          "<td>" + esc(g.name) + (g.version ? '<div class="muted">' + esc(versionText(g)) + "</div>" : "") + '</td><td class="muted">' + esc(g.fs_name) + "</td><td>" + fmtSize(g.size) + "</td><td>" + romStatus(g) + "</td><td>" + romButton(g) + "</td></tr>";
+          "<td>" + esc(g.name) + (g.version ? '<div class="muted">' + esc(versionText(g)) + "</div>" : "") + (romPlatform(g) ? '<div class="muted">' + esc(romPlatform(g)) + "</div>" : "") + '</td><td class="muted">' + esc(g.fs_name) + "</td><td>" + fmtSize(g.size) + "</td><td>" + romStatus(g) + "</td><td>" + romButton(g) + "</td></tr>";
       }).join("") + "</tbody></table>";
     return;
   }
@@ -969,15 +1074,14 @@ function renderRoms() {
     var cover = g.cover ? 'style="background-image:url(\'' + coverUrl(g) + '\')"' : "";
     var j = romJob(g);
     var badge = j ? '<span class="badge dl">' + jobLabel(j) + "</span>" : g.installed ? '<span class="badge">Downloaded</span>' : "";
-    return '<div class="rom" data-rom="' + g.id + '"><div class="cover" ' + cover + ">" + badge + '</div><div class="t">' + esc(g.name) + '</div><div class="s">' + (g.version ? esc(g.version) + " · " : "") + fmtSize(g.size) + "</div>" + (g.installed && !romJob(g) ? '<div class="btns">' + romButton(g) + "</div>" : romButton(g)) + "</div>";
+    return '<div class="rom" data-rom="' + g.id + '"><div class="cover" ' + cover + ">" + badge + '</div><div class="t">' + esc(g.name) + '</div><div class="s">' + (romPlatform(g) ? esc(romPlatform(g)) + " · " : "") + (g.version ? esc(g.version) + " · " : "") + fmtSize(g.size) + "</div>" + (g.installed && !romJob(g) ? '<div class="btns">' + romButton(g) + "</div>" : romButton(g)) + "</div>";
   }).join("") + "</div>";
 }
 // The list is a window of games starting at state.start; the A-Z ribbon either
 // scrolls within it or, for a letter not loaded yet, restarts it at that letter.
 function loadRoms(append, start) {
-  var p = state.platform;
   if (!append) { state.start = state.offset = start || 0; state.items = []; state.loading = true; renderRoms(); }
-  api("GET", "/api/roms?platform_id=" + p.id + "&offset=" + state.offset + "&limit=60&search=" + encodeURIComponent($("search").value)).then(function (r) {
+  api("GET", "/api/roms?" + scopeQuery(state.scope) + "&offset=" + state.offset + "&limit=60&search=" + encodeURIComponent($("search").value)).then(function (r) {
     state.loading = false;
     state.total = r.total; state.offset += r.items.length;
     state.items = (append ? state.items : []).concat(r.items);
@@ -1036,7 +1140,7 @@ $("roms").onclick = function (ev) {
   if (b.dataset.hist) showHistory(+b.dataset.hist);
   if (b.dataset.del && confirm("Remove this game from the console? Its saves are kept.")) api("POST", "/api/delete", { rom_id: +b.dataset.del }).then(function () { toast("Removed"); loadRoms(); }).catch(function (e) { toast(e.message, 1); });
 };
-$("biosBtn").onclick = function () { api("POST", "/api/download", { platform_id: state.platform.id }).then(function () { toast("Downloading BIOS files"); }).catch(function (e) { toast(e.message, 1); }); };
+$("biosBtn").onclick = function () { api("POST", "/api/download", { platform_id: state.scope.platform_id }).then(function () { toast("Downloading BIOS files"); }).catch(function (e) { toast(e.message, 1); }); };
 function historyTable(kind, list) {
   if (!list.length) return '<p class="muted">Nothing on RomM yet.</p>';
   list.sort(function (a, b) { return b.updated_at < a.updated_at ? -1 : 1; });
@@ -1209,14 +1313,17 @@ function loadSettings() {
   loadSystems();
   api("GET", "/api/paths").then(function (list) {
     $("paths").innerHTML = list.map(function (m) {
-      var layouts = { psp: "PSP save folders", gci: "GameCube memory card files", wii: "Wii save folder" };
-      var saves = !m.save_dir ? pill("not synced", "off") + (m.sync_note ? '<br><small class="warn">' + esc(m.sync_note) + "</small>" : "")
-        : m.save_layout ? pill(layouts[m.save_layout] || m.save_layout, "ok") + "<br><small class=muted>synced as one zip per game</small>"
+      var layouts = { psp: "PSP save folders", gci: "GameCube memory card files", wii: "Wii save folder", ps2: "PS2 memory card saves" };
+      // Saves that only sync as the emulator's shared memory cards (PS4SX2's).
+      var shared = !m.save_dir && m.cards && m.cards.mode === "shared" && m.cards.active;
+      var saves = shared ? pill("shared memory cards", "ok") + "<br><small class=muted>backed up to RomM as they are</small>"
+        : !m.save_dir ? pill("not synced", "off") + (m.sync_note ? '<br><small class="warn">' + esc(m.sync_note) + "</small>" : "")
+        : m.save_layout ? pill(layouts[m.save_layout] || m.save_layout, "ok") + "<br><small class=muted>synced as one " + (m.save_layout === "ps2" ? "card" : "zip") + " per game</small>"
         : "<code>" + esc(m.save_dir) + "</code>";
       return "<tr><td>" + esc(m.platforms.split(",")[0]) + "<br><small class=muted>" + esc(m.emulator) + "</small></td><td><code>" + esc(m.rom_dir) + "</code></td><td class=syncCol>" + saves +
         "</td><td class=syncCol>" + (m.state_dir ? "<code>" + esc(m.state_dir) + "</code>" : "") + "</td><td><code>" + esc(m.bios_dir) + "</code></td></tr>";
     }).join("");
-    var ps2 = list.filter(function (m) { return m.emulator === "pcsx2"; })[0];
+    var ps2 = list.filter(function (m) { return m.save_layout === "ps2"; })[0] || list.filter(function (m) { return m.emulator === "pcsx2"; })[0];
     loadPs2(ps2);
   });
 }
@@ -1246,11 +1353,17 @@ function loadSystems() {
 function loadPs2(map) {
   api("GET", "/api/memcards").then(function (mc) {
     $("ps2Card").style.display = mc.choice || mc.slots.length ? "" : "none";
+    var gameSaves = !!(map && map.save_layout === "ps2");
+    $("ps2Mode").dataset.gameSaves = gameSaves ? "1" : "";
+    each(".ps2PerGameName", function (x) { x.textContent = ps2Texts(gameSaves).name; });
     $("ps2Mode").value = mc.mode === "shared" ? "shared" : "per_game";
     $("ps2Mode").disabled = !mc.choice;
-    $("ps2Mode").options[1].disabled = !mc.supported;
+    $("ps2Mode").querySelector("option[value=shared]").disabled = !mc.supported;
+    ps2ShowHint($("ps2ModeHint"), gameSaves, $("ps2Mode").value);
     var h = "";
-    if (mc.mode === "per_game") {
+    if (mc.mode === "per_game" && gameSaves) {
+      h = map.save_dir ? "<p class=\"ok\">Each game has its own card, which syncs as its save.</p>" : "";
+    } else if (mc.mode === "per_game") {
       h = map && map.save_dir ? '<p class="ok">One card per game is on. PS2 saves sync like any other save.</p>'
         : '<p class="warn">LRPS2 still uses a shared card. Turn off Shared Memory Cards in the LRPS2 core options.</p>';
     } else if (!mc.supported) {
@@ -1264,7 +1377,10 @@ function loadPs2(map) {
     $("ps2Status").innerHTML = h;
   });
 }
-$("ps2Mode").onchange = function () { api("POST", "/api/config", { ps2_cards: this.value }).then(function () { toast("Saved"); loadSettings(); }); };
+$("ps2Mode").onchange = function () {
+  ps2ShowHint($("ps2ModeHint"), !!this.dataset.gameSaves, this.value);
+  api("POST", "/api/config", { ps2_cards: this.value }).then(function () { toast("Saved"); loadSettings(); });
+};
 $("ps2Status").onclick = function (ev) {
   var b = ev.target.closest("button[data-restore]"); if (!b) return;
   if (!confirm("Replace this memory card with the latest one on RomM? The current card is kept in backups first.")) return;
@@ -1307,7 +1423,7 @@ function renderUpdate(u) {
     h += "<p>" + esc(u.message || u.state) + (u.state === "downloading" && u.total ? " (" + pct + "%)" : "") + "</p>";
     if (u.state === "downloading") h += '<div class="bar"><i style="width:' + pct + '%"></i></div>';
   } else if (u.available && u.self_update === false) {
-    h += '<p class="ok">RommPS ' + esc(u.latest) + " is available. Update it in ProsperoStore.</p>";
+    h += '<p class="ok">RommPS ' + esc(u.latest) + " is available. Update it from your homebrew store.</p>";
   } else if (u.available) {
     h += '<p class="ok">Version ' + esc(u.latest) + " is available.</p>";
     if (!u.autostart) h += '<p class="warn">' + (u.autostart_supported ? "Autostart isn't set up, so the" : "The") + " update only lasts until the console restarts.</p>";

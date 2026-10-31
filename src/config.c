@@ -123,6 +123,7 @@ void config_apply_json(const cJSON *j) {
     if (g_cfg.download_concurrency > 8) g_cfg.download_concurrency = 8;
     get_str(j, "slot", g_cfg.slot, sizeof g_cfg.slot);
     get_str(j, "ps2_cards", g_cfg.ps2_cards, sizeof g_cfg.ps2_cards);
+    get_int(j, "ps2_cards_checked", &g_cfg.ps2_cards_checked);
     /* Before 1.3: "backup" (the shared cards, backed up) or "per_game". */
     if (!strcmp(g_cfg.ps2_cards, "backup")) str_copy(g_cfg.ps2_cards, sizeof g_cfg.ps2_cards, "shared");
     else if (strcmp(g_cfg.ps2_cards, "shared") != 0 && strcmp(g_cfg.ps2_cards, "per_game") != 0) g_cfg.ps2_cards[0] = 0;
@@ -214,6 +215,7 @@ cJSON *config_to_json(int include_secrets) {
     cJSON_AddStringToObject(j, "conflict_policy", conflict_policy_name(g_cfg.conflicts));
     cJSON_AddStringToObject(j, "slot", g_cfg.slot);
     cJSON_AddStringToObject(j, "ps2_cards", g_cfg.ps2_cards);
+    cJSON_AddBoolToObject(j, "ps2_cards_checked", g_cfg.ps2_cards_checked);
     cJSON_AddStringToObject(j, "ui_theme", g_cfg.ui_theme);
     cJSON_AddStringToObject(j, "server_version", g_cfg.server_version);
     cJSON_AddBoolToObject(j, "profiles_custom", g_cfg.profiles_custom);

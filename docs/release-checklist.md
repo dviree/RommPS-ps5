@@ -45,5 +45,9 @@ For each one, start from the old version actually installed and set up, then upd
 
 ## After
 
-- The release workflow published the payloads, then `tools/release-app.sh <tag> --upload` attached `PPSA76677.zip`.
-- The catalog bot's pull request for the new version shows up the next day.
+Every PS5 release, alone or with the PS4, ships `PPSA76677.zip`. Only a PS4-only re-release (the manual Release run) skips it, and that never touches the PS5's files.
+
+- The release workflow builds the payloads, then RommPS (`.github/workflows/app.yml`), and publishes the release only once both have built. No zip, no release: rerun the failed job.
+- The store: the catalog bot proposes the new version within 8 hours. For sooner, open the pull request yourself on the catalog (`apps/PPSA76677.json`: `version`, `artifact_url`, `sha256`, `icon_url`), from the account that owns the repository; it's merged and live within minutes.
+- The Store workflow checks every hour and opens an issue if the latest release has no zip, or the store still lists the old version 12 hours after publishing.
+- A release that went out without the zip anyway: `git checkout <tag> && tools/release-app.sh <tag> --upload` builds it here and attaches it.

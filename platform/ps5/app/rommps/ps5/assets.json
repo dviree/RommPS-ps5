@@ -244,7 +244,7 @@
    ],
    "title": "RomM Sync payload",
    "author": "s0liton",
-   "licence": "GPL-3.0",
+   "licence": "GPL-3.0; the libraries in it under their own, in licenses/payload/",
    "url": "https://github.com/s0liton/RommPS",
    "changes": "none: RomM Sync's payload from the same release, which RommPS starts when it isn't running",
    "licence_file": "licenses/GPL-3.0.txt",

@@ -25,6 +25,7 @@
 #include "memcard.h"
 #include "pair.h"
 #include "platform.h"
+#include "presets.h"
 #include "profiles.h"
 #include "ra2.h"
 #include "romm.h"
@@ -974,6 +975,15 @@ static void route(request *r) {
         else send_json(fd, 200, update_status());
         return;
     }
+    if (is_get && !strcmp(r->path, "/api/presets")) {
+        send_json(fd, 200, presets_status());
+        return;
+    }
+    if (is_post && !strcmp(r->path, "/api/presets/check")) {
+        if (presets_check() != 0) send_error(fd, 409, "a presets check is already running");
+        else send_json(fd, 200, presets_status());
+        return;
+    }
     /* Autostart works before pairing too: RommPS sets it up and keeps it
      * current whether or not RomM Sync is paired yet. */
     if (is_get && !strcmp(r->path, "/api/autostart")) {
@@ -1240,6 +1250,15 @@ static void route(request *r) {
         else send_ok(fd);
         return;
     }
+    if (is_post && !strcmp(r->path, "/api/notify")) {
+        /* RommPS's own messages, as the console's notifications: an app can't send those. */
+        cJSON *j = body_json(r);
+        const char *message = jget_str(j, "message", "");
+        if (message[0]) plat_notify("RommPS: %s", message);
+        cJSON_Delete(j);
+        send_ok(fd);
+        return;
+    }
     if (is_post && !strcmp(r->path, "/api/sync")) {
         sync_request("manual");
         send_ok(fd);
@@ -1302,12 +1321,41 @@ static void route(request *r) {
         else send_error(fd, 502, err);
         return;
     }
+    if (is_get && !strcmp(r->path, "/api/collections")) {
+        /* Every kind offered, or only kind's. */
+        char kind[32];
+        collection_kind k = COLLECTION_NONE;
+        if (qparam(r, "kind", kind, sizeof kind) && (k = library_collection_kind(kind)) == COLLECTION_NONE) {
+            send_error(fd, 400, "unknown kind of collection");
+            return;
+        }
+        int refused = 0;
+        cJSON *j = library_collections(k, &refused, err, sizeof err);
+        if (j) send_json(fd, 200, j);
+        else send_error(fd, refused ? 403 : 502, err); /* 403: pair again */
+        return;
+    }
     if (is_get && !strcmp(r->path, "/api/roms")) {
-        char search[256];
+        /* platform_id narrows to a platform (0 or none: every one); collection_id
+         * to a collection, of collection_kind (regular unless said). */
+        char search[256], kind[32];
+        library_scope scope = {.platform_id = qint(r, "platform_id", 0), .collection = COLLECTION_NONE};
         qparam(r, "search", search, sizeof search);
+        if (qparam(r, "collection_id", scope.collection_id, sizeof scope.collection_id) && scope.collection_id[0]) {
+            if (!qparam(r, "collection_kind", kind, sizeof kind)) str_copy(kind, sizeof kind, "regular");
+            scope.collection = library_collection_kind(kind);
+            if (scope.collection == COLLECTION_NONE) {
+                send_error(fd, 400, "unknown kind of collection");
+                return;
+            }
+            if (!library_collection_id_ok(scope.collection, scope.collection_id)) {
+                send_error(fd, 400, "no such collection");
+                return;
+            }
+        }
         int limit = qint(r, "limit", 60);
         if (limit < 1 || limit > 500) limit = 60;
-        cJSON *j = library_roms(qint(r, "platform_id", 0), search, qint(r, "offset", 0), limit, err, sizeof err);
+        cJSON *j = library_roms(&scope, search, qint(r, "offset", 0), limit, err, sizeof err);
         if (j) send_json(fd, 200, j);
         else send_error(fd, 502, err);
         return;
@@ -1320,6 +1368,8 @@ static void route(request *r) {
         }
         cJSON *j = cJSON_CreateObject();
         cJSON_AddBoolToObject(j, "installed", library_on_console(id));
+        cJSON *discs = library_discs_here(id);
+        if (discs) cJSON_AddItemToObject(j, "discs", discs);
         send_json(fd, 200, j);
         return;
     }
@@ -1351,8 +1401,31 @@ static void route(request *r) {
     if (is_post && !strcmp(r->path, "/api/download")) {
         cJSON *j = body_json(r);
         int rc;
+        if (cJSON_GetObjectItemCaseSensitive(j, "collection_id")) {
+            /* A whole collection: every game of it not here yet. */
+            library_scope scope = {.collection = library_collection_kind(jget_str(j, "collection_kind", "regular"))};
+            str_copy(scope.collection_id, sizeof scope.collection_id, jget_str(j, "collection_id", ""));
+            int queued = 0, skipped = 0;
+            if (!library_collection_id_ok(scope.collection, scope.collection_id)) {
+                snprintf(err, sizeof err, "no such collection");
+                rc = -1;
+            } else {
+                rc = library_queue_scope(&scope, &queued, &skipped, err, sizeof err);
+            }
+            cJSON_Delete(j);
+            if (rc) {
+                send_error(fd, 400, err);
+            } else {
+                cJSON *o = cJSON_CreateObject();
+                cJSON_AddNumberToObject(o, "queued", queued);
+                cJSON_AddNumberToObject(o, "skipped", skipped);
+                send_json(fd, 200, o);
+            }
+            return;
+        }
         if (cJSON_GetObjectItemCaseSensitive(j, "rom_id"))
-            rc = library_queue_rom((int)jget_num(j, "rom_id", 0), jget_str(j, "name", ""), jget_str(j, "cover", ""), err, sizeof err);
+            rc = library_queue_rom((int)jget_num(j, "rom_id", 0), (int)jget_num(j, "disc", 0), jget_str(j, "name", ""),
+                                   jget_str(j, "cover", ""), err, sizeof err);
         else
             rc = library_queue_firmware((int)jget_num(j, "platform_id", 0), err, sizeof err);
         cJSON_Delete(j);
@@ -1362,7 +1435,9 @@ static void route(request *r) {
     }
     if (is_post && !strcmp(r->path, "/api/delete")) {
         cJSON *j = body_json(r);
-        int rc = library_delete_rom((int)jget_num(j, "rom_id", 0), err, sizeof err);
+        const int disc = (int)jget_num(j, "disc", 0);
+        int rc = disc > 0 ? library_delete_disc((int)jget_num(j, "rom_id", 0), disc, err, sizeof err)
+                          : library_delete_rom((int)jget_num(j, "rom_id", 0), err, sizeof err);
         cJSON_Delete(j);
         if (rc) send_error(fd, 400, err);
         else send_ok(fd);
@@ -1375,6 +1450,7 @@ static void route(request *r) {
         config_unlock();
         cJSON *arr = cJSON_CreateArray();
         for (int i = 0; i < n; i++) {
+            if (maps[i].twin) continue; /* (its entry's core's saves, shown with it) */
             cJSON *o = cJSON_CreateObject();
             cJSON_AddStringToObject(o, "profile", maps[i].profile_name);
             cJSON_AddStringToObject(o, "platforms", maps[i].romm_slugs);
@@ -1416,7 +1492,7 @@ static void route(request *r) {
             cJSON_AddNumberToObject(o, "own_games", maps[i].mount_blocked);
             cJSON_AddItemToArray(arr, o);
         }
-        free(maps);
+        profiles_free(maps);
         send_json(fd, 200, arr);
         return;
     }

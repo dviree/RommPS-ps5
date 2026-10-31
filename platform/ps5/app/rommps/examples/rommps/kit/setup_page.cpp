@@ -61,33 +61,73 @@ std::string print(cJSON *o)
     return out;
 }
 
-// Names for system keys (a platform's first RomM slug), as the web page has them.
+// Names for system keys (a platform's first RomM slug): their makers' names, as
+// the payload gives RomM's platforms (src/library.c CONSOLE_NAMES) and the web page has them.
 std::string system_name(const std::string &key)
 {
     static const std::map<std::string, const char *> names = {
-        {"psx", "PlayStation"},       {"ps2", "PlayStation 2"},
-        {"psp", "PSP"},               {"n64", "Nintendo 64"},
-        {"nds", "Nintendo DS"},       {"gba", "Game Boy Advance"},
-        {"gb", "Game Boy"},           {"gbc", "Game Boy Color"},
-        {"nes", "NES"},               {"fds", "Famicom Disk System"},
-        {"snes", "SNES"},             {"genesis", "Mega Drive / Genesis"},
-        {"sms", "Master System"},     {"gamegear", "Game Gear"},
-        {"segacd", "Sega CD"},        {"sega32", "32X"},
-        {"sg1000", "SG-1000"},        {"saturn", "Saturn"},
-        {"dc", "Dreamcast"},          {"arcade", "Arcade"},
-        {"tg16", "PC Engine"},        {"ngc", "GameCube"},
-        {"wii", "Wii"},               {"dos", "DOS"},
-        {"msx", "MSX"},               {"lynx", "Lynx"},
-        {"virtualboy", "Virtual Boy"}, {"wonderswan", "WonderSwan"},
-        {"neo-geo-pocket", "Neo Geo Pocket"}, {"atari2600", "Atari 2600"},
-        {"atari7800", "Atari 7800"},  {"c64", "Commodore 64"},
-        {"amiga", "Amiga"},           {"satellaview", "Satellaview"},
-        {"neo-geo-pocket-color", "Neo Geo Pocket Color"}, {"wonderswan-color", "WonderSwan Color"},
-        {"turbografx-cd", "PC Engine CD"}, {"3ds", "Nintendo 3DS"},
-        {"atari5200", "Atari 5200"},  {"jaguar", "Jaguar"},
-        {"pc-fx", "PC-FX"},           {"neo-geo-cd", "Neo Geo CD"},
-        {"pokemon-mini", "Pokémon Mini"}, {"3do", "3DO"},
+        {"3do", "Panasonic 3DO"},
+        {"3ds", "Nintendo 3DS"},
+        {"amiga", "Commodore Amiga"},
+        {"amiga-cd32", "Commodore Amiga CD32"},
+        {"arcade", "Arcade"},
+        {"atari2600", "Atari 2600"},
+        {"atari5200", "Atari 5200"},
+        {"atari7800", "Atari 7800"},
+        {"c64", "Commodore 64"},
+        {"channel-f", "Fairchild Channel F"},
+        {"colecovision", "Coleco ColecoVision"},
+        {"commodore-cdtv", "Commodore CDTV"},
+        {"dc", "Sega Dreamcast"},
+        {"dos", "MS-DOS"},
+        {"fds", "Nintendo Famicom Disk System"},
+        {"gamegear", "Sega Game Gear"},
+        {"gb", "Nintendo Game Boy"},
+        {"gba", "Nintendo Game Boy Advance"},
+        {"gbc", "Nintendo Game Boy Color"},
+        {"genesis", "Sega Mega Drive / Genesis"},
+        {"jaguar", "Atari Jaguar"},
+        {"lynx", "Atari Lynx"},
+        {"msx", "MSX"},
+        {"n64", "Nintendo 64"},
+        {"nds", "Nintendo DS"},
+        {"neo-geo-cd", "SNK Neo Geo CD"},
+        {"neo-geo-pocket", "SNK Neo Geo Pocket"},
+        {"neo-geo-pocket-color", "SNK Neo Geo Pocket Color"},
+        {"neogeoaes", "SNK Neo Geo AES"},
+        {"neogeomvs", "SNK Neo Geo MVS"},
+        {"nes", "Nintendo Entertainment System"},
+        {"ngc", "Nintendo GameCube"},
+        {"pc-fx", "NEC PC-FX"},
+        {"philips-cd-i", "Philips CD-i"},
+        {"pokemon-mini", "Nintendo Pokémon Mini"},
+        {"ps2", "Sony PlayStation 2"},
+        {"ps3", "Sony PlayStation 3"},
+        {"psp", "Sony PlayStation Portable"},
+        {"psvita", "Sony PlayStation Vita"},
+        {"psx", "Sony PlayStation"},
+        {"satellaview", "Nintendo Satellaview"},
+        {"saturn", "Sega Saturn"},
         {"scummvm", "ScummVM"},
+        {"sega-pico", "Sega Pico"},
+        {"sega32", "Sega 32X"},
+        {"segacd", "Sega CD / Mega-CD"},
+        {"sg1000", "Sega SG-1000"},
+        {"sms", "Sega Master System"},
+        {"snes", "Super Nintendo Entertainment System"},
+        {"sufami-turbo", "Bandai SuFami Turbo"},
+        {"supergrafx", "NEC SuperGrafx"},
+        {"switch", "Nintendo Switch"},
+        {"tg16", "NEC PC Engine / TurboGrafx-16"},
+        {"turbografx-cd", "NEC PC Engine CD / TurboGrafx-CD"},
+        {"virtualboy", "Nintendo Virtual Boy"},
+        {"wii", "Nintendo Wii"},
+        {"wiiu", "Nintendo Wii U"},
+        {"wonderswan", "Bandai WonderSwan"},
+        {"wonderswan-color", "Bandai WonderSwan Color"},
+        {"xbox", "Microsoft Xbox"},
+        {"xbox360", "Microsoft Xbox 360"},
+        {"zxs", "Sinclair ZX Spectrum"},
     };
     const auto it = names.find(key);
     if (it != names.end())
@@ -437,6 +477,12 @@ void SetupPage::load_emulators(App &app)
                 const cJSON *slug;
                 cJSON_ArrayForEach(slug, cJSON_GetObjectItemCaseSensitive(p, "romm")) if (cJSON_IsString(slug))
                     sy.slugs.push_back(slug->valuestring);
+                // A platform entry's key wins over its profile's, as in the payload.
+                const char *layout = cJSON_GetObjectItemCaseSensitive(p, "save_layout")
+                                         ? str(p, "save_layout")
+                                         : str(cJSON_GetObjectItemCaseSensitive(c, "profile"), "save_layout");
+                if (sy.key == "ps2" && std::string(layout) == "ps2")
+                    e.ps2_game_saves = true;
                 e.systems.push_back(std::move(sy));
             }
             // No preset: each of its systems is set up with folders the user picks.
@@ -639,7 +685,15 @@ bool SetupPage::used(const Emulator &e) const
 bool SetupPage::has_ps2() const
 {
     for (const Emulator &e : emulators_)
-        if (used(e) && std::find(e.cores.begin(), e.cores.end(), "LRPS2") != e.cores.end())
+        if (used(e) && (e.ps2_game_saves || std::find(e.cores.begin(), e.cores.end(), "LRPS2") != e.cores.end()))
+            return true;
+    return false;
+}
+
+bool SetupPage::has_ps2_game_saves() const
+{
+    for (const Emulator &e : emulators_)
+        if (used(e) && e.ps2_game_saves)
             return true;
     return false;
 }
@@ -953,15 +1007,18 @@ std::vector<Row> SetupPage::emulator_rows(const App &app, std::vector<RowRef> *r
         if (saves)
             add({RowKind::choice, "   Sync", kSyncLabel[sync_index(c.key)], ""}, {RowRef::kSysSync, -1, c.key});
         // Memory cards: one method per system, never both. PS2 can be chosen
-        // when an emulator keeps either (LRPS2); otherwise it's the emulator's.
+        // when an emulator keeps either (LRPS2), or when RomM Sync gives each
+        // game its own card (PS5SX2); otherwise it's the emulator's.
         if (saves && cards_.count(c.key))
         {
             const CardMethod &cm = cards_.at(c.key);
             const bool choice = c.key == "ps2" && has_ps2();
+            const bool game_saves = c.key == "ps2" && has_ps2_game_saves();
             const std::string method = choice && !ps2_cards_.empty() ? ps2_cards_ : cm.method;
             const bool shared_ok = at_least(app.status().server_version, 5, 3, 0);
             std::string detail = !cm.note.empty()                  ? "    " + cm.note
                                  : method == "shared" && !shared_ok ? "    Shared cards need RomM 5.3 or newer"
+                                 : game_saves && method != "shared" ? "    Each game gets its own card, which syncs as its save"
                                  : method == "shared"               ? "    The whole cards sync between your consoles"
                                                                     : "    Each game's card syncs as its save";
             Row r{RowKind::choice, "   Memory cards", method == "shared" ? "Shared, synced" : "One per game", detail};

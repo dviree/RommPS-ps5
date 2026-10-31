@@ -148,6 +148,43 @@ def main():
             artifacts=["eboot.bin"], texts="licenses/romm-sync/",
             source=dict(kind="git", path=str(repo), remote=rremote, revision=rrev, dirty=rdirty)))
 
+    # The RomM Sync payload RommPS carries (assets/rommps/romm-sync.elf): the
+    # repository's own code, the libraries compiled into it and the web UI it
+    # serves. A library the commit doesn't have yet (sigil, from 1.4.0) is left out.
+    if (repo / "third_party/cJSON.LICENSE").exists():
+        payload = [
+            ("LICENSE", "LICENSE", "RomM Sync", "GPL-3.0-or-later", "Copyright (C) 2026 s0liton"),
+            ("third_party/cJSON.LICENSE", "cJSON-LICENSE.txt", "cJSON", "MIT",
+             "Copyright (c) 2009-2017 Dave Gamble and cJSON contributors"),
+            ("third_party/monocypher.LICENSE", "monocypher-LICENSE.txt", "Monocypher (update signatures)",
+             "BSD-2-Clause OR CC0-1.0", "Copyright (c) 2017-2023 Loup Vaillant; Copyright (c) 2017-2019 Michael Savage"),
+            ("third_party/libchdr/LICENSE.txt", "libchdr-LICENSE.txt", "libchdr (CHD discs)", "BSD-3-Clause",
+             "Copyright Romain Tisserand"),
+            ("third_party/libchdr/deps/zstd/LICENSE", "zstd-LICENSE.txt", "zstd's decoder, in libchdr", "BSD-3-Clause",
+             "Copyright (c) Meta Platforms, Inc. and affiliates"),
+            ("third_party/libchdr/deps/lzma/LICENSE", "lzma-LICENSE.txt", "the LZMA SDK's decoder, in libchdr",
+             "public domain", "Igor Pavlov"),
+            ("third_party/sigil/LICENSE", "sigil-LICENSE.txt", "argosy-sigil (memory card saves)", "MPL-2.0",
+             "the argosy-sigil contributors; source: https://github.com/rommapp/argosy-sigil"),
+            ("third_party/sigil/third_party/tiny-AES-c/unlicense.txt", "tiny-AES-c-LICENSE.txt", "tiny-AES-c, in argosy-sigil",
+             "Unlicense", "kokke"),
+            ("third_party/Inter-LICENSE.txt", "Inter-LICENSE.txt", "the Inter font, in the web UI", "OFL-1.1",
+             "Copyright (c) 2016 The Inter Project Authors"),
+            ("third_party/qrcode.LICENSE", "qrcode-LICENSE.txt", "qrcode.js, in the web UI", "MIT",
+             "Copyright (c) 2009 Kazuhiko Arase"),
+        ]
+        have = [x for x in payload
+                if subprocess.run(["git", "-C", str(repo), "cat-file", "-e", f"{rrev}:{x[0]}"], capture_output=True).returncode == 0]
+        for path, dest, _, _, _ in have:
+            write_text(out / "payload" / dest, repo, rrev, path)
+        parts.append(dict(
+            id="payload", name="the RomM Sync payload RommPS starts (assets/rommps/romm-sync.elf): "
+                               + ", ".join(x[2] for x in have) + ", and an MD5 in the public domain",
+            licence="; ".join(f"{x[3]} ({x[2]})" for x in have),
+            copyright=[x[4] for x in have],
+            artifacts=["assets/rommps/romm-sync.elf"], texts="licenses/payload/",
+            source=dict(kind="git", path=str(repo), remote=rremote, revision=rrev, dirty=rdirty)))
+
     # The UI kit, in a title that has the module
     if (PS5 / "ui/setup-kit.sh").exists():
         # Where setup-kit.sh found it: PS5_VKHOMEBREWUI, the sibling checkout, or its bare clone

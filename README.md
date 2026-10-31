@@ -14,6 +14,8 @@ A [RomM](https://romm.app) companion client for jailbroken PS5 consoles (etaHEN 
   - Settings > Diagnostic bundle saves the logs for a bug report, with your server, names and addresses left out.
 - **Interactive library**
   - Browse your RomM library from the RommPS app (or some other device via the Web UI), download games and BIOS files into the right emulator folders, and resolve save conflicts.
+- **BIOS and System File Sync**
+  - Get the BIOS files and system data you need to run your emulators properly.
 - **Pluggable emulator profiles and multiple emulators per platform**
   - Fully customizable sync destinations, but includes frequently updated preset profiles for existing homebrew emulators. 
   - Can sync games and saves and states for multiple emulators per platform (PS2 on RetroArch and PS5SX2 as an example) using hardlinks.
@@ -28,81 +30,24 @@ A [RomM](https://romm.app) companion client for jailbroken PS5 consoles (etaHEN 
 - **Easter Eggs**
   - Check in the Settings, scroll the settings list, see if you find the X. This **hint** won't be here forever.
 
-## Supported Emulators and Games
-- RommPS has built-in profiles for all known emulators on the PS5, and will set the correct default game, save/save state, and bios directories for them. Since there is a huge influx of new emulators popping up, I will be doing my very best to keep up with them and add profiles accordingly.
-- You can also manually set the directories for each emulator/platform via the PS5 app or or the Web UI.
-
-### Note
-- RommPS relies on your emulator **NOT** being sandboxed. Some emulators require a separate payload that must be launched to be able to access outside of the sandbox, so make sure you've followed their instructions to properly install. Sandboxed emulators will not be able to read games or save files.
-
-| Emulator | Systems | Game Downloads | Saves | Comments |
-| --- | --- | --- | --- | --- |
-| [RetroArch](https://github.com/mihawk-99/PS5_RetroArch) | NES, Famicom Disk System, SNES, Game Boy, Game Boy Color, Game Boy Advance, Genesis/Mega Drive, Master System, Game Gear, Sega CD, SG-1000, arcade (FinalBurn Neo), PS2 (LRPS2), PSP (PPSSPP), GameCube and Wii (Dolphin) | Full Support | Full Support | - |
-| [PSXS5](https://github.com/SynoPiia/PSXS5) | PS1 | Full Support | One memory card per game, and states | States work with RomM's web player (PCSX-ReARMed or Beetle, whichever PSXS5 is set to) |
-| [SwanStationPS5](https://github.com/darkxex/SwanStationPS5) | PS1 | Full Support | One memory card per game, and states | Plays PSXS5's games, keeps its own saves in `/data/SwanStationPS5`. Its states only load in SwanStationPS5 |
-| [PS5SX2](https://github.com/Swordpdf/PS5SX2) | PS2 | Full Support | Its two shared memory cards, backed up to RomM (5.3 or newer) | - |
-| [PS5N64](https://github.com/Globaleliteee/PS5N64) | N64 | Full Support | Full Support | - |
-| [PS5NES](https://github.com/Globaleliteee/PS5NES) | NES | Untested | Untested | Preset uses `/data/PS5NES/games` and `/data/PS5NES/saves`. GH page gone |
-| [Porpoise](https://github.com/elripalda/Porpoise-Dolphin-Emulator-for-PS5) | Wii/GameCube | Full Support | N/A | Couldn't exit sandbox w/o crash. [Issue](https://github.com/elripalda/Porpoise-Dolphin-Emulator-for-PS5/issues/18) reported. Downloading games should work if the emulator is actually working for you.|
-| [ProsperoEden](https://github.com/blackbearreloaded/ProsperoEden) | Switch | Manual Support | Researching | - |
-| [PS5X360](https://github.com/BrinooTk/PS5X360) | Xbox 360 | Manual Support | Researching | - |
-
-To give some meaning to the table above. **Full support** means RommPS can detect and properly set game/save directories for that emulator. **Manual Support** means you can use it to sync games and/or saves, but you'll need to point it to the directories yourself. This typically means that full support is coming shortly. Broken or N/A means there was a problem keeping us from sync games and saves, or the emulator just fall out doesn't work or crashes. **Researching** means I am seeing what is possible when it comes to that sync type for the given emulator or game system.
-
-### Important: Save States
-Some users have recently reported issues with being able to pull down save states from their servers. They don't see them on the destination save folder for that emulator, or if they do, they don't work. Save states typically cannot be used across different emulators (cores), and even within the same core, the definition of a save state may different with file version, and version of the app. 
-
-**Simply put**:
-- Emulator core must be the same.
-- Different schema versions of save states are sometimes incompatible with each other.
-
-For the 1.2.0 release I will be including some fixes as well as some conversion logic to try and convert save state formats for max compatibility whenever possible. This is also why we have an upload only or upload and download option for save states. Maybe you don't care about syncing, but want to back them up, in case something happens. That's a good use case. I want to be blunt with you: Save states are kind of useless. Yes, they're great for recovering your progress after you feel asleep and forgot to save, but you truly should be saving progress with the in-game saves, not save status.
-
-### PS4 (experimental) ###
-
-| Emulator | Systems |
-| --- | --- |
-| RetroArch | The RetroArch systems above, wherever the PS4 build has the core |
-| pSNES, pNES, pGEN, pGBA, pFBN | SNES; NES; Genesis, Master System, Game Gear, Sega CD, SG-1000; GBA, GBC, GB; arcade |
-
-Only RetroArch has been tested on the PS4 so far.
-
-### Save states
-Save states only load in the emulator core that made them, sometimes only in the same version of it. RommPS backs every state up to RomM, and with **Save states: Back up and restore** in Settings it brings one down only to an emulator that can load it:
-- **RetroArch:** states from the same core, from RomM's web player or another RetroArch.
-- **PSXS5:** PCSX-ReARMed or Beetle states, whichever core PSXS5 is set to. They're converted to and from the web player's format.
-- **SwanStationPS5, PS5N64:** only their own states.
-
-A state from elsewhere never replaces one of yours: it goes into the next free slot.
-
-## PS4/PS5 Games
-
-If you are interested in downloading PS4 and PS5 games from your RomM server, RomM has direct FPKGi support, simply add it as a library.
-
-RommPS can also fetch PS5 games itself, like a store: with a USB drive in the PS5, setup and the Emulators page offer **PS5 games (USB homebrew)**. Turn it on and games from RomM's `ps5` platform (the `roms/ps5` folder of your library, e.g. `/volume1/games/roms/ps5`) download straight to `/mnt/usb0/homebrew`, a folder game file by file. Change the folder on the Emulators page if your drive is elsewhere. Each game shows its format in the library (FPKG, PS4 PKG, DLC, LZ4, exFAT, FFPKG, FFPFS or Game folder; a .pkg is told apart by a CUSA title id or "DLC" in its name), so a game you keep in two formats shows as two cards. Keep each format as its own file or folder in `roms/ps5` so RomM lists them apart. It downloads games only, no saves. This fork's RommPS also updates itself on the PS5 from [its releases](https://github.com/dviree/RommPS-ps5/releases): with "Check for updates daily" on, a new release installs by itself once no game, sync or download is running. This sync client does NOT handle PS4/PS5 save syncing at this time, but is being researched for potential future inclusion.
-
 ## Requirements
 
 - A PS5 running etaHEN or onionHEN, or a PS4 running GoldHEN
-- RomM 5.2.0 or newer (5.3.0 if you want to do shared memory card syncing instead of per-game)
-- RetroArch installed
+- RomM 5.2.0 or newer (may work on older versions)
 - Whichever other emulators you want
-
-## Web UI
-- RommPS exposes a separate Web UI at http://your-ps5-ip:8780 which allows you to access most of the features present in the web app, but can make things like sync profiled editing, and adding multiple downloads of games easier from your computer instead.
-
+  
 ## Install
 
-### Install via ProsperoStore
+### PS5
 
-![ProsperoStoreQRCode](assets/prospero-store-rommps.png)
+| ProsperoStore | RecompStore |
+| :---: | :---: |
+| <img src="/assets/prospero-store-rommps.png" width="300" alt="ProsperoStore Install QR"> | <img src="/assets/recomp-store-rommps.png" width="300" alt="RecompStore Install QR"> |
 
-Install **RommPS** from [ProsperoStore](https://homebrew.page) and open it. It'll set up the background daemon, and take you through a setup wizard. That's it: RommPS carries the RomM Sync payload and starts it for you. From then on it starts with your HEN, so after a jailbreak or waking the console it's ready to go.
-
-Not using the store? Download `PPSA76677.zip` from the releases page, unzip it and copy the `PPSA76677` folder to `/data/homebrew/` on the console.
+### Manual Install
+Download `PPSA76677.zip` from the releases page, unzip it and copy the `PPSA76677` folder to `/data/homebrew/` on the console. Launch RommPS and it will deploy the background service, and set itself to autostart with etaHen or onionHen. 
 
 If you'd rather run just the payload, without the app:
-
 1. Download the latest `romm-sync.elf` from the releases page.
 2. Send it to the console (or use whichever favorite tool you wish):
    ```sh
@@ -110,34 +55,32 @@ If you'd rather run just the payload, without the app:
    ```
 3. Set it up at `http://<ps5-ip>:8780` from another device.
 
-On the PS5 the payload doesn't update itself: new versions come with RommPS. Without the app, download the new `romm-sync.elf` yourself.
-
-RomM Sync starts with your HEN, and setup turns this on for you. Both HENs start `payloads/romm-sync.elf` when `romm-sync.elf.auto_start` sits next to it, and RomM Sync puts both in every HEN's folder on the console (`/data/etaHEN/payloads` and `/data/OnionHEN/payloads`), so switching HENs keeps working. If a payload manager like pldmgr has its own copy, that copy is kept up to date too. If you build it yourself, `make install PS5_HOST=<ps5-ip>` copies it over FTP (add `PS5_FTP=ftp://<ps5-ip>:1337 PS5_HEN_DIR=/data/OnionHEN` for onionHEN's FTP plugin).
-
 ### PS4
 
-> **Experimental.** The PS4 build has only been tested with RetroArch so far. Standalone emulators may work, but haven't been confirmed. I spent all my focus on the PS5 build, so I didn't get to test as much, so consider it unstable and there may be gremlins for now.
-
+> **Experimental.** The PS4 is currently considered experimental
 Needs GoldHEN 2.4b18.5 or newer, whose payload menu runs ELF payloads.
-
+R
 1. Download the latest `romm-sync-ps4.pkg` from the releases page and install it with your package installer.
-2. Open **RomM Sync** from the home screen. It copies its payload, `romm-sync-ps4.elf`, to `/data/payloads/`.
+2. Open **RommPS** from the home screen. It copies its payload, `romm-sync-ps4.elf`, to `/data/payloads/`.
 3. In GoldHEN Settings, open the payloader, pick `romm-sync-ps4.elf` and run it. Add it to the AutoRun queue there and it starts on every jailbreak.
-4. Open **RomM Sync** again: it shows the web UI. It's also at `http://<ps4-ip>:8780` from another device.
+4. Open **RommPS** again: it shows the web UI. It's also at `http://<ps4-ip>:8780` from another device.
 
 The app only installs the payload and shows the web UI; the payload does the syncing, in the background, whether or not the app is open. Without the package, copy `romm-sync-ps4.elf` to `/data/payloads/` yourself (GoldHEN's FTP server, or `make install-ps4 PS4_HOST=<ps4-ip>`).
 
-Don't send the payload to GoldHEN's network loader on port 9090: GoldHEN 2.4 crashes on ELFs sent there. Make sure the console's date and time are set (GoldHEN can keep them updated), or HTTPS won't work. RetroArch is found in `/data/retroarch`, with its cores in `/data/self/retroarch/cores`, as its `retroarch.cfg` says.
+**Note:** Don't send the payload to GoldHEN's network loader on port 9090: GoldHEN 2.4 crashes on ELFs sent there. Make sure the console's date and time are set (GoldHEN can keep them updated), or HTTPS won't work.
+
+### How it runs
+
+RommPS starts with your HEN, and setup turns this on for you. Both HENs start `payloads/romm-sync.elf` when `romm-sync.elf.auto_start` sits next to it, and RommPS puts both in every HEN's folder on the console (`/data/etaHEN/payloads` and `/data/OnionHEN/payloads`), so switching HENs keeps working. If a payload manager like pldmgr has its own copy, that copy is kept up to date too. If you build it yourself, `make install PS5_HOST=<ps5-ip>` copies it over FTP (add `PS5_FTP=ftp://<ps5-ip>:1337 PS5_HEN_DIR=/data/OnionHEN` for onionHEN's FTP plugin).
 
 ## Updates
 
-On the PS5, just update RommPS: from ProsperoStore (or other homebrew storefronts eventually), or by copying the new zip's folder over the old one. The background service comes with it, and RommPS swaps it in the next time you open it, once nothing is syncing or downloading. An older version never replaces a newer one.
+- On the PS5, just update RommPS: from ProsperoStore (or other homebrew storefronts eventually), or by copying the new zip's folder over the old one. The background service comes with it, and RommPS swaps it in the next time you open it, once nothing is syncing or downloading. An older version never replaces a newer one. 
+- On the PS4, the payload updates itself from Settings.
 
-On the PS4, the payload updates itself from Settings.
+## Setup Wizard
 
-## Setup
-
-The setup walks you through five steps:
+The setup wizard walks you through five steps:
 
 1. Connecting to your server.
 2. Approving the console in RomM, by scanning a QR code or entering a code.
@@ -145,44 +88,91 @@ The setup walks you through five steps:
 4. Checking what the first sync will do.
 5. Choosing when to sync in the background.
 
-**Back up your saves before the first sync.** Copy your emulator save folders to a computer or USB drive. RomM Sync keeps a local copy before replacing any file, but your own backup is the safest option.
+**Back up your saves before the first sync.** Copy your emulator save folders to a computer or USB drive. RommPS keeps a local copy before replacing any file, but your own backup is the safest option.
 
-## PS2 Memory Cards
+## Emulators
+RommPS has built-in profiles for most known emulators on the PS5, and will set the correct default game, save/save state, and bios directories for them. Since there is a huge influx of new emulators popping up, I will be doing my very best to keep up with them and add profiles accordingly.  
 
-LRPS2 keeps every game on one shared memory card by default. RomM stores saves per game, so pick one of these during setup:
-- **One card per game.** Works with any RomM version. In RetroArch, open the LRPS2 core options and turn off _Shared Memory Cards_. After that, each game's card syncs like any other save. Saves already on the shared card stay there.
-- **Back up the shared card.** Needs RomM 5.3.0 or newer. The whole card is uploaded when it changes, and you can restore it from Settings in the web UI. It isn't merged with other devices.
+Note: RommPS relies on your emulator **NOT** being sandboxed. Some emulators require a separate payload that must be launched to be able to access outside of the sandbox, so make sure you've followed their instructions to properly install. Sandboxed emulators will not be able to read games or save files.
 
-PS5SX2 used 2 shared memory cards in slots 1 and 2. While it does support per-game memory cards, they need to be specified in a per-game ini file. In 1.2.0, I plan on adding the ability to directly modify those .ini files in PS5SX2 to write the proper per-game memory card path, effectively making RommPS handle per-game memory cards for it gracefully. Until then, I suggest using whichever emulator fits your preferred method (PS5SX2 for shared mem cards or use LRPS2 in retroarch for per-game support). If you have both installed, RommPS will sync game and saves, but they will be separate and different saves (PS5SX2 will download your shared memory cards, LRPS2 will grab the memory card per game). I know...it's confusing, but this is just a side-effect of the boom in emulators being released.
+> The emulators listed below are those I've tested and have created profiles for to auto-detect them. You can also manually set the directories for each emulator/platform via the PS5 app or or the Web UI; you can use whichever emulators you wish.
 
-## Other "Memory Card" Consoles
-PSP, GameCube and Wii saves are synced as one zip per game, the same format other RomM clients use. Depending on the client, they may or may not support unzipping the saves (I don't truly know), but this client does!
+### PS5
 
-My opinion? One card per game is better since 8MB memory cards fill up quick.
+| Emulator | Systems | Game Downloads | Saves | Comments |
+| --- | --- | --- | --- | --- |
+| [RetroArch](https://github.com/mihawk-99/PS5_RetroArch) | NES, Famicom Disk System, SNES, Game Boy, Game Boy Color, Game Boy Advance, Genesis/Mega Drive, Master System, Game Gear, Sega CD, SG-1000, arcade (FinalBurn Neo), PS2 (PS5SX2 on RetroArch 2.0, LRPS2 before it), PSP (PPSSPP), GameCube and Wii (Dolphin). Any other core you install for a system RomM knows (PS1, N64, Dreamcast, Saturn, 3DS and friends) gets picked up too | Full Support | Full Support | - |
+| [PSXS5](https://github.com/SynoPiia/PSXS5) | PS1 | Full Support | One memory card per game, and states | States work with RomM's web player (PCSX-ReARMed or Beetle, whichever PSXS5 is set to) |
+| [SwanStationPS5](https://github.com/darkxex/SwanStationPS5) | PS1 | Full Support | One memory card per game, and states | Plays PSXS5's games, keeps its own saves in `/data/SwanStationPS5`. Its states only load in SwanStationPS5 |
+| PSSwanStation | PS1 | Full Support | One memory card per game, and states | Its states only load in PSSwanStation |
+| [PS5SX2](https://github.com/Swordpdf/PS5SX2) | PS2 | Full Support | One memory card per game (the default), or its two shared cards backed up to RomM (5.3 or newer) | No save states yet |
+| [Crux2](https://github.com/Press5elect/Crux2) | PS2 | Full Support | One memory card per game, the one Crux2 picks (games that share saves share a card), or its two shared cards; states | Uses `/data/crux2` when that folder exists. Its states only load in Crux2 |
+| PSP5 | PSP | Full Support | Saves | - |
+| [PS5N64](https://github.com/Globaleliteee/PS5N64) | N64 | Full Support | Full Support | - |
+| [Mupen64Plus PS5](https://github.com/TheRealRetro/mupen64plus-ps5) | N64 | Full Support | Saves and states | - |
+| [PS5NES](https://github.com/Globaleliteee/PS5NES) | NES | Untested | Untested | Preset uses `/data/PS5NES/games` and `/data/PS5NES/saves`. GH page gone |
+| [Snes9x PS5](https://github.com/MisterTemaki/snes9xPS5) | SNES | Full Support | Saves and states | - |
+| [Genesis Plus GX PS5](https://github.com/MisterTemaki/genplusgxPS5) | Genesis/Mega Drive, Master System, Sega CD | Full Support | Saves and states | Sega CD saves don't sync yet |
+| [Beetle PCE PS5](https://github.com/MisterTemaki/beetlepcePS5) | PC Engine, PC Engine CD, SuperGrafx | Full Support | Saves and states | - |
+| [GBCXY](https://github.com/Yahballon/PS5GBCX) | Game Boy, Game Boy Color | Full Support | Saves and states | - |
+| [FBNeo PS5](https://github.com/MisterTemaki/FBNeo-PS5) | Arcade | Full Support | Saves and states | - |
+| PSFlyCast | Dreamcast | Full Support | Each game's own VMU; the shared VMUs are backed up as RomM memory cards | Save states don't sync yet |
+| PS64 | Commodore 64 | Full Support | Save disks | Games save into their own disk images. No save states |
+| PS5-ECAM | Wii U, 3DS, DS, Switch | Full Support | Wii U, 3DS, DS and Switch saves, 3DS and DS states | 3DS and DS states only load in PS5-ECAM. Switch saves are one player's, the same save as ProsperoEden's on RomM |
+| [Porpoise](https://github.com/elripalda/Porpoise-Dolphin-Emulator-for-PS5) | Wii/GameCube | Full Support | GameCube and Wii saves, and states | - |
+| XPSemu | Xbox | Full Support | Saves | Read from and written into its hard disk image, only while it's closed |
+| [PS5X360](https://github.com/BrinooTk/PS5X360) | Xbox 360 | Full Support | Saves | The first signed-in player's saves; games go in `/data/xbox360`, a folder each |
+| Seedee5 | Philips CD-i | Full Support | Saves and states | Each game's NVRAM is its save |
+| [ProsperoEden](https://github.com/blackbearreloaded/ProsperoEden) | Switch | Full Support | Saves | One Switch user's saves (the first PS5 user's, unless set otherwise). Steps aside when ProsperoEden's own RomM sync is set up |
+| Mednafen | PS1, NES, SNES, Game Boy, Game Boy Color, Game Boy Advance, Genesis/Mega Drive, Master System, Game Gear, PC Engine, Neo Geo Pocket, WonderSwan, Virtual Boy, Lynx | Full Support | Full Support | Built-in profile, off until you turn it on |
+| PS2 ISOs (for PS2 FPKG tools) | PS2 | Full Support | Not synced | Downloads PS2 ISOs to a USB drive (`/mnt/usb0/ps2`) for PS2 FPKG tools. Off until you turn it on |
+
+### PS4
+
+| Emulator | Systems | Saves | Comments |
+| --- | --- | --- | --- |
+| RetroArch | The RetroArch systems above, wherever the PS4 build has the core | Saves and states | - |
+| pSNES | SNES | Saves and states | - |
+| pNES | NES, Famicom Disk System | Saves and states | - |
+| pGEN | Genesis/Mega Drive, Master System, Game Gear, Sega CD, SG-1000 | Saves and states | - |
+| pGBA | Game Boy Advance, Game Boy Color, Game Boy | Saves and states | Saves and states share its saves folder |
+| pFBN | Arcade (FinalBurn Neo), Neo Geo Pocket (Color), ColecoVision, MSX, ZX Spectrum, SuperGrafx, Channel F | Saves and states | Arcade saves are the games' own memory (EEPROMs), backed up as they are |
+| mGBA | Game Boy Advance, Game Boy Color, Game Boy | Saves and states | - |
+| SNESUI | SNES | Saves and states | - |
+| EmuSuNi | SNES, NES, N64 | Saves and states | Set its N64 folder to `/data/EmuSuNi/n64` in its settings |
+| NPS64 | N64 | Saves and states | `.z64` dumps |
+| DolphinPS4 | GameCube, Wii | Saves and states | - |
+| Resonance | Dreamcast | Each game's own VMU, and states; the shared VMUs are backed up as RomM memory cards | - |
+| PS4SX2 | PS2 | Its two shared memory cards, backed up to RomM (5.3 or newer) | No save states yet |
+| Mednafen, PS2 ISOs | As on the PS5 | As on the PS5 | Built-in profiles, off until you turn them on |
+
+### Save states
+Some users have recently reported issues with being able to pull down save states from their servers. They don't see them on the destination save folder for that emulator, or if they do, they don't work. Save states typically cannot be used across different emulators (cores), and even within the same core, the definition of a save state may different with the file version, and version of the app. In my opinion, save states should be for quick resume or to save you when you forgot to save your game, so they truly don't need to be synced across devices.
+
+### Memory cards
+PS2 saves go up as one 8 MB card per game holding only that game's saves, which is what RomM's own [argosy-sigil](https://github.com/rommapp/argosy-sigil) makes, so Argosy and friends can load them. By default, RommPS gives each game its own card in PS5SX2 and RetroArch's PS5SX2 core (it writes the game's settings for you, no menu diving required), copies the game's saves over from the shared card, and leaves the shared card alone. Slot 2 stays shared, for the games that go looking for another game's save. Nothing on a card changes while the emulator is open.
+
+PSP, GameCube and Wii saves are synced as one zip per game, the same format other RomM clients use.
+
+## PS4/PS5 Games
+
+If you are interested in downloading PS4 and PS5 games from your RomM server, RomM has direct FPKGi support, simply add it as a library. This sync client does NOT handle PS4/PS5 save syncing at this time, but is being researched for potential future inclusion.
+
+RommPS can also fetch PS5 games itself, like a store: with a USB drive in the PS5, setup and the Emulators page offer **PS5 games (USB homebrew)**. Turn it on and games from RomM's `ps5` platform (the `roms/ps5` folder of your library, e.g. `/volume1/games/roms/ps5`) download straight to `/mnt/usb0/homebrew`, a folder game file by file. Change the folder on the Emulators page if your drive is elsewhere. Each game shows its format in the library (FPKG, PS4 PKG, DLC, LZ4, exFAT, FFPKG, FFPFS or Game folder; a .pkg is told apart by a CUSA title id or "DLC" in its name), so a game you keep in two formats shows as two cards. Keep each format as its own file or folder in `roms/ps5` so RomM lists them apart. It downloads games only, no saves.
+
+This fork's RommPS also updates itself on the PS5 from [its releases](https://github.com/dviree/RommPS-ps5/releases): with "Check for updates daily" on, a new release installs by itself once no game, sync or download is running.
+
+## Web UI
+
+RommPS exposes a separate Web UI at http://your-ps5-ip:8780 where you can access all the same features present in the native app.
 
 ## Emulator Profiles
 
-I've included direct support for most of the emulators that are out right now, except for the ones that won't even launch... you can sync games, states, and saves anywhere you want, but the presets should do it for most people.
-
-Settings in the web UI has a JSON editor for emulator profiles, and a table showing which folders are used for each platform. A profile lists an emulator's folders and the RomM platforms it plays:
-
-```json
-{
-  "id": "retroarch",
-  "name": "RetroArch",
-  "root": "/data/homebrew/PPSA99169",
-  "retroarch_cfg": "{root}/config/retroarch.cfg",
-  "rom_dir": "{root}/content/{platform}",
-  "save_dir": "{root}/savefiles",
-  "state_dir": "{root}/savestates",
-  "bios_dir": "{root}/system",
-  "save_exts": ".srm,.sav",
-  "platforms": [{ "romm": ["snes", "sfam"], "dir": "snes", "emulator": "snes9x", "core_name": "Snes9x" }]
-}
-```
-
+I've included direct support for most of the emulators that are out right now, except for the ones that won't even launch... you can sync games, states, and saves anywhere you want, but the presets should do it for most people. You can also configure the paths for all platforms manually. The web UI has a JSON editor for your emulator profiles.
 
 ## Building
+
+Both consoles build from the same code in `src/`. What differs lives in `platform/<console>/`: `platform.c` (the `src/platform.h` interface), the make rules and the Docker SDK image. `platform/console/` has the parts the PS4 and PS5 share, and `platform/host/` is the development build.
 
 ```sh
 make host tools       # macOS or Linux build for development, plus tools/release-sign
@@ -193,7 +183,11 @@ tests/e2e.sh          # end-to-end tests against a mock RomM server
 tests/autostart.sh    # autostart, version checks and HEN folders
 ```
 
-Both consoles build from the same code in `src/`. What differs lives in `platform/<console>/`: `platform.c` (the `src/platform.h` interface), the make rules and the Docker SDK image. `platform/console/` has the parts the PS4 and PS5 share, and `platform/host/` is the development build.
+## Watch Development Progress
+
+I've started streaming the development of this app as well as other side projects on my YouTube channel. Nothing serious, but you can catch me live streaming. ;)
+
+[My Channel](https://www.youtube.com/@soliton_radar)
 
 ## P.S to the industry
 
@@ -205,4 +199,4 @@ If buying isn't **owning**, then piracy **isn't** stealing. 🖕
 
 ## License
 
-GPL-3.0. Parts of the console code are adapted from [ftpsrv](https://github.com/ps5-payload-dev/ftpsrv) and [websrv](https://github.com/ps5-payload-dev/websrv) by John Törnblom. [cJSON](https://github.com/DaveGamble/cJSON) and [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) are MIT licensed. [Monocypher](https://monocypher.org) is CC0 or BSD-2-Clause.
+GPL-3.0. Parts of the console code are adapted from [ftpsrv](https://github.com/ps5-payload-dev/ftpsrv) and [websrv](https://github.com/ps5-payload-dev/websrv) by John Törnblom. [cJSON](https://github.com/DaveGamble/cJSON) and [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) are MIT licensed. [Monocypher](https://monocypher.org) is CC0 or BSD-2-Clause. [argosy-sigil](https://github.com/rommapp/argosy-sigil) is MPL-2.0, with [tiny-AES-c](https://github.com/kokke/tiny-AES-c) (Unlicense).

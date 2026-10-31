@@ -39,6 +39,7 @@ struct Row
     bool on = false;    // a toggle's state
     bool enabled = true;
     bool danger = false; // an action that can't be undone
+    float progress = -1.0f; // a download's share done, a slim bar along the row's foot; below 0 for none
     int expander = 0;    // 1: closed, 2: open: a chevron before the label (Cross opens what's under it)
     // A small icon before the label (a platform's logo): the room is kept with
     // logo_slot even while its texture (0) is still loading.
