@@ -1,8 +1,20 @@
 {
   "permissions": {
     "allow": [
-      "Bash(npm install -g @trailhq/trail-code)",
-      "Bash(trail:*)"
+      "Bash(npm install -g @trailhq/trail-code)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.trail/hook.cjs\" session-start || exit 0",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }
