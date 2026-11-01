@@ -137,11 +137,13 @@ jobs:
           tools/ps5-build.sh VERSION="${TAG#v}"
           tools/ps4-build.sh ps4-pkg VERSION="${TAG#v}"
 
-      # A manifest and signature per console let the payload verify in-app
-      # updates (src/update.c): manifest.json/.sig for romm-sync.elf (PS5),
-      # manifest-ps4.json/.sig for romm-sync-ps4.elf. The secret is the
-      # 64-hex-character key from tools/release-sign.c; "check" fails unless
-      # the payload trusts that key.
+      # A manifest per console lets the payload check in-app updates
+      # (src/update.c): manifest.json for romm-sync.elf (PS5), manifest-ps4.json
+      # for romm-sync-ps4.elf. With the RELEASE_SIGNING_KEY secret (the
+      # 64-hex-character key from tools/release-sign.c) each is signed too
+      # (.sig), and "check" fails unless the payload trusts that key: a signed
+      # release installs by itself. Without the secret this fork publishes
+      # manifests only, and a console installs the release when asked to.
       - name: Package and sign
         if: steps.version.outputs.tag
         env:
@@ -149,14 +151,14 @@ jobs:
           TAG: ${{ steps.version.outputs.tag }}
         run: |
           if [ -z "$RELEASE_SIGNING_KEY" ]; then
-            echo "::error::RELEASE_SIGNING_KEY secret is not set; in-app updates need a signed release."
-            exit 1
+            echo "::notice::RELEASE_SIGNING_KEY isn't set: publishing without signatures; consoles install it when asked."
           fi
           make tools
           mkdir dist
           cp build/ps5/romm-sync.elf build/ps4/romm-sync-ps4.elf build/ps4/romm-sync-ps4.pkg dist/
           sign() {
             build/host/release-sign manifest "$TAG" "dist/$1" > "dist/$2.json"
+            [ -n "$RELEASE_SIGNING_KEY" ] || return 0
             build/host/release-sign sign "dist/$2.json" > "dist/$2.sig"
             build/host/release-sign check "dist/$2.json" "dist/$2.sig"
           }
@@ -208,8 +210,8 @@ jobs:
 
       - name: Publish release
         run: |
-          for file in romm-sync.elf manifest.json manifest.sig romm-sync-ps4.elf romm-sync-ps4.pkg \
-                      manifest-ps4.json manifest-ps4.sig PPSA76677.zip; do
+          for file in romm-sync.elf manifest.json romm-sync-ps4.elf romm-sync-ps4.pkg \
+                      manifest-ps4.json PPSA76677.zip; do
             [ -s "dist/$file" ] || { echo "::error::dist/$file is missing"; exit 1; }
           done
           (cd dist && sha256sum * > SHA256SUMS)
@@ -253,22 +255,25 @@ jobs:
         env:
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
         run: |
-          if [ -z "$RELEASE_SIGNING_KEY" ]; then
-            echo "::error::RELEASE_SIGNING_KEY secret is not set; in-app updates need a signed release."
-            exit 1
-          fi
           make tools
           mkdir dist
           cp build/ps4/romm-sync-ps4.elf build/ps4/romm-sync-ps4.pkg dist/
           build/host/release-sign manifest "$TAG" dist/romm-sync-ps4.elf > dist/manifest-ps4.json
-          build/host/release-sign sign dist/manifest-ps4.json > dist/manifest-ps4.sig
-          build/host/release-sign check dist/manifest-ps4.json dist/manifest-ps4.sig
+          if [ -n "$RELEASE_SIGNING_KEY" ]; then
+            build/host/release-sign sign dist/manifest-ps4.json > dist/manifest-ps4.sig
+            build/host/release-sign check dist/manifest-ps4.json dist/manifest-ps4.sig
+          else
+            echo "::notice::RELEASE_SIGNING_KEY isn't set: the PS4 payload goes out without a signature."
+          fi
 
       # The PS5's files and their checksums stay as they are.
       - name: Replace the PS4 files
         run: |
           cd dist
-          ps4="romm-sync-ps4.elf romm-sync-ps4.pkg manifest-ps4.json manifest-ps4.sig"
+          ps4="romm-sync-ps4.elf romm-sync-ps4.pkg manifest-ps4.json"
+          # Unsigned this time: an older signature would no longer match the manifest.
+          if [ -e manifest-ps4.sig ]; then ps4="$ps4 manifest-ps4.sig"
+          else gh release delete-asset "$TAG" manifest-ps4.sig --yes 2>/dev/null || true; fi
           gh release download "$TAG" --pattern SHA256SUMS --output old-sums
           grep -vE '  (romm-sync-ps4\.(elf|pkg)|manifest-ps4\.(json|sig))$' old-sums > SHA256SUMS || true
           sha256sum $ps4 >> SHA256SUMS
