@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install -g @trailhq/trail-code)",
+      "Bash(trail:*)"
+    ]
+  }
+}
