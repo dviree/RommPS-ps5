@@ -1,18 +1,23 @@
 /* Updates from GitHub releases. The UI checks, shows the release notes and
  * installs when the user asks. With the daily check on, a console that can
- * update itself (plat_info()->self_update) also installs a newer release as
- * soon as the check finds it, once no game, sync or download is running.
+ * update itself (plat_info()->self_update) also installs a newer signed
+ * release as soon as the check finds it, once no game, sync or download is
+ * running. An unsigned one is only offered: it installs when the user presses
+ * Install, as Overdrive does.
  *
  * With self_update off the payload doesn't install itself: RommPS carries
  * it, so the check only says a new RommPS is out.
  *
- * A release carries a payload, manifest and signature for each console, named in
- * plat_info(): romm-sync.elf, manifest.json and manifest.sig for the PS5,
+ * A release carries a payload and manifest for each console, and a signature
+ * when CI has the RELEASE_SIGNING_KEY secret, named in plat_info():
+ * romm-sync.elf, manifest.json and manifest.sig for the PS5,
  * romm-sync-ps4.elf, manifest-ps4.json and manifest-ps4.sig for the PS4. The
  * manifest is {version, file, size, sha512} and the signature is Ed25519 by one
- * of the keys in update_keys.h. The payload is only installed if all of that
- * checks out, including the manifest naming this console's payload.
- * tools/release-sign.c makes the manifest and signature in CI.
+ * of the keys in update_keys.h. A signature that is there must check out;
+ * without one the manifest's checksum is what's checked. Either way the
+ * manifest must name this console's payload and this release, and match the
+ * download's size and checksum. tools/release-sign.c makes the manifest and
+ * signature in CI.
  *
  * ROMM_SYNC_UPDATE_URL points the check somewhere else, for tests. */
 #include "update.h"
@@ -56,7 +61,7 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static ustate g_state;
 static char g_error[256], g_message[128];
 static char g_latest[32], g_published[32], g_page_url[512];
-static char g_elf_url[512], g_manifest_url[512], g_sig_url[512];
+static char g_elf_url[512], g_manifest_url[512], g_sig_url[512]; /* g_sig_url "": unsigned */
 static char *g_notes;
 static time_t g_checked_at, g_auto_checked_at;
 static char g_notified[32], g_pending[32];
@@ -142,7 +147,9 @@ static void *check_thread(void *arg) {
         LOGI("update check: latest release %s, running %s", g_latest, APP_VERSION);
         if (notify && available && strcmp(g_notified, g_latest) != 0) {
             str_copy(g_notified, sizeof g_notified, g_latest);
-            if (plat_info()->self_update) auto_install = 1;
+            /* Signed: installs by itself. Unsigned: the user says when. */
+            if (plat_info()->self_update && g_sig_url[0]) auto_install = 1;
+            else if (plat_info()->self_update) plat_notify("RommPS %s is available\nInstall it from Settings", g_latest);
             else plat_notify("RommPS %s is available\nUpdate it from your homebrew store", g_latest);
         }
     }
@@ -190,14 +197,18 @@ void update_tick(void) {
     update_check(1);
 }
 
-/* The manifest must carry a valid signature by a trusted key, name the release
+/* The manifest must carry a valid signature by a trusted key when the release
+ * is signed (sig->len 0: it isn't, and installs only when the user asks), name the release
  * being installed and this console's payload, and match the downloaded payload
  * byte for byte. */
 static int verify(const http_resp *man, const http_resp *sig, const unsigned char *elf, size_t elf_len,
                   const char *want, char *err, size_t en) {
     int trusted = 0;
-    if (sig->len != 64) {
-        snprintf(err, en, "the release signature is missing or malformed");
+    if (sig->len == 0) {
+        trusted = 1;
+        LOGI("update: the release isn't signed, checking its checksum");
+    } else if (sig->len != 64) {
+        snprintf(err, en, "the release signature is malformed");
         return -1;
     }
     for (size_t i = 0; i < sizeof UPDATE_KEYS / sizeof UPDATE_KEYS[0] && !trusted; i++)
@@ -217,7 +228,7 @@ static int verify(const http_resp *man, const http_resp *sig, const unsigned cha
     else if (strcmp(jget_str(m, "version", ""), want) != 0) snprintf(err, en, "the manifest is for version %s, not %s", jget_str(m, "version", "?"), want);
     else if (!newer_than(want, APP_VERSION)) snprintf(err, en, "%s is not newer than this version", want);
     else if (jget_num(m, "size", -1) != (double)elf_len) snprintf(err, en, "the download is incomplete");
-    else if (strcmp(jget_str(m, "sha512", ""), hex) != 0) snprintf(err, en, "the download doesn't match the signed checksum");
+    else if (strcmp(jget_str(m, "sha512", ""), hex) != 0) snprintf(err, en, "the download doesn't match its checksum");
     else if (str_ends_with_ci(plat_info()->payload, ".elf") && (elf_len < 4 || memcmp(elf, "\x7f" "ELF", 4) != 0))
         snprintf(err, en, "the download is not an ELF payload");
     else rc = 0;
@@ -251,7 +262,7 @@ static void *install_thread(void *arg) {
     LOGI("update: downloading %s", want);
     if (http_get_verified(man_url, &man) != 0 || man.status != 200)
         snprintf(err, sizeof err, "can't download the release manifest: %s", man.error);
-    else if (http_get_verified(sig_url, &sig) != 0 || sig.status != 200)
+    else if (sig_url[0] && (http_get_verified(sig_url, &sig) != 0 || sig.status != 200))
         snprintf(err, sizeof err, "can't download the release signature: %s", sig.error);
     else if (http_download_verified(elf_url, path, progress_cb, NULL, &dl) != 0)
         snprintf(err, sizeof err, "can't download %s: %s", plat_info()->payload, dl.error);
@@ -328,8 +339,8 @@ int update_install(char *err, int en) {
     else if (busy(g_state)) snprintf(err, (size_t)en, "an update check or install is already running");
     else if (!g_latest[0] || !newer_than(g_latest, APP_VERSION)) snprintf(err, (size_t)en, "no newer version found, check again first");
     else if (!strcmp(g_pending, g_latest)) snprintf(err, (size_t)en, "%s is already installed and starts with the next jailbreak", g_latest);
-    else if (!g_elf_url[0] || !g_manifest_url[0] || !g_sig_url[0])
-        snprintf(err, (size_t)en, "release %s isn't signed for in-app updates, download it from GitHub instead", g_latest);
+    else if (!g_elf_url[0] || !g_manifest_url[0])
+        snprintf(err, (size_t)en, "release %s has no manifest for in-app updates, download it from GitHub instead", g_latest);
     else rc = 0;
     if (rc == 0) {
         g_state = U_DOWNLOADING;
@@ -361,7 +372,8 @@ cJSON *update_status(void) {
     cJSON_AddStringToObject(j, "latest", g_latest);
     cJSON_AddBoolToObject(j, "available", g_latest[0] && newer_than(g_latest, APP_VERSION) && strcmp(g_pending, g_latest) != 0);
     cJSON_AddStringToObject(j, "pending", g_pending);
-    cJSON_AddBoolToObject(j, "signed", g_manifest_url[0] && g_sig_url[0] && g_elf_url[0]);
+    /* Installable from the app: a manifest is enough, signed or not. */
+    cJSON_AddBoolToObject(j, "signed", g_manifest_url[0] && g_elf_url[0]);
     cJSON_AddStringToObject(j, "notes", g_notes ? g_notes : "");
     cJSON_AddStringToObject(j, "published_at", g_published);
     cJSON_AddStringToObject(j, "release_url", g_page_url);

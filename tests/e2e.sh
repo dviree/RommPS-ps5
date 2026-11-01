@@ -510,7 +510,8 @@ grep -q "Sunshine (USA).iso: RomM keeps its saves as gci (01-GMSE-super_mario_su
 echo "13. in-app update: only a correctly signed release installs"
 SIGN="$ROOT/build/host/release-sign"
 upd() { curl -sf "$API/api/update" | python3 -c "import json,sys; u=json.load(sys.stdin); print(u['$1'])"; }
-# Publishes a release; $1 says what to break: tamper, wrongkey, unsigned, ps4 or nothing.
+# Publishes a release; $1 says what to break: tamper, wrongkey, unsigned (no manifest),
+# nosigtamper (a manifest but no signature, and the payload changed), ps4 or nothing.
 publish() {
   rm -f "$REL"/*; printf '\x7fELF new-payload %s' "$RANDOM" > "$REL/romm-sync.elf"
   "$SIGN" manifest v9.9.9 "$REL/romm-sync.elf" > "$REL/manifest.json"
@@ -519,8 +520,9 @@ publish() {
   local key; key="$(cat "$ROOT/tests/update-test.key")"
   [[ "$1" == wrongkey ]] && key="$("$SIGN" keygen | sed -n 's/^secret: //p')"
   RELEASE_SIGNING_KEY="$key" "$SIGN" sign "$REL/manifest.json" > "$REL/manifest.sig" 2>/dev/null
-  [[ "$1" == tamper ]] && python3 -c "import sys; p=sys.argv[1]; b=bytearray(open(p,'rb').read()); b[-1]^=1; open(p,'wb').write(b)" "$REL/romm-sync.elf"
+  [[ "$1" == tamper || "$1" == nosigtamper ]] && python3 -c "import sys; p=sys.argv[1]; b=bytearray(open(p,'rb').read()); b[-1]^=1; open(p,'wb').write(b)" "$REL/romm-sync.elf"
   local names='"romm-sync.elf", "manifest.json", "manifest.sig"'; [[ "$1" == unsigned ]] && names='"romm-sync.elf"'
+  [[ "$1" == nosigtamper ]] && names='"romm-sync.elf", "manifest.json"'
   python3 - "$REL" "http://127.0.0.1:$MOCK_PORT/_github/assets" "$names" <<'PY'
 import json, sys
 d, base, names = sys.argv[1], sys.argv[2], json.loads("[" + sys.argv[3] + "]")
@@ -536,10 +538,12 @@ install_err() { # installs and prints the error it ends with, or the state it re
   for _ in $(seq 1 40); do local s; s="$(upd state)"; [[ "$s" == error ]] && { upd error; return; }; [[ "$s" == restarting ]] && { echo restarting; return; }; sleep 0.5; done
   echo "timeout: $(upd state)"
 }
-publish tamper;   r="$(install_err)"; [[ "$r" == *"signed checksum"* ]] || fail "tampered payload: $r"
+publish tamper;   r="$(install_err)"; [[ "$r" == *"match its checksum"* ]] || fail "tampered payload: $r"
 publish wrongkey; r="$(install_err)"; [[ "$r" == *"signature doesn't match"* ]] || fail "untrusted key: $r"
 publish unsigned; r="$(install_err)"; [[ "$r" == refused ]] || fail "unsigned release must be refused: $r"
 publish ps4;      r="$(install_err)"; [[ "$r" == *"manifest is for romm-sync-ps4.elf"* ]] || fail "another console's payload: $r"
+# Unsigned (this fork without its signing key): the manifest's checksum still has to match.
+publish nosigtamper; r="$(install_err)"; [[ "$r" == *"match its checksum"* ]] || fail "an unsigned release with a changed payload: $r"
 [[ "$(cat "$T/etaHEN/payloads/romm-sync.elf")" == old-payload && ! -f "$T/data/launched.elf" ]] || fail "a rejected update touched the payload"
 publish ok;       r="$(install_err)"; [[ "$r" == restarting ]] || fail "good update: $r"
 for _ in $(seq 1 10); do [[ -f "$T/data/launched.elf" ]] && break; sleep 0.5; done

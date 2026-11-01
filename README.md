@@ -160,7 +160,7 @@ If you are interested in downloading PS4 and PS5 games from your RomM server, Ro
 
 RommPS can also fetch PS5 games itself, like a store: with a USB drive in the PS5, setup and the Emulators page offer **PS5 games (USB homebrew)**. Turn it on and games from RomM's `ps5` platform (the `roms/ps5` folder of your library, e.g. `/volume1/games/roms/ps5`) download straight to `/mnt/usb0/homebrew`, a folder game file by file. Change the folder on the Emulators page if your drive is elsewhere. Each game shows its format in the library (FPKG, PS4 PKG, DLC, LZ4, exFAT, FFPKG, FFPFS or Game folder; a .pkg is told apart by a CUSA title id or "DLC" in its name), so a game you keep in two formats shows as two cards. Keep each format as its own file or folder in `roms/ps5` so RomM lists them apart. It downloads games only, no saves.
 
-This fork's RommPS also updates itself on the PS5 from [its releases](https://github.com/dviree/RommPS-ps5/releases): with "Check for updates daily" on, a new release installs by itself once no game, sync or download is running.
+This fork's RommPS also updates on the PS5 from [its releases](https://github.com/dviree/RommPS-ps5/releases), like Overdrive: with "Check for updates daily" on, it tells you when there's a new one, and **Install** in Settings downloads it, checks it against the release's checksum and restarts into it. This fork's releases aren't signed unless the `RELEASE_SIGNING_KEY` secret is set; a signed one installs by itself.
 
 ## Web UI
 
